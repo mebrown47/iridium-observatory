@@ -46,12 +46,22 @@ SDR / IQ File / ZMQ SUB / VITA 49
   |    |  BCH(31,21) syndrome check + 2-bit error correction
   |    |  IRA: sat_id, beam_id, XYZ→lat/lon/alt, paging TMSIs
   |    |  IBC: sat_id, beam_id, timeslot, Iridium time counter
+  |    |  MSG: messaging/pager channel (BCH poly 1897), RIC, 7-bit ASCII / BCD text
+  |    |
+  |    +--→ [Frame Classifier]   -- classify_frame_label() (when --web)
+  |    |    |  Labels every demod frame by type for the web histogram:
+  |    |    |  IRA/IBC/MSG (frame_decode) + IDA + LCW types
+  |    |    |  (VOC/IIP/ISY/IU3/IU6 via ida_lcw_ft) + ITL header + RAW
+  |    |    |  IIP confirmed by CRC-24 (ida_iip_decode)
+  |    |    |  Diagnostics: UL ft6/7 IDA-decode failures -> IDA_UL_FAIL bucket;
+  |    |    |  UW-check failures (pre-classification) counted by direction
   |    |
   |    +--→ [Web Map Server]   -- background thread (when --web)
   |    |    |  HTTP server on configurable port (default 8888)
   |    |    |  SSE stream at 1 Hz with JSON state snapshots
   |    |    |  Embedded Leaflet.js + OpenStreetMap map page
-  |    |    |  Mutex-protected shared state (RA circular buffer, sat list)
+  |    |    |  Mutex-protected shared state (RA buffer, sat list, pager feed)
+  |    |    |  UI: ring-alert map, ACARS + Pager(MSG) tabs, frame-type histogram
   |    |
   |    +--→ [Doppler Solver]   -- inline (when --position)
   |         |  Iterated weighted least-squares from IBC/IRA frequency offsets
@@ -96,8 +106,8 @@ SDR / IQ File / ZMQ SUB / VITA 49
 | `burst_downmix.c/h` | Per-burst downmix pipeline (CFO, LPF, RRC, correlation) | 922 | Port of gr-iridium `burst_downmix_impl.cc` |
 | `qpsk_demod.c/h` | QPSK/DQPSK demodulator (PLL, Gardner timing recovery) | 595 | Port of gr-iridium `iridium_qpsk_demod_impl.cc` |
 | `frame_output.c/h` | RAW + parsed IDA format printer (ZMQ PUB output) | 399 | Port of gr-iridium `iridium_frame_printer_impl.cc` + new |
-| `frame_decode.c/h` | Iridium frame decoder (BCH, de-interleave, IRA/IBC) | 637 | New (based on iridium-toolkit bitsparser.py) |
-| `ida_decode.c/h` | IDA frame decoder (LCW, Chase BCH, descramble, reassembly) | 847 | New (based on iridium-toolkit bitsparser.py + ida.py) |
+| `frame_decode.c/h` | Iridium frame decoder (BCH, de-interleave, IRA/IBC/MSG pager) | 840 | New (based on iridium-toolkit bitsparser.py) |
+| `ida_decode.c/h` | IDA frame decoder (LCW, Chase BCH, descramble, reassembly, LCW classify, IIP CRC) | 920 | New (based on iridium-toolkit bitsparser.py + ida.py) |
 | `sbd_acars.c/h` | SBD/ACARS decoder (libacars-2, feed output, position extraction) | 1892 | New (CEMAXECUTER LLC) |
 | `doppler_pos.c/h` | Doppler position solver (IWLS, height aiding, clustering) | 1385 | New (CEMAXECUTER LLC) |
 | `gsmtap.c/h` | GSMTAP/LAPDm UDP output for Wireshark | 146 | New |
@@ -786,6 +796,29 @@ Current results (60-second USRP B210 capture, 10 MHz, 1622 MHz center):
 The internal `--parsed` IDA decoder recovers 37% more IDA frames than the external iridium-parser.py (693 vs 507) thanks to Chase soft-decision BCH decoding and Gardner timing recovery.
 
 The threshold is relative to the adaptive noise floor, so it works equally well in clean and noisy environments.
+
+## Frame Type Coverage
+
+Every demodulated frame is classified; the high-value types are fully decoded.
+
+| Type | Channel | Status | Notes |
+|------|---------|--------|-------|
+| IRA | simplex | Decoded | ring alert: sat/beam/position/paging |
+| IBC | duplex | Decoded | broadcast: sat/beam/timeslot/time |
+| MSG | simplex | Decoded | pager text (ASCII/BCD), BCH poly 1897 — validated vs iridium-toolkit |
+| IDA | duplex | Decoded | data/SBD → ACARS (libacars), GSMTAP, reassembly |
+| IIP | duplex | Decoded | IP-over-PPP, CRC-24 validated (`ida_iip_decode`) |
+| ISY | duplex | Classified | sync frame, no decodable payload |
+| ITL | simplex | Classified | time/location PRS telemetry (deep decode needs large PRS tables) |
+| VOC | duplex | Classified | voice; audio needs the proprietary AMBE vocoder (out of scope, as in iridium-toolkit) |
+| IIQ/IIR/IIU | duplex | Classified as RAW | IP variants requiring a Reed-Solomon codec (not implemented) |
+| IU3/IU6 | duplex | Classified | inband signalling, structure not publicly documented |
+
+Classification feeds the web map's frame-type histogram. The decode/classify split mirrors what iridium-toolkit itself surfaces in real time (it also leaves voice audio, ITL PRS, and the RS-coded IP variants to offline/auxiliary tooling).
+
+### MSG decoder validation
+
+The MSG (pager) decoder was validated by using iridium-toolkit's `iridium-parser.py` as an oracle: a round-trip encoder builds MSG frames, and identical bits are fed to both the reference parser and the C decoder. They agree on RIC, format, sequence, and text across varied messages and under injected bit errors (BCH t=2). The IIP CRC-24 was likewise verified bit-exact against `crcmod`. Key gotcha: `RAW`-prefixed lines are symbol-reversed by the parser; the C demod output and the parser's post-reverse stream share one convention, and the 24-bit access code + 32-bit messaging header are symbol-reverse-invariant (all 00/11 pairs).
 
 ## Known Issues
 

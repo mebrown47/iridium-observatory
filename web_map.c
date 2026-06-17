@@ -52,6 +52,8 @@
 #define MAX_SSE_CLIENTS  8
 #define MAX_ACARS_MSGS   100
 #define ACARS_TEXT_MAX   256
+#define MAX_PAGER_MSGS   200
+#define PAGER_TEXT_MAX   168
 #define JSON_BUF_SIZE    131072
 #define HTTP_BUF_SIZE    4096
 
@@ -123,6 +125,16 @@ typedef struct {
     uint64_t timestamp;
 } acars_msg_t;
 
+/* Recent pager (MSG/IMS) message entry for the messaging feed tab */
+typedef struct {
+    int ric;            /* pager id */
+    int format;         /* 5=ASCII, 3=BCD */
+    int seq;
+    int csum_ok;
+    char text[PAGER_TEXT_MAX];
+    uint64_t timestamp;
+} pager_msg_t;
+
 static struct {
     pthread_mutex_t lock;
     ra_point_t ra[MAX_RA_POINTS];
@@ -141,6 +153,9 @@ static struct {
     acars_msg_t acars[MAX_ACARS_MSGS];
     int acars_head;
     int acars_count;
+    pager_msg_t pager[MAX_PAGER_MSGS];
+    int pager_head;
+    int pager_count;
     unsigned long total_ira;
     unsigned long total_ibc;
     unsigned long total_pages;
@@ -148,6 +163,9 @@ static struct {
     unsigned long total_mt;
     unsigned long total_aircraft;
     unsigned long total_acars_msgs;
+    unsigned long total_msg;       /* decoded pager (MSG) messages */
+    unsigned long type_counts[16]; /* per-frame-type histogram (see ftype_names) */
+    unsigned long uw_fail[3];      /* UW-check failures by dir: [0]=DL [1]=UL [2]=other */
     /* Doppler positioning receiver estimate */
     double rx_lat, rx_lon;
     double rx_hdop;
@@ -550,6 +568,58 @@ void web_map_add_acars_message(const char *reg, const char *flight,
     pthread_mutex_unlock(&state.lock);
 }
 
+/* Frame-type histogram labels. Order is fixed and mirrored in the JSON and
+ * the HTML panel. Index returned by ftype_index(); -1 if unknown. */
+static const char *ftype_names[] = {
+    "IRA", "IBC", "MSG", "IDA", "IDA_UL_FAIL",
+    "ISY", "IIP", "VOC", "ITL", "IU3", "IU6", "RAW"
+};
+#define N_FTYPES ((int)(sizeof(ftype_names) / sizeof(ftype_names[0])))
+
+void web_map_count_type(const char *label)
+{
+    if (!label) return;
+    int idx = -1;
+    for (int i = 0; i < N_FTYPES; i++)
+        if (strcmp(label, ftype_names[i]) == 0) { idx = i; break; }
+    if (idx < 0) return;
+    pthread_mutex_lock(&state.lock);
+    state.type_counts[idx]++;
+    pthread_mutex_unlock(&state.lock);
+}
+
+void web_map_count_uw_fail(ir_direction_t direction)
+{
+    int i = (direction == DIR_DOWNLINK) ? 0 :
+            (direction == DIR_UPLINK)   ? 1 : 2;
+    pthread_mutex_lock(&state.lock);
+    state.uw_fail[i]++;
+    pthread_mutex_unlock(&state.lock);
+}
+
+void web_map_add_msg(const msg_data_t *msg, uint64_t timestamp_ns)
+{
+    if (!msg || !msg->text[0]) return;
+
+    pthread_mutex_lock(&state.lock);
+
+    pager_msg_t *m = &state.pager[state.pager_head];
+    m->ric = msg->ric;
+    m->format = msg->format;
+    m->seq = msg->seq;
+    m->csum_ok = msg->csum_ok;
+    strncpy(m->text, msg->text, sizeof(m->text) - 1);
+    m->text[sizeof(m->text) - 1] = '\0';
+    m->timestamp = timestamp_ns;
+
+    state.pager_head = (state.pager_head + 1) % MAX_PAGER_MSGS;
+    if (state.pager_count < MAX_PAGER_MSGS)
+        state.pager_count++;
+    state.total_msg++;
+
+    pthread_mutex_unlock(&state.lock);
+}
+
 /* ---- JSON serialization ---- */
 
 static int build_json(char *buf, int bufsize)
@@ -706,6 +776,47 @@ static int build_json(char *buf, int bufsize)
     }
     off += snprintf(buf + off, bufsize - off, "]");
 
+    /* Recent pager (MSG) messages (chronological feed) */
+    off += snprintf(buf + off, bufsize - off,
+        ",\"total_msg\":%lu,\"msg\":[", state.total_msg);
+    int n_pg = state.pager_count;
+    int pg_emit = 0;
+    for (int i = n_pg - 1; i >= 0 && off < bufsize - 1024; i--) {
+        int idx = (state.pager_head - 1 - (n_pg - 1 - i) + MAX_PAGER_MSGS)
+                  % MAX_PAGER_MSGS;
+        const pager_msg_t *m = &state.pager[idx];
+        if (pg_emit > 0)
+            off += snprintf(buf + off, bufsize - off, ",");
+        char esc[PAGER_TEXT_MAX * 2 + 1];
+        int e = 0;
+        for (int k = 0; m->text[k] && e < (int)sizeof(esc) - 2; k++) {
+            char c = m->text[k];
+            if (c == '"' || c == '\\') esc[e++] = '\\';
+            if (c < 0x20 || c == 0x7f) c = ' ';
+            esc[e++] = c;
+        }
+        esc[e] = '\0';
+        off += snprintf(buf + off, bufsize - off,
+            "{\"t\":%llu,\"ric\":%d,\"fmt\":%d,\"seq\":%d,\"ok\":%d,\"txt\":\"%s\"}",
+            (unsigned long long)(m->timestamp / 1000000000ULL),
+            m->ric, m->format, m->seq, m->csum_ok, esc);
+        pg_emit++;
+    }
+    off += snprintf(buf + off, bufsize - off, "]");
+
+    /* Frame-type histogram */
+    off += snprintf(buf + off, bufsize - off, ",\"ftypes\":{");
+    for (int i = 0; i < N_FTYPES; i++) {
+        off += snprintf(buf + off, bufsize - off, "%s\"%s\":%lu",
+                        i ? "," : "", ftype_names[i], state.type_counts[i]);
+    }
+    off += snprintf(buf + off, bufsize - off, "}");
+
+    /* UW-check failures by direction (bursts dropped before classification) */
+    off += snprintf(buf + off, bufsize - off,
+        ",\"uw_fail\":{\"DL\":%lu,\"UL\":%lu,\"other\":%lu}",
+        state.uw_fail[0], state.uw_fail[1], state.uw_fail[2]);
+
     off += snprintf(buf + off, bufsize - off, "}");
 
     pthread_mutex_unlock(&state.lock);
@@ -748,6 +859,9 @@ static const char HTML_PAGE[] =
 "  letter-spacing:1px;color:#94a3b8;margin-bottom:2px}\n"
 ".legend-row{display:flex;align-items:center;gap:8px}\n"
 ".legend-swatch{display:inline-block}\n"
+"#ftypes-box{top:10px;bottom:auto;line-height:1.5;min-width:120px}\n"
+"#ftypes .legend-row{justify-content:space-between;gap:14px}\n"
+"#ftypes .ftc{font-weight:600;color:#38bdf8;font-variant-numeric:tabular-nums}\n"
 ".leaflet-container{background:#0f172a}\n"
 ".leaflet-control-layers{background:rgba(15,23,42,0.92)!important;\n"
 "  color:#e2e8f0!important;border:1px solid #334155!important}\n"
@@ -764,6 +878,13 @@ static const char HTML_PAGE[] =
 "#acars-side .header .hint{display:block;font-size:9px;\n"
 "  text-transform:none;letter-spacing:0;color:#64748b;\n"
 "  font-weight:400;margin-top:2px}\n"
+"#acars-side .tabs{display:flex;position:sticky;top:0;z-index:11;\n"
+"  background:#1e293b;border-bottom:1px solid #334155}\n"
+"#acars-side .tab{flex:1;text-align:center;padding:7px 0;cursor:pointer;\n"
+"  font-size:10px;text-transform:uppercase;letter-spacing:1px;\n"
+"  color:#64748b;font-weight:600;border-bottom:2px solid transparent}\n"
+"#acars-side .tab.active{color:#38bdf8;border-bottom-color:#38bdf8}\n"
+"html.light #acars-side .tabs{background:#f1f5f9;border-bottom-color:#cbd5e1}\n"
 ".amsg{padding:6px 10px;border-bottom:1px solid #1e293b;line-height:1.5}\n"
 ".amsg:hover{background:#1e293b}\n"
 ".amsg .row1{display:flex;gap:8px;color:#64748b;font-size:10px;\n"
@@ -824,6 +945,7 @@ static const char HTML_PAGE[] =
 "  <span class=\"stat\">Sats <span id=\"n-sats\" class=\"val\">0</span></span>\n"
 "  <span class=\"stat\">IRA <span id=\"n-ira\" class=\"val\">0</span></span>\n"
 "  <span class=\"stat\">ACARS <span id=\"n-acars\" class=\"val\">0</span></span>\n"
+"  <span class=\"stat\">MSG <span id=\"n-msg\" class=\"val\">0</span></span>\n"
 "  <button id=\"theme-toggle\" onclick=\"toggleTheme()\" title=\"Toggle light/dark\">\\u263E</button>\n"
 "  <span id=\"status\" style=\"color:#64748b\">connecting...</span>\n"
 "</div>\n"
@@ -858,11 +980,27 @@ static const char HTML_PAGE[] =
 "    Receiver position\n"
 "  </div>\n"
 "</div>\n"
+"<div class=\"legend\" id=\"ftypes-box\">\n"
+"  <div class=\"legend-title\">Frame types</div>\n"
+"  <div id=\"ftypes\"><div class=\"legend-row\">waiting...</div></div>\n"
+"</div>\n"
 "  </div>\n"
 "  <div id=\"acars-side\">\n"
-"    <div class=\"header\">Recent ACARS<span class=\"hint\">heartbeats filtered</span></div>\n"
-"    <div id=\"acars-list\">\n"
-"      <div class=\"no-msgs\">No ACARS messages yet<br>(heartbeats filtered)</div>\n"
+"    <div class=\"tabs\">\n"
+"      <span id=\"tab-acars\" class=\"tab active\" onclick=\"showTab('acars')\">ACARS</span>\n"
+"      <span id=\"tab-msg\" class=\"tab\" onclick=\"showTab('msg')\">Pager</span>\n"
+"    </div>\n"
+"    <div id=\"pane-acars\">\n"
+"      <div class=\"header\">Recent ACARS<span class=\"hint\">heartbeats filtered</span></div>\n"
+"      <div id=\"acars-list\">\n"
+"        <div class=\"no-msgs\">No ACARS messages yet<br>(heartbeats filtered)</div>\n"
+"      </div>\n"
+"    </div>\n"
+"    <div id=\"pane-msg\" style=\"display:none\">\n"
+"      <div class=\"header\">Pager messages<span class=\"hint\">simplex MSG/IMS channel</span></div>\n"
+"      <div id=\"msg-list\">\n"
+"        <div class=\"no-msgs\">No pager messages yet</div>\n"
+"      </div>\n"
 "    </div>\n"
 "  </div>\n"
 "</div>\n"
@@ -923,6 +1061,58 @@ static const char HTML_PAGE[] =
 "  box.innerHTML=html;\n"
 "}\n"
 "\n"
+"function renderFtypes(ft,uw){\n"
+"  var box=document.getElementById('ftypes');\n"
+"  if(!ft){return;}\n"
+"  var keys=Object.keys(ft);\n"
+"  var total=0; keys.forEach(function(k){total+=ft[k];});\n"
+"  var html='';\n"
+"  if(uw){\n"
+"    var ulc=(uw.UL>0)?'#f87171':'#64748b';\n"
+"    html+='<div class=\"legend-row\" title=\"bursts demodulated but no unique word matched (pre-classification)\">'+\n"
+"      '<span>UW-fail DL/UL</span><span class=\"ftc\">'+\n"
+"      '<span style=\"color:#64748b\">'+(uw.DL||0)+'</span>/'+\n"
+"      '<span style=\"color:'+ulc+'\">'+(uw.UL||0)+'</span></span></div>';\n"
+"  }\n"
+"  keys.forEach(function(k){\n"
+"    if(ft[k]>0){\n"
+"      var c=(k==='IDA_UL_FAIL')?'#f87171':'#38bdf8';\n"
+"      html+='<div class=\"legend-row\"><span>'+k+'</span>'+\n"
+"        '<span class=\"ftc\" style=\"color:'+c+'\">'+ft[k]+'</span></div>';\n"
+"    }\n"
+"  });\n"
+"  box.innerHTML=html||'<div class=\"legend-row\">waiting...</div>';\n"
+"}\n"
+"\n"
+"function showTab(name){\n"
+"  var a=name==='acars';\n"
+"  document.getElementById('pane-acars').style.display=a?'':'none';\n"
+"  document.getElementById('pane-msg').style.display=a?'none':'';\n"
+"  document.getElementById('tab-acars').classList.toggle('active',a);\n"
+"  document.getElementById('tab-msg').classList.toggle('active',!a);\n"
+"}\n"
+"\n"
+"function renderMsg(msgs){\n"
+"  var box=document.getElementById('msg-list');\n"
+"  if(!msgs||msgs.length===0){\n"
+"    box.innerHTML='<div class=\"no-msgs\">No pager messages yet</div>';\n"
+"    return;\n"
+"  }\n"
+"  var html='';\n"
+"  msgs.forEach(function(m){\n"
+"    var txt=(m.txt||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\n"
+"    html+='<div class=\"amsg\">'+\n"
+"      '<div class=\"row1\">'+\n"
+"      '<span>'+fmtTime(m.t)+'</span>'+\n"
+"      '<span class=\"reg\">RIC '+m.ric+'</span>'+\n"
+"      '<span class=\"lbl\">'+(m.fmt===3?'BCD':'ASCII')+'</span>'+\n"
+"      '<span class=\"dir\">'+(m.ok?'C:OK':'C:--')+'</span>'+\n"
+"      '</div>'+\n"
+"      '<div class=\"txt\">'+txt+'</div></div>';\n"
+"  });\n"
+"  box.innerHTML=html;\n"
+"}\n"
+"\n"
 "var allPages=[];\n"
 "function exportPages(){\n"
 "  if(allPages.length===0){alert('No paging events collected yet.');return;}\n"
@@ -966,9 +1156,12 @@ static const char HTML_PAGE[] =
 "  document.getElementById('n-ac').textContent=d.total_aircraft||0;\n"
 "  document.getElementById('n-pages').textContent=d.total_pages;\n"
 "  document.getElementById('n-acars').textContent=d.total_acars_msgs||0;\n"
+"  document.getElementById('n-msg').textContent=d.total_msg||0;\n"
 "  document.getElementById('status').style.color='#22c55e';\n"
 "  document.getElementById('status').textContent='live';\n"
 "  renderAcars(d.acars||[]);\n"
+"  renderMsg(d.msg||[]);\n"
+"  renderFtypes(d.ftypes,d.uw_fail);\n"
 "\n"
 "  if(popupOpen)return;\n"
 "\n"

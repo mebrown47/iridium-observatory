@@ -568,17 +568,64 @@ static void *frame_consumer_thread(void *arg) {
                 free(demod->llr);
             }
             free(demod);
-        } else if (verbose) {
-            fprintf(stderr, "demod: UW check failed id=%lu freq=%.0f Hz dir=%s\n",
-                    (unsigned long)frame->id, frame->center_frequency,
-                    frame->direction == DIR_DOWNLINK ? "DL" :
-                    frame->direction == DIR_UPLINK ? "UL" : "??");
+        } else {
+            /* UW check failed: the burst was detected and demodulated but no
+             * unique word matched, so it never reaches classify_frame_label().
+             * Count it by direction -- this is the earliest-stage signal for
+             * whether UL bursts are present but being rejected at the demod. */
+            if (web_enabled)
+                web_map_count_uw_fail(frame->direction);
+            if (verbose)
+                fprintf(stderr, "demod: UW check failed id=%lu freq=%.0f Hz dir=%s\n",
+                        (unsigned long)frame->id, frame->center_frequency,
+                        frame->direction == DIR_DOWNLINK ? "DL" :
+                        frame->direction == DIR_UPLINK ? "UL" : "??");
         }
 
         free(frame->samples);
         free(frame);
     }
     return NULL;
+}
+
+/* Classify a demodulated frame into a frame-type label for the web histogram.
+ * `dec`/`dtype` come from the prior frame_decode() call (simplex IRA/IBC/MSG);
+ * `ida_ok` from ida_decode(). Duplex/LCW types are recovered from the LCW
+ * frame-type, IIP is confirmed by its CRC, and the simplex time-location
+ * header is matched as a fallback. */
+static const char *classify_frame_label(const demod_frame_t *demod,
+                                        int dec, frame_type_t dtype, int ida_ok)
+{
+    if (dec && dtype == FRAME_IRA) return "IRA";
+    if (dec && dtype == FRAME_IBC) return "IBC";
+    if (dec && dtype == FRAME_MSG) return "MSG";
+    if (ida_ok)                    return "IDA";
+
+    int ft = ida_lcw_ft(demod);
+    switch (ft) {
+    case 0: return "VOC";
+    case 1: { iip_info_t iip; return ida_iip_decode(demod, &iip) ? "IIP" : "RAW"; }
+    case 2: return "IDA";
+    case 3: return "IU3";
+    case 6: case 7:
+        /* ft 6/7 are uplink-IDA candidates (ida_decode.c). Reaching here means
+         * the burst passed the UW check and its LCW decoded, but the IDA
+         * payload decode failed. On UL, isolate that population explicitly so
+         * "UL IDA present but failing decode" is distinguishable from genuine
+         * DL sync (ISY) / U6 frames. */
+        if (demod->direction == DIR_UPLINK) return "IDA_UL_FAIL";
+        return (ft == 7) ? "ISY" : "IU6";
+    default: break;
+    }
+
+    /* Simplex time-location frame: header is "11" followed by zeros. */
+    if (demod->n_bits >= 24 + 22 && demod->bits[24] && demod->bits[25]) {
+        int zeros = 1;
+        for (int b = 26; b < 24 + 22; b++)
+            if (demod->bits[b]) { zeros = 0; break; }
+        if (zeros) return "ITL";
+    }
+    return "RAW";
 }
 
 /* ---- Output thread: frame decode, web map, ACARS, GSMTAP (slow path) ---- */
@@ -594,7 +641,8 @@ static void *output_thread_fn(void *arg) {
 
         if (web_enabled || position_enabled) {
             decoded_frame_t decoded;
-            if (frame_decode(demod, &decoded)) {
+            int dec = frame_decode(demod, &decoded);
+            if (dec) {
                 if (decoded.type == FRAME_IRA) {
                     if (web_enabled) {
                         web_map_add_ra(&decoded.ira, decoded.timestamp,
@@ -620,8 +668,16 @@ static void *output_thread_fn(void *arg) {
                 } else if (decoded.type == FRAME_IBC) {
                     if (web_enabled)
                         web_map_add_sat(&decoded.ibc, decoded.timestamp);
+                } else if (decoded.type == FRAME_MSG) {
+                    if (web_enabled)
+                        web_map_add_msg(&decoded.msg, decoded.timestamp);
                 }
             }
+
+            /* Frame-type histogram: classify every demodulated frame. */
+            if (web_enabled)
+                web_map_count_type(
+                    classify_frame_label(demod, dec, decoded.type, item->ida_ok));
         }
 
         if (gsmtap_enabled) {

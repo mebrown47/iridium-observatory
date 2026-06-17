@@ -5,3 +5,5 @@ build/
 .cache/
 compile_commands.json
 test-data/
+.claude/
+resume_claude.txt

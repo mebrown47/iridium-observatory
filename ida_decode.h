@@ -84,6 +84,24 @@ void ida_decode_init(void);
  * Returns 1 if IDA detected, fills burst. 0 otherwise. */
 int ida_decode(const demod_frame_t *frame, ida_burst_t *burst);
 
+/* Decode only the LCW frame type (ft 0-7) for classification, or -1.
+ * ft map: 0=voice, 1=IP, 2=IDA/data, 3=inband, 6=U6, 7=sync. */
+int ida_lcw_ft(const demod_frame_t *frame);
+
+/* Decoded IIP (IP-over-PPP) frame fields. */
+typedef struct {
+    int ip_hdr;             /* header byte (0x04=DATA, 0x01=ACK/IDLE, ...) */
+    int ip_seq;
+    int ip_ack;
+    int ip_cs;              /* running checksum byte */
+    uint8_t ip_data[32];    /* payload_r[4:36] */
+    int ip_data_len;
+} iip_info_t;
+
+/* Decode an LCW ft==1 frame as IIP. Returns 1 (CRC-valid) and fills out,
+ * or 0 (not IP, or an RS-coded IIQ/IIR/IIU variant). */
+int ida_iip_decode(const demod_frame_t *frame, iip_info_t *out);
+
 /* Feed a decoded burst into the reassembly engine.
  * Calls cb when a complete message is assembled. Returns 1 if emitted. */
 int ida_reassemble(ida_context_t *ctx, const ida_burst_t *burst,

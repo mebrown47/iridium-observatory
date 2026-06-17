@@ -21,6 +21,7 @@ typedef enum {
     FRAME_UNKNOWN = 0,
     FRAME_IRA,
     FRAME_IBC,
+    FRAME_MSG,              /* messaging / pager channel (IMS/MSG) */
 } frame_type_t;
 
 typedef struct {
@@ -46,12 +47,25 @@ typedef struct {
 } ibc_data_t;
 
 typedef struct {
+    int ric;                /* receiver/pager id */
+    int format;             /* 5 = ASCII, 3 = BCD */
+    int seq;                /* message sequence 0-61 */
+    int ctr;                /* fragment counter (multi-frame messages) */
+    int ctr_max;            /* highest fragment counter for this message */
+    int csum_ok;            /* packet checksum verified */
+    int block;              /* super-frame block number */
+    int frame;              /* frame number within block */
+    char text[160];         /* decoded ASCII text, or BCD hex digits */
+} msg_data_t;
+
+typedef struct {
     frame_type_t type;
     uint64_t timestamp;
     double frequency;
     union {
         ira_data_t ira;
         ibc_data_t ibc;
+        msg_data_t msg;
     };
 } decoded_frame_t;
 

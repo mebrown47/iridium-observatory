@@ -541,6 +541,80 @@ static void format_lcw_header(int ft, const lcw_t *lcw, char *out, int outsz)
     snprintf(out, outsz, "%-110s ", raw);
 }
 
+/* ---- LCW-only classification ----
+ * Decode just the Link Control Word to recover the frame type (ft) without
+ * the full payload descramble. Used by the web map's frame-type histogram.
+ * Returns ft (0-7) or -1 if the LCW does not decode. */
+int ida_lcw_ft(const demod_frame_t *frame)
+{
+    if (frame->n_bits < 24 + 46)
+        return -1;
+    if (frame->direction != DIR_DOWNLINK && frame->direction != DIR_UPLINK)
+        return -1;
+    lcw_t lcw;
+    if (!decode_lcw(frame->bits + 24, frame->n_bits - 24, &lcw))
+        return -1;
+    return lcw.ft;
+}
+
+/* ---- IIP (IP-over-PPP) decode ----
+ * CRC-24 over the 39 bit-reversed payload bytes. Constants match
+ * iridium-toolkit's iip_crc24 (crcmod poly 0x1BBA1B5, rev=True), verified
+ * bit-exact against crcmod over random inputs. */
+#define IIP_REFPOLY  0xad85ddu
+#define IIP_INIT     0xffffffu
+#define IIP_XOROUT   0x0c91b6u
+#define IIP_NBYTES   39          /* 312 descrambled bits / 8 */
+
+static uint32_t iip_crc24(const uint8_t *bytes, int n)
+{
+    uint32_t crc = IIP_INIT;
+    for (int i = 0; i < n; i++) {
+        crc ^= bytes[i];
+        for (int k = 0; k < 8; k++)
+            crc = (crc & 1) ? (crc >> 1) ^ IIP_REFPOLY : crc >> 1;
+    }
+    return (crc ^ IIP_XOROUT) & 0xFFFFFFu;
+}
+
+/* Decode an IP-channel (LCW ft==1) frame. Returns 1 and fills `out` only when
+ * the CRC validates (a true IIP frame); 0 for non-IP frames or the RS-coded
+ * IIQ/IIR/IIU variants this decoder does not handle. */
+int ida_iip_decode(const demod_frame_t *frame, iip_info_t *out)
+{
+    if (frame->n_bits < 24 + 46 + 312)
+        return 0;
+    if (frame->direction != DIR_DOWNLINK && frame->direction != DIR_UPLINK)
+        return 0;
+    lcw_t lcw;
+    if (!decode_lcw(frame->bits + 24, frame->n_bits - 24, &lcw))
+        return 0;
+    if (lcw.ft != 1)
+        return 0;
+
+    /* payload_r: 312 bits after the LCW sliced into 39 bytes, each byte read
+     * LSB-first (iridium-toolkit reverses the bit string before int()). */
+    const uint8_t *d = frame->bits + 24 + 46;
+    uint8_t pr[IIP_NBYTES];
+    for (int i = 0; i < IIP_NBYTES; i++) {
+        uint8_t v = 0;
+        for (int k = 0; k < 8; k++)
+            v |= (uint8_t)(d[i * 8 + k] & 1) << k;
+        pr[i] = v;
+    }
+    if (iip_crc24(pr, IIP_NBYTES) != 0)
+        return 0;
+
+    memset(out, 0, sizeof(*out));
+    out->ip_hdr = pr[0];
+    out->ip_seq = pr[1];
+    out->ip_ack = pr[2];
+    out->ip_cs  = pr[3];
+    memcpy(out->ip_data, pr + 4, 32);   /* payload_r[4:36] */
+    out->ip_data_len = 32;
+    return 1;
+}
+
 /* ---- Main IDA decode ---- */
 
 int ida_decode(const demod_frame_t *frame, ida_burst_t *burst)

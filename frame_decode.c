@@ -34,7 +34,15 @@
 
 /* BCH polynomials */
 #define BCH_POLY_RA   1207   /* BCH(31,21) t=2, for IRA/IBC data blocks */
+#define BCH_POLY_MS   1897   /* BCH(31,21) t=2, for messaging (MSG) data blocks */
 #define BCH_POLY_HDR  29     /* BCH(7,3) t=1, for IBC header */
+
+/* 32-bit messaging channel header (after the 24-bit access code).
+ * iridium-toolkit: header_messaging = "00110011111100110011001111110011" */
+static const uint8_t header_messaging[32] = {
+    0,0,1,1,0,0,1,1,1,1,1,1,0,0,1,1,
+    0,0,1,1,0,0,1,1,1,1,1,1,0,0,1,1
+};
 
 /* BCH polynomial bit lengths */
 #define BCH_POLY_RA_BITS  11  /* bit_length(1207) = 11, syndrome = 10 bits */
@@ -59,6 +67,8 @@ static const uint8_t access_ul[] = {
 /* Syndrome lookup tables for BCH error correction */
 /* poly=1207: 1024 entries (10-bit syndrome), each stores error locator XOR mask */
 static struct { int errs; uint32_t locator; } syn_ra[1024];
+/* poly=1897: 1024 entries (10-bit syndrome), messaging channel BCH */
+static struct { int errs; uint32_t locator; } syn_ms[1024];
 /* poly=29: 16 entries (4-bit syndrome) */
 static struct { int errs; uint32_t locator; } syn_hdr[16];
 
@@ -132,6 +142,7 @@ static void build_syndrome_table(uint32_t poly, int nbits, int synbits,
 void frame_decode_init(void)
 {
     build_syndrome_table(BCH_POLY_RA, 31, 10, 2, syn_ra, 1024);
+    build_syndrome_table(BCH_POLY_MS, 31, 10, 2, syn_ms, 1024);
     build_syndrome_table(BCH_POLY_HDR, 7, 4, 1, syn_hdr, 16);
 }
 
@@ -363,6 +374,255 @@ static int check_parity32(const uint8_t *block32, const uint8_t *bch_data,
 /* bch_decode_p: superseded by chase_bch_decode_p which includes
  * the same standard BCH decode as its first step. */
 
+/* ---- Messaging (MSG/IMS) channel decode ----
+ *
+ * Ported from iridium-toolkit bitsparser.py:
+ *   IridiumMessage (MS detect + descramble) -> IridiumECCMessage (poly 1897)
+ *   -> IridiumMSMessage (21-bit header) -> IridiumMSMessageBody
+ *   -> IridiumMessagingAscii / IridiumMessagingBCD
+ */
+
+#define MSG_MAX_BLOCKS  64   /* 32-bit de-interleaved blocks per messaging frame */
+
+/* FILL pattern appended to messaging frames (two 32-bit halves). */
+static const char *msg_fill_a = "10100010011100111011111101101101";
+static const char *msg_fill_b = "01010100010001011100001011100110";
+
+static int hamming_str(const uint8_t *bits, const char *pat, int n)
+{
+    int d = 0;
+    for (int i = 0; i < n; i++)
+        if (bits[i] != (pat[i] - '0')) d++;
+    return d;
+}
+
+/* BCH(31,21) decode with poly 1897. block31 = 31 code bits (MSB first).
+ * Writes 21 corrected data bits to out_data and 10 corrected check bits to
+ * out_check. Returns error count (0,1,2) or -1. */
+static int bch_ms_decode(const uint8_t *block31, uint8_t *out_data,
+                         uint8_t *out_check)
+{
+    uint32_t val = bits_to_uint(block31, 31);
+    uint32_t syndrome = gf2_remainder(BCH_POLY_MS, val);
+    int errs = 0;
+
+    if (syndrome != 0) {
+        if (syndrome >= 1024 || syn_ms[syndrome].errs < 0)
+            return -1;
+        val ^= syn_ms[syndrome].locator;
+        errs = syn_ms[syndrome].errs;
+    }
+    uint_to_bits(val >> 10, out_data, BCH_RA_DATA);
+    uint_to_bits(val & 0x3FF, out_check, 10);
+    return errs;
+}
+
+/* big-endian unsigned from a bit array (alias kept local for clarity) */
+static int msbits(const uint8_t *bits, int n)
+{
+    int v = 0;
+    for (int i = 0; i < n; i++)
+        v = (v << 1) | (bits[i] & 1);
+    return v;
+}
+
+/* Packet checksum over body blocks (each 21 bits), per bitsparser msg_checksum().
+ * blocks[] points at the 21-bit body blocks starting from index 1 (RIC block
+ * excluded by caller). Returns 1 if the checksum is consistent. */
+static int msg_checksum_ok(const uint8_t (*blocks)[21], int n_blocks)
+{
+    if (n_blocks < 2) return 0;
+    /* csum_val = reverse(blocks[0][18:21] + blocks[1][1:8]) as 10-bit int */
+    uint8_t cv[10];
+    cv[0] = blocks[0][18]; cv[1] = blocks[0][19]; cv[2] = blocks[0][20];
+    for (int i = 0; i < 7; i++) cv[3 + i] = blocks[1][1 + i];
+    int csum_val = 0;
+    for (int i = 9; i >= 0; i--) csum_val = (csum_val << 1) | cv[i]; /* reversed */
+
+    int csum = 0;
+    for (int idx = 0; idx < n_blocks; idx++) {
+        if (idx != 1) csum += msbits(&blocks[idx][0], 8);
+        csum += msbits(&blocks[idx][8], 8);
+        if (idx != 0) csum += msbits(&blocks[idx][16], 5);
+    }
+    return ((csum_val + csum) % 1024) == 1023;
+}
+
+/* Parse a confirmed messaging frame. data/data_len start after the access code
+ * (data[0:32] already matched header_messaging). Returns 1 if a MSG body with
+ * decodable text was produced, 0 otherwise. */
+static int parse_msg(const uint8_t *data, int data_len, msg_data_t *msg)
+{
+    memset(msg, 0, sizeof(*msg));
+
+    /* ---- Descramble: slice data[32:] into 64-bit blocks, de-interleave each
+     * into two 32-bit blocks. ---- */
+    static __thread uint8_t blk[MSG_MAX_BLOCKS][32];
+    int n_blk = 0;
+    int off = 32;
+    while (off + 64 <= data_len && n_blk + 2 <= MSG_MAX_BLOCKS) {
+        de_interleave(data + off, blk[n_blk], blk[n_blk + 1]);
+        n_blk += 2;
+        off += 64;
+    }
+    if (n_blk < 4)
+        return 0;
+
+    /* Strip trailing FILL blocks (pairs). */
+    while (n_blk >= 2) {
+        const uint8_t *first = blk[n_blk - 2];
+        const uint8_t *second = blk[n_blk - 1];
+        if (hamming_str(first, msg_fill_a, 32) <= 2 &&
+            hamming_str(second, msg_fill_b, 32) <= 2) {
+            n_blk -= 2;
+        } else {
+            break;
+        }
+    }
+    if (n_blk < 2)
+        return 0;
+
+    /* ---- BCH(31,21) poly 1897, parity check, accumulate 21-bit blocks. ---- */
+    static __thread uint8_t body[MSG_MAX_BLOCKS][21];
+    int n_body = 0;
+    for (int i = 0; i < n_blk; i++) {
+        uint8_t d21[21], c10[10];
+        int errs = bch_ms_decode(blk[i], d21, c10);
+        if (errs < 0)
+            break;
+        /* parity over the CORRECTED codeword: data(21)+check(10)+parity(1)
+         * must have even weight. A parity failure with errs>0 means the BCH
+         * correction was spurious, so cut the message here (per bitsparser). */
+        int ones = 0;
+        for (int k = 0; k < 21; k++) ones += d21[k];
+        for (int k = 0; k < 10; k++) ones += c10[k];
+        ones += blk[i][31];
+        if ((ones & 1) && errs > 0)
+            break;
+        memcpy(body[n_body++], d21, 21);
+    }
+    if (n_body < 3)
+        return 0;
+
+    /* ---- IridiumMSMessage header (body[0]) ---- */
+    int ms_type   = body[0][0];
+    int block_no  = msbits(&body[0][5], 4);
+    int frame_no  = msbits(&body[0][9], 6);
+    int bch_blocks = msbits(&body[0][15], 4);
+    if (bch_blocks < 2)
+        return 0;
+
+    int group_a = (ms_type == 1);
+
+    /* Trim to declared length if extra blocks present. */
+    if (bch_blocks * 2 < n_body)
+        n_body = bch_blocks * 2;
+
+    /* Pop header block (body[0]); remaining message blocks begin at index 1. */
+    int bstart = 1;
+
+    /* Acquisition group: 2 or 4 pre-message blocks. */
+    if (group_a) {
+        int remain = n_body - bstart;
+        if (remain < 2)
+            return 0;
+        bstart += (remain >= 4) ? 4 : 2;
+    }
+
+    /* Strip up to two all-ones trailer blocks. */
+    int bend = n_body;
+    for (int t = 0; t < 2 && bend - 1 >= bstart; t++) {
+        int all_ones = 1;
+        for (int k = 0; k < 21; k++)
+            if (!body[bend - 1][k]) { all_ones = 0; break; }
+        if (!all_ones) break;
+        bend--;
+    }
+
+    int n_msg = bend - bstart;
+    if (n_msg < 1)
+        return 0;
+    const uint8_t (*mblk)[21] = (const uint8_t (*)[21])body[bstart];
+
+    /* ---- IridiumMSMessageBody: drop the leading "odd" bit of each 21-bit
+     * block, concatenate the remaining 20 bits into `rest`. ---- */
+    static __thread uint8_t rest[MSG_MAX_BLOCKS * 20];
+    int rlen = 0;
+    for (int i = 0; i < n_msg; i++)
+        for (int k = 1; k < 21; k++)
+            rest[rlen++] = mblk[i][k];
+
+    if (rlen <= 27)
+        return 0;
+
+    /* msg_ric = reverse(rest[0:22]); msg_format = rest[22:27] */
+    int ric = 0;
+    for (int i = 21; i >= 0; i--) ric = (ric << 1) | rest[i];
+    int format = msbits(&rest[22], 5);
+
+    const uint8_t *r = rest + 27;
+    int rl = rlen - 27;
+    if (rl <= 16)
+        return 0;
+
+    int seq = msbits(&r[0], 6);
+    /* r[6:10] zero1, r[10:16] pkt_cs1 */
+    const uint8_t *msg_data = r + 16;
+    int msg_data_len = rl - 16;
+
+    msg->ric = ric;
+    msg->format = format;
+    msg->seq = seq;
+    msg->block = block_no;
+    msg->frame = frame_no;
+    msg->csum_ok = msg_checksum_ok(mblk, n_msg);
+
+    if (format == 5) {
+        /* ASCII: pkt_cs2[0:4], len_bit[4], then optional counter fields. */
+        const uint8_t *a = msg_data;
+        int al = msg_data_len;
+        int len_bit = a[4];
+        a += 5; al -= 5;
+        if (len_bit) {
+            if (al < 4) return 0;
+            int lfl = msbits(&a[0], 4);
+            if (lfl < 1 || lfl > 2) return 0;
+            if (al < 4 + lfl * 2) return 0;
+            msg->ctr     = msbits(&a[4], lfl);
+            msg->ctr_max = msbits(&a[4 + lfl], lfl);
+            a += 4 + lfl * 2;
+            al -= 4 + lfl * 2;
+        }
+        if (al < 8) return 0;
+        /* a[0] zero2, a[1:8] checksum, a[8:] 7-bit characters */
+        a += 8; al -= 8;
+        int ti = 0;
+        for (int i = 0; i + 7 <= al && ti < (int)sizeof(msg->text) - 1; i += 7) {
+            int c = msbits(&a[i], 7);
+            if (c == 3)            /* ETX: end of text */
+                break;
+            if (c < 32 || c == 127)
+                continue;          /* skip control chars in compact feed */
+            msg->text[ti++] = (char)c;
+        }
+        msg->text[ti] = '\0';
+    } else if (format == 3) {
+        /* BCD: skip 1 unknown bit, then 4-bit nibbles -> hex digits. */
+        const uint8_t *a = msg_data + 1;
+        int al = msg_data_len - 1;
+        int ti = 0;
+        for (int i = 0; i + 4 <= al && ti < (int)sizeof(msg->text) - 1; i += 4) {
+            int nib = msbits(&a[i], 4);
+            msg->text[ti++] = "0123456789abcdef"[nib];
+        }
+        msg->text[ti] = '\0';
+    } else {
+        return 0;   /* unknown message format */
+    }
+
+    return 1;
+}
+
 /* ---- Main decode function ---- */
 
 int frame_decode(const demod_frame_t *frame, decoded_frame_t *out)
@@ -388,6 +648,21 @@ int frame_decode(const demod_frame_t *frame, decoded_frame_t *out)
     const uint8_t *data = frame->bits + 24;
     const float *data_llr = frame->llr ? frame->llr + 24 : NULL;
     int data_len = frame->n_bits - 24;
+
+    /* ---- Try MSG (messaging / pager) detection ----
+     * Downlink-only, simplex band. Identified by an exact 32-bit header.
+     * The exact header match is a strong gate, so no BCH probe is needed
+     * before committing to the messaging descramble path. */
+    if (is_dl && data_len >= 32 + 64 &&
+        memcmp(data, header_messaging, 32) == 0) {
+        if (parse_msg(data, data_len, &out->msg)) {
+            out->type = FRAME_MSG;
+            return 1;
+        }
+        /* Header matched but body undecodable: not a usable MSG, and the
+         * messaging header won't collide with IBC/IRA, so stop here. */
+        return 0;
+    }
 
     /* ---- Try IBC detection ----
      * Header: 6 bits BCH(7,3), then 64-bit de-interleaved data blocks.
