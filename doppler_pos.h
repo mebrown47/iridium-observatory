@@ -42,5 +42,15 @@ int doppler_pos_solve(doppler_solution_t *out);
 /* Set assumed receiver height for height aiding (meters above WGS-84).
  * A value of 0 disables height aiding. */
 void doppler_pos_set_height(double height_m);
+/* Returns recent active satellites (measurement within last 60s) for an
+ * overview display. Writes up to max_out entries. Returns count written. */
+int doppler_pos_get_active_sats(int *sat_ids, double *latest_freq,
+                                  uint64_t *latest_timestamp,
+                                  uint64_t now_ns, int max_out);
+/* Returns recent frequency/timestamp history for one satellite, oldest
+ * first. Writes up to max_out entries. Returns count written, or 0 if
+ * sat_id is unknown. */
+int doppler_pos_get_history(int sat_id, double *freqs,
+                              uint64_t *timestamps, int max_out);
 
 #endif

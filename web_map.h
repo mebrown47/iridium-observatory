@@ -64,6 +64,7 @@ void web_map_add_aircraft(const char *reg, const char *flight,
 
 /* Append a decoded pager (MSG/IMS) message to the messaging feed. Thread-safe. */
 void web_map_add_msg(const msg_data_t *msg, uint64_t timestamp_ns);
+void web_map_update_doppler(uint64_t now_ns);
 
 /* Increment the frame-type histogram for the given type label
  * (e.g. "IRA","IBC","MSG","IDA","IDA_UL_FAIL","ISY","IIP","VOC","ITL",
@@ -74,6 +75,7 @@ void web_map_count_type(const char *label);
  * These bursts demodulated but matched no UW, so they never reach
  * classify_frame_label(). Thread-safe. */
 void web_map_count_uw_fail(ir_direction_t direction);
+void web_map_count_uw_ambiguous(void);
 
 /* Append an ACARS message to the recent messages feed (chronological tab).
  * Heartbeats (label "_d") and empty-text messages should not be passed in --

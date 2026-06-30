@@ -30,6 +30,9 @@
 
 #include "qpsk_demod.h"
 #include "iridium.h"
+#include "web_map.h"
+
+extern int web_enabled;
 
 extern char *save_bursts_dir;
 extern int use_gardner;
@@ -480,6 +483,8 @@ int qpsk_demod(downmix_frame_t *in, demod_frame_t **out)
                 in->direction = DIR_UPLINK;
             else if (dl_ok && !ul_ok)
                 in->direction = DIR_DOWNLINK;
+            else if (ul_ok && dl_ok)
+                { if (web_enabled) web_map_count_uw_ambiguous(); }
         }
     }
 

@@ -36,6 +36,7 @@
 
 #include "web_map.h"
 #include "ida_decode.h"
+#include "doppler_pos.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -54,6 +55,7 @@
 #define ACARS_TEXT_MAX   256
 #define MAX_PAGER_MSGS   200
 #define PAGER_TEXT_MAX   168
+#define MAX_DOPPLER_SATS 16
 #define JSON_BUF_SIZE    131072
 #define HTTP_BUF_SIZE    4096
 
@@ -135,6 +137,12 @@ typedef struct {
     uint64_t timestamp;
 } pager_msg_t;
 
+typedef struct {
+    int sat_id;
+    double freq;
+    uint64_t timestamp;
+} sat_doppler_t;
+
 static struct {
     pthread_mutex_t lock;
     ra_point_t ra[MAX_RA_POINTS];
@@ -156,6 +164,8 @@ static struct {
     pager_msg_t pager[MAX_PAGER_MSGS];
     int pager_head;
     int pager_count;
+    sat_doppler_t doppler[MAX_DOPPLER_SATS];
+    int doppler_count;
     unsigned long total_ira;
     unsigned long total_ibc;
     unsigned long total_pages;
@@ -166,6 +176,7 @@ static struct {
     unsigned long total_msg;       /* decoded pager (MSG) messages */
     unsigned long type_counts[16]; /* per-frame-type histogram (see ftype_names) */
     unsigned long uw_fail[3];      /* UW-check failures by dir: [0]=DL [1]=UL [2]=other */
+    unsigned long uw_ambiguous;    /* hard UW check matched BOTH DL and UL (direction tie) */
     /* Doppler positioning receiver estimate */
     double rx_lat, rx_lon;
     double rx_hdop;
@@ -587,13 +598,19 @@ void web_map_count_type(const char *label)
     state.type_counts[idx]++;
     pthread_mutex_unlock(&state.lock);
 }
-
 void web_map_count_uw_fail(ir_direction_t direction)
 {
     int i = (direction == DIR_DOWNLINK) ? 0 :
             (direction == DIR_UPLINK)   ? 1 : 2;
     pthread_mutex_lock(&state.lock);
     state.uw_fail[i]++;
+    pthread_mutex_unlock(&state.lock);
+}
+
+void web_map_count_uw_ambiguous(void)
+{
+    pthread_mutex_lock(&state.lock);
+    state.uw_ambiguous++;
     pthread_mutex_unlock(&state.lock);
 }
 
@@ -616,7 +633,23 @@ void web_map_add_msg(const msg_data_t *msg, uint64_t timestamp_ns)
     if (state.pager_count < MAX_PAGER_MSGS)
         state.pager_count++;
     state.total_msg++;
+    pthread_mutex_unlock(&state.lock);
+}
 
+void web_map_update_doppler(uint64_t now_ns)
+{
+    int sat_ids[MAX_DOPPLER_SATS];
+    double freqs[MAX_DOPPLER_SATS];
+    uint64_t timestamps[MAX_DOPPLER_SATS];
+    int n = doppler_pos_get_active_sats(sat_ids, freqs, timestamps,
+                                          now_ns, MAX_DOPPLER_SATS);
+    pthread_mutex_lock(&state.lock);
+    for (int i = 0; i < n; i++) {
+        state.doppler[i].sat_id = sat_ids[i];
+        state.doppler[i].freq = freqs[i];
+        state.doppler[i].timestamp = timestamps[i];
+    }
+    state.doppler_count = n;
     pthread_mutex_unlock(&state.lock);
 }
 
@@ -803,6 +836,18 @@ static int build_json(char *buf, int bufsize)
         pg_emit++;
     }
     off += snprintf(buf + off, bufsize - off, "]");
+    /* Active satellite Doppler summary (overview grid) */
+    off += snprintf(buf + off, bufsize - off, ",\"doppler\":[");
+    for (int i = 0; i < state.doppler_count && off < bufsize - 256; i++) {
+        const sat_doppler_t *d = &state.doppler[i];
+        if (i > 0)
+            off += snprintf(buf + off, bufsize - off, ",");
+        off += snprintf(buf + off, bufsize - off,
+            "{\"sat\":%d,\"freq\":%.1f,\"t\":%llu}",
+            d->sat_id, d->freq,
+            (unsigned long long)(d->timestamp / 1000000000ULL));
+    }
+    off += snprintf(buf + off, bufsize - off, "]");
 
     /* Frame-type histogram */
     off += snprintf(buf + off, bufsize - off, ",\"ftypes\":{");
@@ -814,8 +859,8 @@ static int build_json(char *buf, int bufsize)
 
     /* UW-check failures by direction (bursts dropped before classification) */
     off += snprintf(buf + off, bufsize - off,
-        ",\"uw_fail\":{\"DL\":%lu,\"UL\":%lu,\"other\":%lu}",
-        state.uw_fail[0], state.uw_fail[1], state.uw_fail[2]);
+        ",\"uw_fail\":{\"DL\":%lu,\"UL\":%lu,\"other\":%lu},\"uw_ambiguous\":%lu",
+        state.uw_fail[0], state.uw_fail[1], state.uw_fail[2], state.uw_ambiguous);
 
     off += snprintf(buf + off, bufsize - off, "}");
 
@@ -1141,7 +1186,7 @@ static const char HTML_PAGE[] =
 "  'Aircraft (ACARS)':acarsLy,\n"
 "  'Paging events':pageLy,'Receiver':rxLy,\n"
 "  'Satellite tracks':satLy,'Sat coverage':coverLy\n"
-"},{collapsed:false}).addTo(map);\n"
+"},{collapsed:false,position:'bottomleft'}).addTo(map);\n"
 "\n"
 "var centered=false;\n"
 "var TW=300;\n"

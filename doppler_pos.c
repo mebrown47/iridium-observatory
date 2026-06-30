@@ -1334,6 +1334,46 @@ done_collect:
     out->n_measurements = n_meas;
     out->n_satellites = sats_used;
     out->converged = 1;
-
     return 1;
+}
+
+int doppler_pos_get_active_sats(int *sat_ids, double *latest_freq,
+                                  uint64_t *latest_timestamp,
+                                  uint64_t now_ns, int max_out)
+{
+    const uint64_t MAX_AGE_NS = 60000000000ULL;
+    pthread_mutex_lock(&pos_lock);
+    int written = 0;
+    for (int i = 0; i < n_satellites && written < max_out; i++) {
+        sat_buffer_t *s = &satellites[i];
+        if (s->count == 0) continue;
+        sat_meas_t *latest = sat_buf_get(s, s->count - 1);
+        if (!latest) continue;
+        if (now_ns - latest->timestamp > MAX_AGE_NS) continue;
+        sat_ids[written] = s->sat_id;
+        latest_freq[written] = latest->freq;
+        latest_timestamp[written] = latest->timestamp;
+        written++;
+    }
+    pthread_mutex_unlock(&pos_lock);
+    return written;
+}
+
+int doppler_pos_get_history(int sat_id, double *freqs,
+                              uint64_t *timestamps, int max_out)
+{
+    pthread_mutex_lock(&pos_lock);
+    sat_buffer_t *s = NULL;
+    for (int i = 0; i < n_satellites; i++) {
+        if (satellites[i].sat_id == sat_id) { s = &satellites[i]; break; }
+    }
+    if (!s) { pthread_mutex_unlock(&pos_lock); return 0; }
+    int n = (s->count < max_out) ? s->count : max_out;
+    for (int i = 0; i < n; i++) {
+        sat_meas_t *m = sat_buf_get(s, i);
+        freqs[i] = m->freq;
+        timestamps[i] = m->timestamp;
+    }
+    pthread_mutex_unlock(&pos_lock);
+    return n;
 }

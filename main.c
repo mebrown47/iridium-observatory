@@ -727,6 +727,12 @@ static void *stats_thread_fn(void *arg) {
     while (running) {
         usleep(1000000);
         if (!running) break;
+        if (web_enabled) {
+            struct timespec rt;
+            clock_gettime(CLOCK_REALTIME, &rt);
+            uint64_t doppler_now_ns = (uint64_t)rt.tv_sec * 1000000000ULL + rt.tv_nsec;
+            web_map_update_doppler(doppler_now_ns);
+        }
 
         unsigned long now = now_ms();
         double dt = (now - prev_t) / 1000.0;
