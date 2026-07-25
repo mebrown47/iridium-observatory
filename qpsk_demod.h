@@ -37,8 +37,16 @@ typedef struct {
     int n_bits;
 } demod_frame_t;
 
-/* Demodulate a downmixed frame. Returns 1 on success, 0 if frame invalid.
- * Caller owns returned frame and must free bits and frame. */
+/* qpsk_demod() return codes */
+#define QPSK_DEMOD_OK       1   /* success: *out set, caller frees bits+frame */
+#define QPSK_DEMOD_UW_FAIL  0   /* real burst, unique word did not match       */
+#define QPSK_DEMOD_REJECT   2   /* weak sync (no UW present): false-positive    */
+
+/* Demodulate a downmixed frame. Returns one of the QPSK_DEMOD_* codes above.
+ * On QPSK_DEMOD_OK the caller owns the returned frame and must free bits and
+ * frame. QPSK_DEMOD_REJECT flags a burst whose matched-filter sync score is
+ * below uw_reject_threshold -- almost certainly a burst-detector false positive,
+ * to be dropped WITHOUT counting as a UW-fail. */
 int qpsk_demod(downmix_frame_t *in, demod_frame_t **out);
 
 /* Thread function: pulls from frame_queue, pushes to output_queue */

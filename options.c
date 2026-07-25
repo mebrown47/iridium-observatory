@@ -95,6 +95,7 @@ extern char *gsmtap_host;
 extern int gsmtap_port;
 extern int diagnostic_mode;
 extern int use_gardner;
+extern float uw_reject_threshold;
 extern int parsed_mode;
 extern int position_enabled;
 extern double position_height;
@@ -192,6 +193,9 @@ static void usage(int exitcode) {
 "    --save-bursts=DIR       save IQ samples of decoded bursts to directory\n"
 "    --diagnostic            setup verification mode (suppresses RAW output)\n"
 "    --no-gardner           disable Gardner timing recovery (enabled by default)\n"
+"    --uw-reject=T          drop UW-fail bursts with sync score < T as false\n"
+"                           positives (default 0.70; 0 disables). Does not\n"
+"                           affect decoding, only the UW-fail count.\n"
 "    --parsed               output parsed IDA lines (pipe to reassembler.py)\n"
 "    --acars               decode and display ACARS messages from IDA\n"
 "    --acars-json          output ACARS as JSON (compatible with acars.py)\n"
@@ -278,6 +282,7 @@ void parse_options(int argc, char **argv) {
         OPT_DIAGNOSTIC,
         OPT_GARDNER,
         OPT_NO_GARDNER,
+        OPT_UW_REJECT,
         OPT_PARSED,
         OPT_POSITION,
         OPT_ACARS,
@@ -329,6 +334,7 @@ void parse_options(int argc, char **argv) {
         { "diagnostic",     no_argument,       NULL, OPT_DIAGNOSTIC },
         { "gardner",        no_argument,       NULL, OPT_GARDNER },
         { "no-gardner",     no_argument,       NULL, OPT_NO_GARDNER },
+        { "uw-reject",      required_argument, NULL, OPT_UW_REJECT },
         { "parsed",         no_argument,       NULL, OPT_PARSED },
         { "position",       optional_argument, NULL, OPT_POSITION },
         { "acars",          no_argument,       NULL, OPT_ACARS },
@@ -509,6 +515,12 @@ void parse_options(int argc, char **argv) {
 
             case OPT_NO_GARDNER:
                 use_gardner = 0;
+                break;
+
+            case OPT_UW_REJECT:
+                uw_reject_threshold = (float)atof(optarg);
+                if (uw_reject_threshold < 0.0f) uw_reject_threshold = 0.0f;
+                if (uw_reject_threshold > 1.0f) uw_reject_threshold = 1.0f;
                 break;
 
             case OPT_PARSED:

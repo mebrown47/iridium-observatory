@@ -152,6 +152,11 @@ int simd_mode = 0;  /* SIMD_AUTO */
 char *save_bursts_dir = NULL;
 int diagnostic_mode = 0;
 int use_gardner = 1;
+/* Matched-filter sync score below which a UW-fail burst is treated as a
+ * burst-detector false positive and dropped without being counted as a UW-fail.
+ * Calibrated offline (tests/uw_replay.c): 0.70 keeps 100% of real DL bursts
+ * while removing ~73% of false positives. 0 disables the filter. */
+float uw_reject_threshold = 0.70f;
 int parsed_mode = 0;
 int use_chase = 0;
 int position_enabled = 0;
@@ -270,6 +275,7 @@ atomic_ulong stat_n_ok_sub = 0;
 atomic_ulong stat_n_dropped = 0;
 atomic_ulong stat_n_frame_drops = 0;
 atomic_ulong stat_n_output_drops = 0;
+atomic_ulong stat_n_uw_reject = 0;   /* weak-sync false positives filtered out */
 atomic_ulong stat_sample_count = 0;
 
 /* Global detector pointer for diagnostic stats (set by detector thread) */
@@ -529,7 +535,8 @@ static void *frame_consumer_thread(void *arg) {
         atomic_fetch_add(&stat_n_handled, 1);
 
         demod_frame_t *demod = NULL;
-        if (qpsk_demod(frame, &demod)) {
+        int demod_rc = qpsk_demod(frame, &demod);
+        if (demod_rc == QPSK_DEMOD_OK) {
             atomic_fetch_add(&stat_n_ok_bursts, 1);
             atomic_fetch_add(&stat_n_ok_sub, 1);
 
@@ -568,11 +575,21 @@ static void *frame_consumer_thread(void *arg) {
                 free(demod->llr);
             }
             free(demod);
+        } else if (demod_rc == QPSK_DEMOD_REJECT) {
+            /* Weak-sync burst: matched-filter score below uw_reject_threshold,
+             * i.e. no unique word present. Almost certainly a burst-detector
+             * false positive, not lost Iridium -- drop it WITHOUT counting a
+             * UW-fail, so the UW-fail rate reflects real bursts only. */
+            atomic_fetch_add(&stat_n_uw_reject, 1);
+            if (verbose)
+                fprintf(stderr, "demod: weak-sync reject id=%lu freq=%.0f Hz\n",
+                        (unsigned long)frame->id, frame->center_frequency);
         } else {
-            /* UW check failed: the burst was detected and demodulated but no
-             * unique word matched, so it never reaches classify_frame_label().
-             * Count it by direction -- this is the earliest-stage signal for
-             * whether UL bursts are present but being rejected at the demod. */
+            /* UW check failed on a burst with real sync energy: detected and
+             * demodulated but no unique word matched, so it never reaches
+             * classify_frame_label(). Count it by direction -- the
+             * earliest-stage signal for whether UL bursts are present but
+             * being rejected at the demod. */
             if (web_enabled)
                 web_map_count_uw_fail(frame->direction);
             if (verbose)
@@ -831,6 +848,11 @@ static void *stats_thread_fn(void *arg) {
                 unsigned long od = atomic_load(&stat_n_output_drops);
                 if (fd > 0 || od > 0)
                     fprintf(stderr, " | fd: %lu/%lu", fd, od);
+            }
+            {
+                unsigned long rej = atomic_load(&stat_n_uw_reject);
+                if (rej > 0)
+                    fprintf(stderr, " | rej: %lu", rej);
             }
             fprintf(stderr, "\n");
         }

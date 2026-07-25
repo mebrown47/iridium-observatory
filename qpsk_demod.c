@@ -37,6 +37,9 @@ extern int web_enabled;
 extern char *save_bursts_dir;
 extern int use_gardner;
 extern int use_chase;
+extern float uw_reject_threshold;   /* matched-filter sync score below which a
+                                       UW-fail burst is treated as a false
+                                       positive and dropped uncounted; 0 = off */
 
 #define PLL_ALPHA           0.2f
 #define M_SQRT1_2f          0.70710678118654752f
@@ -354,6 +357,49 @@ static float soft_check_sync_word(const float complex *pll_out, int n,
     return total_error;
 }
 
+/* ---- Normalized matched-filter unique-word sync score ---- */
+/* Slides the known DL/UL unique word over the PLL-corrected symbol stream and
+ * returns the peak energy-normalized correlation in [0,1] (best of both
+ * directions). A real UW yields a sharp peak near 1.0; a false-positive burst
+ * with no unique word stays low. Used only on the UW-fail path to separate
+ * genuine-but-undecoded bursts from burst-detector false positives. The metric
+ * is identical to the offline calibration in tests/uw_replay.c, so the
+ * uw_reject_threshold value transfers directly. */
+static float uw_sync_score(const float complex *pll, int n)
+{
+    if (n < IR_UW_LENGTH)
+        return 0.0f;
+
+    float complex ref_dl[IR_UW_LENGTH], ref_ul[IR_UW_LENGTH];
+    for (int i = 0; i < IR_UW_LENGTH; i++) {
+        float pd = (float)M_PI * 0.25f + IR_UW_DL[i] * (float)M_PI * 0.5f;
+        float pu = (float)M_PI * 0.25f + IR_UW_UL[i] * (float)M_PI * 0.5f;
+        ref_dl[i] = cosf(pd) + sinf(pd) * I;
+        ref_ul[i] = cosf(pu) + sinf(pu) * I;
+    }
+
+    float best = 0.0f;
+    for (int o = 0; o + IR_UW_LENGTH <= n; o++) {
+        float complex acc_dl = 0, acc_ul = 0;
+        float energy = 0;
+        for (int i = 0; i < IR_UW_LENGTH; i++) {
+            float complex x = pll[o + i];
+            acc_dl += conjf(ref_dl[i]) * x;
+            acc_ul += conjf(ref_ul[i]) * x;
+            energy += crealf(x) * crealf(x) + cimagf(x) * cimagf(x);
+        }
+        float den = sqrtf((float)IR_UW_LENGTH) * sqrtf(energy);
+        if (den < 1e-9f)
+            continue;
+        float sd = cabsf(acc_dl) / den;
+        float su = cabsf(acc_ul) / den;
+        float s = sd > su ? sd : su;
+        if (s > best)
+            best = s;
+    }
+    return best;
+}
+
 /* ---- Symbol-to-bits mapping (MSB first) ---- */
 
 static void map_symbols_to_bits(const int *symbols, int n, uint8_t *bits)
@@ -469,7 +515,15 @@ int qpsk_demod(downmix_frame_t *in, demod_frame_t **out)
                     in->direction = DIR_UNDEF;
                     save_burst_iq(in, save_bursts_dir);
                 }
-                return 0;
+                /* Distinguish a genuine-but-undecoded burst (real unique word
+                 * present, a few symbol errors) from a burst-detector false
+                 * positive (no unique word at all). The matched-filter sync
+                 * score separates them cleanly; below-threshold bursts are
+                 * dropped WITHOUT being counted as UW-fails. */
+                if (uw_reject_threshold > 0.0f &&
+                    uw_sync_score(pll_out, actual_symbols) < uw_reject_threshold)
+                    return QPSK_DEMOD_REJECT;
+                return QPSK_DEMOD_UW_FAIL;
             }
 
             /* Soft rescue succeeded */
@@ -549,5 +603,5 @@ int qpsk_demod(downmix_frame_t *in, demod_frame_t **out)
     }
 
     *out = frame;
-    return 1;
+    return QPSK_DEMOD_OK;
 }
