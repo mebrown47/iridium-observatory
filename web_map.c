@@ -52,6 +52,7 @@
 #define MAX_AIRCRAFT_FIXES 8
 #define MAX_SSE_CLIENTS  8
 #define MAX_ACARS_MSGS   100
+#define MAX_PREMIUM_MSGS 100
 #define ACARS_TEXT_MAX   256
 #define MAX_PAGER_MSGS   200
 #define PAGER_TEXT_MAX   168
@@ -126,6 +127,14 @@ typedef struct {
     int ul;
     uint64_t timestamp;
 } acars_msg_t;
+typedef struct {
+    char reg[16];
+    char flight[16];
+    char label[4];
+    char text[ACARS_TEXT_MAX];
+    int ul;
+    uint64_t timestamp;
+} premium_msg_t;
 
 /* Recent pager (MSG/IMS) message entry for the messaging feed tab */
 typedef struct {
@@ -161,6 +170,10 @@ static struct {
     acars_msg_t acars[MAX_ACARS_MSGS];
     int acars_head;
     int acars_count;
+    premium_msg_t premium[MAX_PREMIUM_MSGS];
+    int premium_head;
+    int premium_count;
+    unsigned long total_premium_msgs;
     pager_msg_t pager[MAX_PAGER_MSGS];
     int pager_head;
     int pager_count;
@@ -575,7 +588,35 @@ void web_map_add_acars_message(const char *reg, const char *flight,
     if (state.acars_count < MAX_ACARS_MSGS)
         state.acars_count++;
     state.total_acars_msgs++;
+    pthread_mutex_unlock(&state.lock);
+}
 
+void web_map_add_premium_msg(const char *reg, const char *flight,
+                              const char *label, const char *text,
+                              int ul, uint64_t timestamp_ns)
+{
+    if (!reg || !label || !text || !text[0]) return;
+    pthread_mutex_lock(&state.lock);
+    premium_msg_t *m = &state.premium[state.premium_head];
+    const char *r = reg;
+    while (*r == '.') r++;
+    strncpy(m->reg, r, sizeof(m->reg) - 1);
+    m->reg[sizeof(m->reg) - 1] = '\0';
+    m->flight[0] = '\0';
+    if (flight && flight[0]) {
+        strncpy(m->flight, flight, sizeof(m->flight) - 1);
+        m->flight[sizeof(m->flight) - 1] = '\0';
+    }
+    strncpy(m->label, label, sizeof(m->label) - 1);
+    m->label[sizeof(m->label) - 1] = '\0';
+    strncpy(m->text, text, sizeof(m->text) - 1);
+    m->text[sizeof(m->text) - 1] = '\0';
+    m->ul = ul ? 1 : 0;
+    m->timestamp = timestamp_ns;
+    state.premium_head = (state.premium_head + 1) % MAX_PREMIUM_MSGS;
+    if (state.premium_count < MAX_PREMIUM_MSGS)
+        state.premium_count++;
+    state.total_premium_msgs++;
     pthread_mutex_unlock(&state.lock);
 }
 
@@ -808,6 +849,34 @@ static int build_json(char *buf, int bufsize)
         n_emit++;
     }
     off += snprintf(buf + off, bufsize - off, "]");
+    /* TEST/EVAL premium flight messages feed */
+    off += snprintf(buf + off, bufsize - off,
+        ",\"total_premium_msgs\":%lu,\"premium\":[", state.total_premium_msgs);
+    int n_pr = state.premium_count;
+    int pr_emit = 0;
+    for (int i = n_pr - 1; i >= 0 && off < bufsize - 1024; i--) {
+        int idx = (state.premium_head - 1 - (n_pr - 1 - i) + MAX_PREMIUM_MSGS)
+                  % MAX_PREMIUM_MSGS;
+        const premium_msg_t *m = &state.premium[idx];
+        if (pr_emit > 0)
+            off += snprintf(buf + off, bufsize - off, ",");
+        char esc_text[ACARS_TEXT_MAX * 2 + 1];
+        int e = 0;
+        for (int k = 0; m->text[k] && e < (int)sizeof(esc_text) - 2; k++) {
+            char c = m->text[k];
+            if (c == '"' || c == '\\') esc_text[e++] = '\\';
+            if (c < 0x20 || c == 0x7f) c = ' ';
+            esc_text[e++] = c;
+        }
+        esc_text[e] = '\0';
+        off += snprintf(buf + off, bufsize - off,
+            "{\"t\":%llu,\"reg\":\"%s\",\"flt\":\"%s\","
+            "\"lbl\":\"%s\",\"ul\":%d,\"txt\":\"%s\"}",
+            (unsigned long long)(m->timestamp / 1000000000ULL),
+            m->reg, m->flight, m->label, m->ul, esc_text);
+        pr_emit++;
+    }
+    off += snprintf(buf + off, bufsize - off, "]");
 
     /* Recent pager (MSG) messages (chronological feed) */
     off += snprintf(buf + off, bufsize - off,
@@ -1034,6 +1103,7 @@ static const char HTML_PAGE[] =
 "    <div class=\"tabs\">\n"
 "      <span id=\"tab-acars\" class=\"tab active\" onclick=\"showTab('acars')\">ACARS</span>\n"
 "      <span id=\"tab-msg\" class=\"tab\" onclick=\"showTab('msg')\">Pager</span>\n"
+"      <span id=\"tab-premium\" class=\"tab\" onclick=\"showTab('premium')\">AT1</span>\n"
 "    </div>\n"
 "    <div id=\"pane-acars\">\n"
 "      <div class=\"header\">Recent ACARS<span class=\"hint\">heartbeats filtered</span></div>\n"
@@ -1045,6 +1115,12 @@ static const char HTML_PAGE[] =
 "      <div class=\"header\">Pager messages<span class=\"hint\">simplex MSG/IMS channel</span></div>\n"
 "      <div id=\"msg-list\">\n"
 "        <div class=\"no-msgs\">No pager messages yet</div>\n"
+"      </div>\n"
+"    </div>\n"
+"    <div id=\"pane-premium\" style=\"display:none\">\n"
+"      <div class=\"header\">AT1<span class=\"hint\">structured flight messages</span></div>\n"
+"      <div id=\"premium-list\">\n"
+"        <div class=\"no-msgs\">No messages yet</div>\n"
 "      </div>\n"
 "    </div>\n"
 "  </div>\n"
@@ -1130,11 +1206,11 @@ static const char HTML_PAGE[] =
 "}\n"
 "\n"
 "function showTab(name){\n"
-"  var a=name==='acars';\n"
-"  document.getElementById('pane-acars').style.display=a?'':'none';\n"
-"  document.getElementById('pane-msg').style.display=a?'none':'';\n"
-"  document.getElementById('tab-acars').classList.toggle('active',a);\n"
-"  document.getElementById('tab-msg').classList.toggle('active',!a);\n"
+"  var panes=['acars','msg','premium'];\n"
+"  panes.forEach(function(p){\n"
+"    document.getElementById('pane-'+p).style.display=(p===name?'':'none');\n"
+"    document.getElementById('tab-'+p).classList.toggle('active',p===name);\n"
+"  });\n"
 "}\n"
 "\n"
 "function renderMsg(msgs){\n"
@@ -1152,6 +1228,29 @@ static const char HTML_PAGE[] =
 "      '<span class=\"reg\">RIC '+m.ric+'</span>'+\n"
 "      '<span class=\"lbl\">'+(m.fmt===3?'BCD':'ASCII')+'</span>'+\n"
 "      '<span class=\"dir\">'+(m.ok?'C:OK':'C:--')+'</span>'+\n"
+"      '</div>'+\n"
+"      '<div class=\"txt\">'+txt+'</div></div>';\n"
+"  });\n"
+"  box.innerHTML=html;\n"
+"}\n"
+
+"function renderPremium(msgs){\n"
+"  var box=document.getElementById('premium-list');\n"
+"  if(!msgs||msgs.length===0){\n"
+"    box.innerHTML='<div class=\"no-msgs\">No messages yet</div>';\n"
+"    return;\n"
+"  }\n"
+"  var html='';\n"
+"  msgs.forEach(function(m){\n"
+"    var txt=(m.txt||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\n"
+"    var dir=m.ul?'UL':'DL';\n"
+"    html+='<div class=\"amsg\">'+\n"
+"      '<div class=\"row1\">'+\n"
+"      '<span>'+fmtTime(m.t)+'</span>'+\n"
+"      '<span class=\"reg\">'+m.reg+'</span>'+\n"
+"      (m.flt?'<span class=\"flt\">'+m.flt+'</span>':'')+\n"
+"      '<span class=\"lbl\">'+m.lbl+'</span>'+\n"
+"      '<span class=\"dir\">'+dir+'</span>'+\n"
 "      '</div>'+\n"
 "      '<div class=\"txt\">'+txt+'</div></div>';\n"
 "  });\n"
@@ -1206,6 +1305,7 @@ static const char HTML_PAGE[] =
 "  document.getElementById('status').textContent='live';\n"
 "  renderAcars(d.acars||[]);\n"
 "  renderMsg(d.msg||[]);\n"
+"  renderPremium(d.premium||[]);\n"
 "  renderFtypes(d.ftypes,d.uw_fail);\n"
 "\n"
 "  if(popupOpen)return;\n"

@@ -14,6 +14,7 @@
  */
 
 #include <arpa/inet.h>
+#include <math.h>
 #include <err.h>
 #include <errno.h>
 #include <netdb.h>
@@ -885,6 +886,41 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
                                        msg->label, msg->txt, ul, timestamp);
         }
     }
+    /* TEST/EVAL tab — readable structured flight messages only.
+     * Stage 1: label allowlist (always readable).
+     * Stage 2: H1 prefix whitelist (exclude REQ-type/USADCXA/encoded). */
+    if (web_enabled && !msg->err && msg->reg[0] && msg->txt && msg->txt[0]) {
+        int is_premium = 0;
+        const char *txt = msg->txt;
+        char l0 = msg->label[0], l1 = msg->label[1];
+        /* Stage 1 — labels that are always human-readable */
+        if (l0=='4' && l1=='4') is_premium = 1;
+        else if (l0=='4' && l1=='1') is_premium = 1;
+        else if (l0=='4' && l1=='3') is_premium = 1;
+        else if (l0=='3' && l1=='6') is_premium = 1;
+        else if (l0=='3' && l1=='5') is_premium = 1;
+        else if (l0=='2' && l1=='1') is_premium = 1;
+        else if (l0=='3' && l1=='1') is_premium = 1;
+        else if (l0=='1' && l1=='0') is_premium = 1;
+        else if (l0=='1' && l1=='1') is_premium = 1;
+        else if (l0=='R' && l1=='A') is_premium = 1;
+        /* Stage 2 — H1 readable prefix whitelist */
+        else if (l0=='H' && l1=='1') {
+            if (strncmp(txt,"FPN/",4)==0) is_premium = 1;
+            else if (strncmp(txt,"POS/",4)==0) is_premium = 1;
+            else if (strncmp(txt,"PWI/",4)==0) is_premium = 1;
+            else if (strncmp(txt,"EM-",3)==0) is_premium = 1;
+            else if (strncmp(txt,"/TXT/",5)==0) is_premium = 1;
+            else if (txt[0]>='0' && txt[0]<='9') is_premium = 1;
+            else if (txt[0]=='D' || txt[0]=='M') is_premium = 1;
+        }
+        if (is_premium) {
+            const char *tail = msg->reg;
+            while (*tail == '.') tail++;
+            web_map_add_premium_msg(tail, msg->flight_id,
+                                     msg->label, msg->txt, ul, timestamp);
+        }
+    }
 
     /* acarshub/airframes compat output (iridium-toolkit format) */
     if (feed_any_active() &&
@@ -917,6 +953,13 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
         int adsc_pos = 0;
         char adsc_flt[10] = {0};
         char oooi_str[8] = {0};
+        /* Extended ADS-C tag data */
+        double adsc_heading = 0.0, adsc_speed = 0.0;
+        int adsc_vspd = 0, adsc_ref = 0;
+        double adsc_wind_spd = 0.0, adsc_wind_dir = 0.0, adsc_temp = -9999.0;
+        int adsc_meteo = 0;
+        double adsc_lat_next = 0.0, adsc_lon_next = 0.0;
+        int adsc_alt_next = -99999, adsc_eta_next = -1, adsc_route = 0;
 
         /* Walk ADS-C proto tree for exact position, altitude, flight ID */
         la_proto_node *an = la_proto_tree_find_adsc(tree);
@@ -943,8 +986,86 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
                         strncpy(adsc_flt, fi->id, 9);
                         adsc_flt[9] = '\0';
                     }
+                    /* Earth/air reference (tags 14, 15) - speed, heading, vert speed */
+                    if (t->tag == 14 || t->tag == 15) {
+                        la_adsc_earth_air_ref_t *er =
+                            (la_adsc_earth_air_ref_t *)t->data;
+                        if (!er->heading_invalid)
+                            adsc_heading = er->heading;
+                        adsc_speed = er->speed;
+                        adsc_vspd  = er->vert_speed;
+                        adsc_ref   = 1;
+                    }
+                    /* Meteorological group (tag 16) - winds and temperature */
+                    if (t->tag == 16) {
+                        la_adsc_meteo_t *mt = (la_adsc_meteo_t *)t->data;
+                        if (!mt->wind_dir_invalid) {
+                            adsc_wind_spd = mt->wind_speed;
+                            adsc_wind_dir = mt->wind_dir;
+                        }
+                        adsc_temp  = mt->temp;
+                        adsc_meteo = 1;
+                    }
+                    /* Predicted route (tag 13) - next waypoint */
+                    if (t->tag == 13) {
+                        la_adsc_predicted_route_t *pr =
+                            (la_adsc_predicted_route_t *)t->data;
+                        adsc_lat_next = pr->lat_next;
+                        adsc_lon_next = pr->lon_next;
+                        adsc_alt_next = pr->alt_next;
+                        adsc_eta_next = pr->eta_next;
+                        adsc_route    = 1;
+                    }
                 }
             }
+        }
+        /* ADS-C decoded summary for TEST/EVAL tab */
+        if (web_enabled && adsc_pos) {
+            char sum[512];
+            int so = 0;
+            const char *reg_s = msg->reg;
+            while (*reg_s == '.') reg_s++;
+            const char *flt_s = adsc_flt[0] ? adsc_flt :
+                                (msg->flight_id[0] ?
+                                 msg->flight_id : "");
+            /* Position and altitude */
+            so += snprintf(sum + so, sizeof(sum) - so,
+                "%.4f%c %.4f%c",
+                fabs(pos_lat), pos_lat >= 0 ? 'N' : 'S',
+                fabs(pos_lon), pos_lon >= 0 ? 'E' : 'W');
+            if (adsc_alt != -99999)
+                so += snprintf(sum + so, sizeof(sum) - so,
+                    " FL%d", adsc_alt / 100);
+            /* Speed, heading, vertical speed */
+            if (adsc_ref) {
+                so += snprintf(sum + so, sizeof(sum) - so,
+                    " | %.0fkt %.0f°", adsc_speed, adsc_heading);
+                if (adsc_vspd != 0)
+                    so += snprintf(sum + so, sizeof(sum) - so,
+                        " %+dfpm", adsc_vspd);
+            }
+            /* Meteorological */
+            if (adsc_meteo) {
+                so += snprintf(sum + so, sizeof(sum) - so,
+                    " | WND %.0f/%.0fkt", adsc_wind_dir, adsc_wind_spd);
+                if (adsc_temp > -9998.0)
+                    so += snprintf(sum + so, sizeof(sum) - so,
+                        " %.0f°C", adsc_temp);
+            }
+            /* Next waypoint */
+            if (adsc_route) {
+                so += snprintf(sum + so, sizeof(sum) - so,
+                    " | NXT %.4f%c %.4f%c",
+                    fabs(adsc_lat_next), adsc_lat_next >= 0 ? 'N' : 'S',
+                    fabs(adsc_lon_next), adsc_lon_next >= 0 ? 'E' : 'W');
+                if (adsc_alt_next != -99999)
+                    so += snprintf(sum + so, sizeof(sum) - so,
+                        " FL%d", adsc_alt_next / 100);
+                if (adsc_eta_next >= 0)
+                    so += snprintf(sum + so, sizeof(sum) - so,
+                        " ETA+%dmin", adsc_eta_next);
+            }
+            web_map_add_premium_msg(reg_s, flt_s, "AT1", sum, ul, timestamp);
         }
 
         /* Detect OOOI events: Q0 label with OUT/OFF/ON/IN in text */
@@ -1424,6 +1545,160 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                 web_map_add_acars_message(reg, flight, label, txt_z,
                                            ul, timestamp);
             }
+        /* ADS-C decode via libacars for TEST/EVAL tab (AT1 position reports) */
+        if (web_enabled && reg[0] && label[0] && txt && txt_len > 0) {
+            char txt_adsc[512];
+            int alen = txt_len < (int)sizeof(txt_adsc) - 1 ?
+                       txt_len : (int)sizeof(txt_adsc) - 1;
+            memcpy(txt_adsc, txt, alen);
+            txt_adsc[alen] = '\0';
+            la_msg_dir adir = ul ? LA_MSG_DIR_AIR2GND : LA_MSG_DIR_GND2AIR;
+            la_proto_node *atree = la_acars_decode_apps(label, txt_adsc, adir);
+            if (atree) {
+                la_proto_node *an = la_proto_tree_find_adsc(atree);
+                if (an && an->data) {
+                    la_adsc_msg_t *am = (la_adsc_msg_t *)an->data;
+                    if (!am->err && am->tag_list) {
+                        double apos_lat = 0.0, apos_lon = 0.0;
+                        int aadsc_alt = -99999, aadsc_pos = 0;
+                        char aadsc_flt[10] = {0};
+                        double aadsc_heading = 0.0, aadsc_speed = 0.0;
+                        int aadsc_vspd = 0, aadsc_ref = 0;
+                        double aadsc_wind_spd = 0.0, aadsc_wind_dir = 0.0;
+                        double aadsc_temp = -9999.0;
+                        int aadsc_meteo = 0;
+                        double aadsc_lat_next = 0.0, aadsc_lon_next = 0.0;
+                        int aadsc_alt_next = -99999, aadsc_eta_next = -1;
+                        int aadsc_route = 0;
+                        for (la_list *l = am->tag_list; l; l = l->next) {
+                            la_adsc_tag_t *t = (la_adsc_tag_t *)l->data;
+                            if (!t || !t->data) continue;
+                            if (t->tag==7||t->tag==9||t->tag==10||
+                                t->tag==18||t->tag==19||t->tag==20) {
+                                la_adsc_basic_report_t *br =
+                                    (la_adsc_basic_report_t *)t->data;
+                                apos_lat = br->lat;
+                                apos_lon = br->lon;
+                                aadsc_alt = br->alt;
+                                aadsc_pos = 1;
+                            }
+                            if (t->tag == 12) {
+                                la_adsc_flight_id_t *fi =
+                                    (la_adsc_flight_id_t *)t->data;
+                                strncpy(aadsc_flt, fi->id, 9);
+                                aadsc_flt[9] = '\0';
+                            }
+                            if (t->tag==14||t->tag==15) {
+                                la_adsc_earth_air_ref_t *er =
+                                    (la_adsc_earth_air_ref_t *)t->data;
+                                if (!er->heading_invalid)
+                                    aadsc_heading = er->heading;
+                                aadsc_speed = er->speed;
+                                aadsc_vspd  = er->vert_speed;
+                                aadsc_ref   = 1;
+                            }
+                            if (t->tag == 16) {
+                                la_adsc_meteo_t *mt =
+                                    (la_adsc_meteo_t *)t->data;
+                                if (!mt->wind_dir_invalid) {
+                                    aadsc_wind_spd = mt->wind_speed;
+                                    aadsc_wind_dir = mt->wind_dir;
+                                }
+                                aadsc_temp  = mt->temp;
+                                aadsc_meteo = 1;
+                            }
+                            if (t->tag == 13) {
+                                la_adsc_predicted_route_t *pr =
+                                    (la_adsc_predicted_route_t *)t->data;
+                                aadsc_lat_next = pr->lat_next;
+                                aadsc_lon_next = pr->lon_next;
+                                aadsc_alt_next = pr->alt_next;
+                                aadsc_eta_next = pr->eta_next;
+                                aadsc_route    = 1;
+                            }
+                        }
+                        if (aadsc_pos) {
+                            char sum[512];
+                            int so = 0;
+                            const char *reg_s = reg;
+                            while (*reg_s == '.') reg_s++;
+                            const char *flt_s = aadsc_flt[0] ? aadsc_flt :
+                                               (flight[0] ? flight : "");
+                            so += snprintf(sum+so, sizeof(sum)-so,
+                                "%.4f%c %.4f%c",
+                                fabs(apos_lat), apos_lat>=0?'N':'S',
+                                fabs(apos_lon), apos_lon>=0?'E':'W');
+                            if (aadsc_alt != -99999)
+                                so += snprintf(sum+so, sizeof(sum)-so,
+                                    " FL%d", aadsc_alt/100);
+                            if (aadsc_ref)
+                                so += snprintf(sum+so, sizeof(sum)-so,
+                                    " | %.0fkt %.0f°%s%+dfpm",
+                                    aadsc_speed, aadsc_heading,
+                                    aadsc_vspd?" ":"", aadsc_vspd);
+                            if (aadsc_meteo) {
+                                so += snprintf(sum+so, sizeof(sum)-so,
+                                    " | WND %.0f/%.0fkt",
+                                    aadsc_wind_dir, aadsc_wind_spd);
+                                if (aadsc_temp > -9998.0)
+                                    so += snprintf(sum+so, sizeof(sum)-so,
+                                        " %.0f°C", aadsc_temp);
+                            }
+                            if (aadsc_route) {
+                                so += snprintf(sum+so, sizeof(sum)-so,
+                                    " | NXT %.4f%c %.4f%c",
+                                    fabs(aadsc_lat_next),
+                                    aadsc_lat_next>=0?'N':'S',
+                                    fabs(aadsc_lon_next),
+                                    aadsc_lon_next>=0?'E':'W');
+                                if (aadsc_alt_next != -99999)
+                                    so += snprintf(sum+so, sizeof(sum)-so,
+                                        " FL%d", aadsc_alt_next/100);
+                                if (aadsc_eta_next >= 0)
+                                    so += snprintf(sum+so, sizeof(sum)-so,
+                                        " ETA+%dmin", aadsc_eta_next);
+                            }
+                            web_map_add_premium_msg(reg_s, flt_s, "AT1",
+                                                     sum, ul, timestamp);
+                        }
+                    }
+                }
+                la_proto_tree_destroy(atree);
+            }
+        }
+        }
+        /* TEST/EVAL tab — readable structured flight messages only */
+        if (web_enabled && reg[0] && txt && txt_len > 0) {
+            int is_premium = 0;
+            char txt_z2[256];
+            int zlen2 = txt_len < (int)sizeof(txt_z2) - 1 ?
+                        txt_len : (int)sizeof(txt_z2) - 1;
+            memcpy(txt_z2, txt, zlen2);
+            txt_z2[zlen2] = '\0';
+            char l0 = label[0], l1 = label[1];
+            const char *ptxt = txt_z2;
+            if (l0=='4' && l1=='4') is_premium = 1;
+            else if (l0=='4' && l1=='1') is_premium = 1;
+            else if (l0=='4' && l1=='3') is_premium = 1;
+            else if (l0=='3' && l1=='6') is_premium = 1;
+            else if (l0=='3' && l1=='5') is_premium = 1;
+            else if (l0=='2' && l1=='1') is_premium = 1;
+            else if (l0=='3' && l1=='1') is_premium = 1;
+            else if (l0=='1' && l1=='0') is_premium = 1;
+            else if (l0=='1' && l1=='1') is_premium = 1;
+            else if (l0=='R' && l1=='A') is_premium = 1;
+            else if (l0=='H' && l1=='1') {
+                if (strncmp(ptxt,"FPN/",4)==0) is_premium = 1;
+                else if (strncmp(ptxt,"POS/",4)==0) is_premium = 1;
+                else if (strncmp(ptxt,"PWI/",4)==0) is_premium = 1;
+                else if (strncmp(ptxt,"EM-",3)==0) is_premium = 1;
+                else if (strncmp(ptxt,"/TXT/",5)==0) is_premium = 1;
+                else if (ptxt[0]>='0' && ptxt[0]<='9') is_premium = 1;
+                else if (ptxt[0]=='D' || ptxt[0]=='M') is_premium = 1;
+            }
+            if (is_premium)
+                web_map_add_premium_msg(reg, flight, label, txt_z2,
+                                         ul, timestamp);
         }
     }
 

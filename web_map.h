@@ -83,5 +83,8 @@ void web_map_count_uw_ambiguous(void);
 void web_map_add_acars_message(const char *reg, const char *flight,
                                 const char *label, const char *text,
                                 int ul, uint64_t timestamp_ns);
+void web_map_add_premium_msg(const char *reg, const char *flight,
+                                const char *label, const char *text,
+                                int ul, uint64_t timestamp_ns);
 
 #endif
