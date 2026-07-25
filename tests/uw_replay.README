@@ -1,0 +1,65 @@
+uw_replay - offline UW-fail characterization harness
+====================================================
+
+Answers: among Iridium bursts that PASS burst_downmix correlation but FAIL the
+qpsk_demod unique-word re-check (the "_UN" population, ~37% on the Elba feeder),
+which factor is responsible and what fraction is actually recoverable?
+
+It replays the EXACT qpsk_demod decode logic against saved post-downmix burst
+frames (.cf32, 250 kHz / 10 sps, extracted at the correlator's uw_start) and
+sweeps one recovery knob at a time: 4-quadrant phase rotation, symbol-timing /
+start-phase, and residual CFO (+/-40 kHz). A full-frame exhaustive UW slide
+answers "is the DL/UL unique word present ANYWHERE in this burst?"
+
+Built-in oracle: baseline must PASS the _DL files and FAIL the _UN files. If it
+reproduces those ground-truth labels, the replay is faithful.
+
+Only dependency is ../iridium.h (repo root). No FFTW, no CMake. Keep this file
+in tests/ so the include resolves.
+
+BUILD
+-----
+    gcc -O2 -o tests/uw_replay tests/uw_replay.c -lm
+
+RUN
+---
+    tests/uw_replay <corpus_dir> [max_files]
+
+  <corpus_dir>  directory of *_DL.cf32 / *_UL.cf32 / *_UN.cf32 files
+                (wherever --save-bursts wrote them)
+  max_files     process at most this many (0/absent = all). Use it to avoid
+                waiting hours on a 100k+ corpus.
+
+  Env toggles:
+    UW_NO_SCAN=1   skip the exhaustive full-frame UW slide (~25 ms/file). Turn
+                   OFF for a fast pass, keep ON for the definitive pass.
+    UW_VERBOSE=1   force the per-file table (auto-suppressed above 200 files).
+
+TYPICAL SESSION
+---------------
+    # fast representative pass, summary only:
+    UW_NO_SCAN=1 tests/uw_replay <corpus_dir> 5000
+
+    # definitive pass with full-frame UW slide on a smaller subsample:
+    tests/uw_replay <corpus_dir> 2000
+
+READING THE OUTPUT
+------------------
+  BASELINE fidelity   DL should be ~100% pass, UN ~0% pass. If not, the replay
+                      is not matching production for that batch - investigate
+                      before trusting anything else.
+  recovery by knob    how many UN reach UW Hamming<=2 under each single knob.
+                      rotation/start-phase ~0 => alignment is NOT the problem.
+                      CFO>0 => residual-Doppler subset (fix in burst_downmix.c
+                      estimate_fine_cfo, NOT qpsk_demod.c).
+  UW found somewhere  UN with the UW present at any alignment. Low => most UN
+                      are not standard-UW frames (likely burst-detector false
+                      positives; correlate_sync has no acceptance threshold).
+
+CAVEAT
+------
+A 12-symbol UW can match by chance across a wide CFO sweep. Treat "recoveries"
+as candidates until confirmed by DOWNSTREAM decode (BCH/CRC actually passing).
+
+Reference sample sits in ./burst_sample (20 DL + 20 UN). See
+RESEARCH_NOTE_UW_FAIL_CHARACTERIZATION.md (top correction block) for findings.
