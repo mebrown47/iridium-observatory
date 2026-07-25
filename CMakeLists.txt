@@ -152,6 +152,7 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/aircraft_db.c
     ${PROJECT_SOURCE_DIR}/basestation.c
     ${PROJECT_SOURCE_DIR}/waypoint_db.c
+    ${PROJECT_SOURCE_DIR}/archive.c
 )
 
 # SIMD kernels — platform-specific, runtime-detected

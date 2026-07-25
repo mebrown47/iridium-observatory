@@ -48,6 +48,7 @@
 #include "frame_output.h"
 #include "frame_decode.h"
 #include "web_map.h"
+#include "archive.h"
 #include "vita49.h"
 #include "ida_decode.h"
 #include "doppler_pos.h"
@@ -141,6 +142,8 @@ int sdrplay_gain_val = -1;  /* -1 = AGC (default), 0-59 = manual */
 int bias_tee = 0;
 int web_enabled = 0;
 int web_port = 8888;
+int archive_enabled = 0;
+char *archive_dir = NULL;
 int gsmtap_enabled = 0;
 char *gsmtap_host = NULL;
 int gsmtap_port = GSMTAP_DEFAULT_PORT;
@@ -543,7 +546,8 @@ static void *frame_consumer_thread(void *arg) {
             /* Try IDA decode if parsed output or GSMTAP is active */
             int ida_ok = 0;
             ida_burst_t burst;
-            if (parsed_mode || gsmtap_enabled || acars_enabled || web_enabled)
+            if (parsed_mode || gsmtap_enabled || acars_enabled || web_enabled ||
+                archive_enabled)
                 ida_ok = ida_decode(demod, &burst);
 
             /* Output: parsed IDA line if available, otherwise RAW */
@@ -553,7 +557,8 @@ static void *frame_consumer_thread(void *arg) {
                 frame_output_print(demod);
 
             /* Hand off to output thread for slow work (web map, ACARS, GSMTAP) */
-            if (web_enabled || position_enabled || gsmtap_enabled || acars_enabled) {
+            if (web_enabled || position_enabled || gsmtap_enabled ||
+                acars_enabled || archive_enabled) {
                 output_item_t *item = malloc(sizeof(output_item_t));
                 if (item) {
                     item->demod = *demod;   /* shallow copy */
@@ -585,13 +590,15 @@ static void *frame_consumer_thread(void *arg) {
                 fprintf(stderr, "demod: weak-sync reject id=%lu freq=%.0f Hz\n",
                         (unsigned long)frame->id, frame->center_frequency);
         } else {
-            /* UW check failed on a burst with real sync energy: detected and
-             * demodulated but no unique word matched, so it never reaches
-             * classify_frame_label(). Count it by direction -- the
-             * earliest-stage signal for whether UL bursts are present but
-             * being rejected at the demod. */
+            /* UW check failed on a burst with real sync energy: the burst was
+             * detected and demodulated but no unique word matched, so it never
+             * reaches classify_frame_label(). Count it by direction -- the
+             * earliest-stage signal for whether UL bursts are present but being
+             * rejected at the demod. */
             if (web_enabled)
                 web_map_count_uw_fail(frame->direction);
+            if (archive_enabled)
+                archive_count_uw_fail(frame->direction == DIR_UPLINK);
             if (verbose)
                 fprintf(stderr, "demod: UW check failed id=%lu freq=%.0f Hz dir=%s\n",
                         (unsigned long)frame->id, frame->center_frequency,
@@ -656,7 +663,7 @@ static void *output_thread_fn(void *arg) {
 
         demod_frame_t *demod = &item->demod;
 
-        if (web_enabled || position_enabled) {
+        if (web_enabled || position_enabled || archive_enabled) {
             decoded_frame_t decoded;
             int dec = frame_decode(demod, &decoded);
             if (dec) {
@@ -688,13 +695,32 @@ static void *output_thread_fn(void *arg) {
                 } else if (decoded.type == FRAME_MSG) {
                     if (web_enabled)
                         web_map_add_msg(&decoded.msg, decoded.timestamp);
+                    if (archive_enabled)
+                        archive_log_pager(decoded.timestamp,
+                                          decoded.msg.ric,
+                                          decoded.msg.format,
+                                          decoded.msg.csum_ok,
+                                          decoded.msg.text);
                 }
             }
 
             /* Frame-type histogram: classify every demodulated frame. */
-            if (web_enabled)
-                web_map_count_type(
-                    classify_frame_label(demod, dec, decoded.type, item->ida_ok));
+            if (web_enabled || archive_enabled) {
+                const char *ftype =
+                    classify_frame_label(demod, dec, decoded.type, item->ida_ok);
+                if (web_enabled)
+                    web_map_count_type(ftype);
+                if (archive_enabled) {
+                    int sat_id = -1;
+                    if (dec && decoded.type == FRAME_IRA)
+                        sat_id = decoded.ira.sat_id;
+                    else if (dec && decoded.type == FRAME_IBC)
+                        sat_id = decoded.ibc.sat_id;
+                    archive_count_frame(ftype,
+                                        demod->direction == DIR_UPLINK,
+                                        sat_id);
+                }
+            }
         }
 
         if (gsmtap_enabled) {
@@ -949,10 +975,11 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    if (web_enabled || gsmtap_enabled || position_enabled)
+    if (web_enabled || gsmtap_enabled || position_enabled || archive_enabled)
         frame_decode_init();
 
-    if (parsed_mode || gsmtap_enabled || acars_enabled || web_enabled)
+    if (parsed_mode || gsmtap_enabled || acars_enabled || web_enabled ||
+        archive_enabled)
         ida_decode_init();
 
     if (position_enabled) {
@@ -968,6 +995,12 @@ int main(int argc, char **argv) {
     if (web_enabled) {
         if (web_map_init(web_port) != 0)
             errx(1, "Failed to start web map server on port %d", web_port);
+    }
+
+    if (archive_enabled) {
+        if (archive_init(archive_dir) != 0)
+            errx(1, "Failed to open archive directory '%s'",
+                 archive_dir ? archive_dir : "archive");
     }
 
     if (basestation_enabled) {
@@ -1286,6 +1319,9 @@ int main(int argc, char **argv) {
 
     if (web_enabled)
         web_map_shutdown();
+
+    if (archive_enabled)
+        archive_shutdown();
 
     if (basestation_enabled) {
         basestation_destroy();

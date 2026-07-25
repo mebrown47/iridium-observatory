@@ -90,6 +90,8 @@ extern int use_chase;
 extern char *save_bursts_dir;
 extern int web_enabled;
 extern int web_port;
+extern int archive_enabled;
+extern char *archive_dir;
 extern int gsmtap_enabled;
 extern char *gsmtap_host;
 extern int gsmtap_port;
@@ -181,6 +183,8 @@ static void usage(int exitcode) {
 "\n"
 "Web map:\n"
 "    --web[=PORT]            enable live web map (default port: 8888)\n"
+"    --archive[=DIR]         append JSONL archive of frame-type rollups and\n"
+"                             decoded messages (default dir: ./archive)\n"
 "    --position[=HEIGHT_M]   estimate receiver position from Doppler shift\n"
 "                             optional height aiding in meters (implies --web)\n"
 "\n"
@@ -277,6 +281,7 @@ void parse_options(int argc, char **argv) {
         OPT_SIMD,
         OPT_CHASE,
         OPT_WEB,
+        OPT_ARCHIVE,
         OPT_GSMTAP,
         OPT_SAVE_BURSTS,
         OPT_DIAGNOSTIC,
@@ -329,6 +334,7 @@ void parse_options(int argc, char **argv) {
         { "simd",           required_argument, NULL, OPT_SIMD },
         { "chase",          optional_argument, NULL, OPT_CHASE },
         { "web",            optional_argument, NULL, OPT_WEB },
+        { "archive",        optional_argument, NULL, OPT_ARCHIVE },
         { "gsmtap",         optional_argument, NULL, OPT_GSMTAP },
         { "save-bursts",    required_argument, NULL, OPT_SAVE_BURSTS },
         { "diagnostic",     no_argument,       NULL, OPT_DIAGNOSTIC },
@@ -485,6 +491,11 @@ void parse_options(int argc, char **argv) {
             case OPT_WEB:
                 web_enabled = 1;
                 if (optarg) web_port = atoi(optarg);
+                break;
+
+            case OPT_ARCHIVE:
+                archive_enabled = 1;
+                if (optarg) archive_dir = strdup(optarg);
                 break;
 
             case OPT_GSMTAP:
