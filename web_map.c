@@ -60,7 +60,12 @@ extern int position_enabled;
 #define MAX_PAGER_MSGS   200
 #define PAGER_TEXT_MAX   168
 #define MAX_DOPPLER_SATS 16
-#define JSON_BUF_SIZE    131072
+/* /api/state serializes the entire live state (aircraft, sats, ACARS/pager
+ * rings, beams). 128 KiB silently truncated it on a busy receiver: build_json
+ * ran past the buffer, snprintf clamped, and the half-written JSON failed to
+ * parse client-side — every tab reading /api/state went blank with no error.
+ * 1 MiB clears the worst-case populated state with headroom. */
+#define JSON_BUF_SIZE    1048576
 #define HTTP_BUF_SIZE    4096
 
 /* ---- SSE client count ---- */
