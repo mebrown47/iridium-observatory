@@ -1,0 +1,10 @@
+# Runtime state, not source. Rebuilt from the JSONL archive by rollup.py;
+# delete it to force a clean full re-ingest.
+observatory.db
+observatory.db-wal
+observatory.db-shm
+observatory.db-journal
+
+# Python bytecode cache
+__pycache__/
+*.pyc

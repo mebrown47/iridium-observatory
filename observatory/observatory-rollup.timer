@@ -1,0 +1,15 @@
+# Runs the Observatory rollup every 5 minutes (and shortly after boot).
+# The rollup is incremental and cheap: it only reads bytes appended since
+# the last run, so a tight cadence keeps the Trends dashboard near-live.
+
+[Unit]
+Description=Run Iridium Observatory rollup every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

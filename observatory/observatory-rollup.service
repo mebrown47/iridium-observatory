@@ -1,0 +1,21 @@
+# Iridium Observatory — rollup (M2). Oneshot; driven by the .timer.
+# Folds the sniffer JSONL archive into hourly SQLite aggregates.
+#
+# Install (as mike on the feeder):
+#   sudo cp observatory/observatory-rollup.service /etc/systemd/system/
+#   sudo cp observatory/observatory-rollup.timer   /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now observatory-rollup.timer
+
+[Unit]
+Description=Iridium Observatory rollup (JSONL archive -> SQLite hourly aggregates)
+After=iridium-sniffer.service
+
+[Service]
+Type=oneshot
+User=mike
+WorkingDirectory=/home/mike/iridium-sniffer
+ExecStart=/usr/bin/python3 observatory/rollup.py \
+    --archive archive \
+    --db observatory/observatory.db
+Nice=10

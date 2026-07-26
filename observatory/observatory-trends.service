@@ -1,0 +1,33 @@
+# Iridium Observatory — Trends / Aviation / Doppler dashboards.
+# Read-only HTTP server rendering the SQLite aggregates, plus a read-only
+# proxy of the sniffer's live /api/doppler feed for the pass viewer. Never
+# writes to the RF engine or the live map; it is purely a consumer.
+#
+# Install (as mike on the feeder):
+#   sudo cp observatory/observatory-trends.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now observatory-trends
+#
+# Dashboard:  http://<feeder>:8890/     Logs: journalctl -u observatory-trends -f
+
+[Unit]
+Description=Iridium Observatory dashboards (read-only, port 8890)
+# The Doppler page reads the sniffer's live feed; start after it when both
+# are enabled. Only a soft ordering: the page degrades to a clear "cannot
+# reach iridium-sniffer" message rather than failing if the engine is down.
+After=network-online.target iridium-sniffer.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mike
+WorkingDirectory=/home/mike/iridium-sniffer
+ExecStart=/usr/bin/python3 observatory/trends_server.py \
+    --db observatory/observatory.db \
+    --port 8890 --host 0.0.0.0 \
+    --sniffer http://127.0.0.1:8888
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

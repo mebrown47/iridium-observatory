@@ -38,6 +38,9 @@
 #include "ida_decode.h"
 #include "doppler_pos.h"
 
+/* Set by option parsing in main.c; gates the Doppler subsystem's init. */
+extern int position_enabled;
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -937,6 +940,73 @@ static int build_json(char *buf, int bufsize)
     return off;
 }
 
+/* ---- Doppler pass history feed (read-only) ----
+ *
+ * Publishes the per-satellite frequency/time history the positioning engine
+ * already keeps for its own solver, so an external viewer can draw Doppler
+ * S-curves. Strictly a reader: it calls the existing mutex-protected
+ * accessors in doppler_pos.c and mutates no state.
+ *
+ * Emitted times are milliseconds RELATIVE to now_ms (negative = in the past).
+ * Absolute CLOCK_REALTIME nanoseconds (~1.8e18) exceed the 2^53 range in
+ * which JSON consumers can hold integers exactly, so they are not sent raw.
+ */
+
+/* Matches MEAS_PER_SAT, the per-satellite buffer depth in doppler_pos.c. */
+#define DOPPLER_HIST_MAX  200
+#define DOPPLER_BUF_SIZE  262144
+
+static int build_doppler_json(char *buf, int bufsize)
+{
+    /* doppler_pos_init() only runs under --position; without it the module's
+     * lock is never initialized. Report cleanly instead of reaching into an
+     * uninitialized subsystem. */
+    if (!position_enabled)
+        return snprintf(buf, bufsize,
+            "{\"enabled\":false,\"now_ms\":0,\"sats\":[],"
+            "\"note\":\"Doppler positioning is off — "
+            "restart iridium-sniffer with --position\"}");
+
+    struct timespec rt;
+    clock_gettime(CLOCK_REALTIME, &rt);
+    uint64_t now_ns = (uint64_t)rt.tv_sec * 1000000000ULL + rt.tv_nsec;
+
+    int sat_ids[MAX_DOPPLER_SATS];
+    double latest_freq[MAX_DOPPLER_SATS];
+    uint64_t latest_ts[MAX_DOPPLER_SATS];
+    int n = doppler_pos_get_active_sats(sat_ids, latest_freq, latest_ts,
+                                        now_ns, MAX_DOPPLER_SATS);
+
+    int off = snprintf(buf, bufsize, "{\"enabled\":true,\"now_ms\":%llu,"
+                       "\"sats\":[",
+                       (unsigned long long)(now_ns / 1000000ULL));
+
+    int emitted = 0;
+    for (int i = 0; i < n && off < bufsize - 512; i++) {
+        double freqs[DOPPLER_HIST_MAX];
+        uint64_t stamps[DOPPLER_HIST_MAX];
+        int h = doppler_pos_get_history(sat_ids[i], freqs, stamps,
+                                        DOPPLER_HIST_MAX);
+        if (h <= 0)
+            continue;
+
+        off += snprintf(buf + off, bufsize - off, "%s{\"sat\":%d,\"n\":%d,"
+                        "\"dt\":[", emitted ? "," : "", sat_ids[i], h);
+        for (int j = 0; j < h && off < bufsize - 64; j++)
+            off += snprintf(buf + off, bufsize - off, "%s%lld", j ? "," : "",
+                            ((long long)stamps[j] - (long long)now_ns)
+                                / 1000000LL);
+        off += snprintf(buf + off, bufsize - off, "],\"f\":[");
+        for (int j = 0; j < h && off < bufsize - 64; j++)
+            off += snprintf(buf + off, bufsize - off, "%s%.1f", j ? "," : "",
+                            freqs[j]);
+        off += snprintf(buf + off, bufsize - off, "]}");
+        emitted++;
+    }
+    off += snprintf(buf + off, bufsize - off, "]}");
+    return off;
+}
+
 /* ---- Embedded HTML/JS ---- */
 
 static const char HTML_PAGE[] =
@@ -1633,6 +1703,14 @@ static void *client_thread(void *arg)
         char *json = malloc(JSON_BUF_SIZE);
         if (json) {
             int jlen = build_json(json, JSON_BUF_SIZE);
+            send_response(fd, "200 OK", "application/json", json, jlen);
+            free(json);
+        }
+        close(fd);
+    } else if (strcmp(path, "/api/doppler") == 0) {
+        char *json = malloc(DOPPLER_BUF_SIZE);
+        if (json) {
+            int jlen = build_doppler_json(json, DOPPLER_BUF_SIZE);
             send_response(fd, "200 OK", "application/json", json, jlen);
             free(json);
         }
