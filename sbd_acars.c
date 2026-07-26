@@ -35,6 +35,7 @@
 #include "net_util.h"
 #include "sbd_acars.h"
 #include "web_map.h"
+#include "archive.h"
 
 #ifdef HAVE_LIBACARS
 #include <libacars/libacars.h>
@@ -49,6 +50,7 @@
 int acars_json = 0;
 extern int acars_enabled;
 extern int web_enabled;
+extern int archive_enabled;
 extern int basestation_enabled;
 extern int basestation_beam;
 static const char *station = NULL;
@@ -712,8 +714,50 @@ static int acars_extract_waypoint_position(const char *label, const char *text,
 
 #include <libacars/json.h>
 #include <libacars/adsc.h>
+#include <libacars/cpdlc.h>
 
 static la_reasm_ctx *reasm_ctx = NULL;
+
+/* Flatten multi-line libacars text output into a single " | "-separated
+ * summary line for the web map, dropping indentation and pure-structure
+ * lines ("Header:", "Message data:"). */
+static void flatten_la_text(const char *in, char *out, size_t outsz)
+{
+    size_t o = 0;
+    int first = 1;
+    int prev_colon = 0;   /* previous line ended with ':' -- join with space */
+    while (*in && o + 4 < outsz) {
+        while (*in == ' ' || *in == '\t')
+            in++;
+        const char *eol = strchr(in, '\n');
+        size_t len = eol ? (size_t)(eol - in) : strlen(in);
+        while (len > 0 && (in[len - 1] == ' ' || in[len - 1] == '\r'))
+            len--;
+        int skip = (len == 0 ||
+                    (len == 7  && strncmp(in, "Header:", 7) == 0) ||
+                    (len == 13 && strncmp(in, "Message data:", 13) == 0));
+        if (!skip) {
+            if (!first) {
+                if (prev_colon) {
+                    out[o++] = ' ';
+                } else {
+                    memcpy(out + o, " | ", 3);
+                    o += 3;
+                }
+            }
+            prev_colon = (in[len - 1] == ':');
+            if (len > outsz - o - 1)
+                len = outsz - o - 1;
+            memcpy(out + o, in, len);
+            o += len;
+            first = 0;
+        }
+        if (!eol)
+            break;
+        in = eol + 1;
+    }
+    out[o] = '\0';
+}
 
 /* Iridium message metadata for the JSON envelope */
 typedef struct {
@@ -874,6 +918,19 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
             la_vstring_destroy(vstr, true);
 
         fflush(stdout);
+    }
+
+    /* JSONL archive: every parsed message, with the full libacars decode
+     * tree attached so downstream tools never need to re-decode. */
+    if (archive_enabled && !msg->err) {
+        la_vstring *dj = la_proto_tree_format_json(NULL, tree);
+        const char *reg_a = msg->reg;
+        while (*reg_a == '.') reg_a++;
+        archive_log_acars(timestamp, ul, frequency, reg_a, msg->flight_id,
+                          msg->label, msg->txt ? msg->txt : "",
+                          dj ? dj->str : NULL);
+        if (dj)
+            la_vstring_destroy(dj, true);
     }
 
     /* Web map ACARS feed sidebar (filter heartbeats and empty-text messages) */
@@ -1066,6 +1123,32 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
                         " ETA+%dmin", adsc_eta_next);
             }
             web_map_add_premium_msg(reg_s, flt_s, "AT1", sum, ul, timestamp);
+        }
+
+        /* CPDLC decoded summary for TEST/EVAL tab (ARINC-622 IMI AT1/CR1/
+         * CC1/DR1). Render the CPDLC node with the libacars text formatter
+         * -- covers every uplink/downlink message element -- then flatten
+         * to one line. Replaces the raw ARINC-622 hex previously shown. */
+        la_proto_node *cn = la_proto_tree_find_cpdlc(tree);
+        if (cn && cn->data) {
+            la_cpdlc_msg *cm = (la_cpdlc_msg *)cn->data;
+            if (!cm->err) {
+                la_vstring *cv = la_proto_tree_format_text(NULL, cn);
+                if (cv && cv->str) {
+                    char csum[1024];
+                    flatten_la_text(cv->str, csum, sizeof(csum));
+                    if (csum[0]) {
+                        const char *reg_c = msg->reg;
+                        while (*reg_c == '.') reg_c++;
+                        const char *flt_c = msg->flight_id[0] ?
+                                            msg->flight_id : "";
+                        web_map_add_premium_msg(reg_c, flt_c, "CPDLC",
+                                                csum, ul, timestamp);
+                    }
+                }
+                if (cv)
+                    la_vstring_destroy(cv, true);
+            }
         }
 
         /* Detect OOOI events: Q0 label with OUT/OFF/ON/IN in text */
