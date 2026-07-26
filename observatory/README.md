@@ -45,7 +45,20 @@ python3 observatory/trends_server.py --db observatory/observatory.db --port 8890
 # open http://localhost:8890/
 ```
 
-## Deploy on the feeder (systemd)
+## Deploy (systemd)
+
+One-shot installer — templates the units to this machine's user / paths /
+python, primes the database, and enables both services:
+
+```
+observatory/install_observatory.sh
+# options: --user --port --host --sniffer --archive --db --uninstall
+```
+
+It is stdlib-only (no pip) and safe to re-run. Porting to another box (e.g. a
+second feeder) needs nothing but the checkout + this script.
+
+<details><summary>Manual equivalent</summary>
 
 ```
 sudo cp observatory/observatory-rollup.service /etc/systemd/system/
@@ -55,6 +68,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now observatory-rollup.timer   # rollup every 5 min
 sudo systemctl enable --now observatory-trends         # dashboard on :8890
 ```
+The committed units hardcode `User=mike` and `/home/mike/iridium-sniffer`;
+edit them for another account. The installer does this substitution for you.
+</details>
 
 Dashboard: `http://<feeder>:8890/`. All times UTC.
 
