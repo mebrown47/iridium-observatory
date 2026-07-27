@@ -1,9 +1,7 @@
-# Iridium Observatory (M2 — Rollups + Trends)
+# Iridium Observatory (Rollups + Trends)
 
-"Grafana for the Iridium constellation." A read-only analytics layer over
-the append-only JSONL archive written by `iridium-sniffer --archive`. It
-never touches the RF engine or the live map — it is purely a *consumer* of
-the archive, per the roadmap's "the RF engine is sacred" principle.
+A read-only analytics layer over the append-only JSONL archive written by `iridium-sniffer --archive`. It
+never touches the RF engine or the live map — it is purely a *consumer* of the archive.
 
 ```
   iridium-sniffer --archive          rollup.py (timer, every 5 min)
@@ -18,6 +16,7 @@ the archive, per the roadmap's "the RF engine is sacred" principle.
   Incremental (tracks per-file byte offsets in `ingest_state`), so each run
   only reads newly-appended bytes and re-running is safe and cheap. Delete
   `observatory.db` to force a clean full re-ingest.
+
 - **`trends_server.py`** — stdlib HTTP server; renders the aggregates as a
   self-contained dashboard (no external assets, works offline on the feeder).
   `GET /` dashboard · `GET /api/trends[?hours=N]` JSON · `GET /healthz`.
@@ -37,7 +36,7 @@ CPDLC and ADS-C are detected by walking each `acars` event's decoded
 libacars tree (`dec`) for a `cpdlc`/`adsc` node, so a single ACARS message
 can count toward `acars` and `cpdlc`/`adsc` simultaneously.
 
-## Run manually (dev / laptop)
+## Run manually
 
 ```
 python3 observatory/rollup.py --archive archive --db observatory/observatory.db
@@ -45,7 +44,7 @@ python3 observatory/trends_server.py --db observatory/observatory.db --port 8890
 # open http://localhost:8890/
 ```
 
-## Deploy (systemd)
+## Deploy (systemd service)
 
 One-shot installer — templates the units to this machine's user / paths /
 python, primes the database, and enables both services:
@@ -78,15 +77,19 @@ Dashboard: `http://<feeder>:8890/`. All times UTC.
 
 - **Summary cards** — frames (DL/UL), ACARS / CPDLC / ADS-C / pager counts,
   active sats, unknown-burst rate, time span.
+
 - **Frame mix** — stacked frames/hour by type (the constellation's pulse).
+
 - **Messages decoded** — per-hour by service, CPDLC highlighted.
-- **Unknown-burst rate** — unique-word failures/hour: the M3 "what's new"
+
+- **Unknown-burst rate** — unique-word failures/hour: the "what's new"
   tripwire in seed form.
+
 - **Active satellites** / **Top satellites** — coverage over time.
 
-## Next (M3)
+## Next
 
 Promote the unknown-burst panel into a real discovery instrument: baseline
 vs. current, alert on sustained deviation. The `uw_hourly` table is the
-seed; M3 adds per-burst context (freq, timing, length) from new archive
+seed; this will add per-burst context (freq, timing, length) from new archive
 event types.
