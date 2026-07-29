@@ -54,7 +54,7 @@ during oracle validation.
 | Type | Original | Now | Rationale for not deep-decoding |
 |------|----------|-----|---------------------------------|
 | IRA, IBC | Decoded | Decoded (unchanged) | — |
-| IDA → ACARS | Decoded | Decoded (unchanged) | — |
+| IDA → ACARS | Decoded (map position only) | **Decoded + surfaced**: ADS-C/CPDLC broken out into AT1 & CPDLC tabs and archived | See [docs/AT1_DECODE.md](docs/AT1_DECODE.md) |
 | **MSG** | RAW passthrough | **Decoded** | — |
 | **IIP** | RAW passthrough | **Decoded (CRC-validated)** | — |
 | ISY, IU3, IU6 | RAW passthrough | **Classified** | No decodable payload / structure not public |
