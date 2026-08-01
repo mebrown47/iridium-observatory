@@ -4,7 +4,7 @@ This document summarizes everything this branch changes relative to the
 original iridium-sniffer (master @ `eb2f8d7`, "Add light theme with toggle
 button").
 
-**Total change: 5,722 insertions / 28 deletions across 41 files** (25 new,
+**Total change: ~5,800 insertions / 28 deletions across 41 files** (25 new,
 16 modified). **No new dependencies** — the AT1/CPDLC work uses libacars-2,
 which is already an *optional* dependency in upstream's `CMakeLists.txt`
 (`HAVE_LIBACARS`); without it the binary still builds and runs. **Build-system
@@ -21,7 +21,7 @@ map are untouched at their core; all additions are additive layers on top.
 | In-process C decode + web engine | ~1,820 | Burst-type decode, frame classification, aviation-datalink surfacing, Doppler, UW gating, `--archive` |
 | Observatory analytics (Python) | ~2,270 | Read-only rollup + dashboards over the archive; **never touches the RF engine** |
 | Test harnesses | ~1,020 | Oracle-validated decode regression + UW replay |
-| Documentation | ~600 | This file + `docs/` explainers + ARCHITECTURE updates |
+| Documentation | ~680 | This file + `docs/` explainers + ARCHITECTURE updates |
 
 ---
 
