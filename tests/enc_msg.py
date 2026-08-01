@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Mike Brown
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Encode a valid Iridium MSG (messaging) frame and emit the full bitstring
 # (access code + messaging header + payload) on stdout.
 #

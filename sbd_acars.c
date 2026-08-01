@@ -10,6 +10,7 @@
  * Protocol details derived from iridium-toolkit reassembler/sbd.py (muccc)
  *
  * Copyright (c) 2026 CEMAXECUTER LLC
+ * Modifications Copyright (c) 2026 Mike Brown
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 

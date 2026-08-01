@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Mike Brown
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
  * Test harness: decode a 0/1 bitstring (full frame incl. 24-bit access code)
  * given on argv[1] via frame_decode(), and print the decoded result.
  *

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Mike Brown
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
  * uw_replay.c - Offline UW-fail characterization harness
  *
  * Replays saved post-downmix burst frames (.cf32, 250 kHz / 10 sps, extracted

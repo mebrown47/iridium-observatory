@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Mike Brown
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 Iridium Observatory — archive rollup (M2)
 

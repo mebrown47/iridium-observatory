@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Mike Brown
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
  * Test harness: print the LCW frame-type (ft) recovered by ida_lcw_ft() for a
  * 0/1 bitstring (full frame incl. 24-bit access code) on argv[1].
  *

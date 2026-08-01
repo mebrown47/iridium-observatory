@@ -2,6 +2,7 @@
  * Built-in web map server for Iridium ring alerts and satellites
  *
  * Copyright (c) 2026 CEMAXECUTER LLC
+ * Modifications Copyright (c) 2026 Mike Brown
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 

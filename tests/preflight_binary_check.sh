@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Mike Brown
+# SPDX-License-Identifier: GPL-3.0-or-later
 # preflight_binary_check.sh — will this prebuilt iridium-sniffer run on THIS machine?
 # Usage: ./preflight_binary_check.sh [path-to-binary]   (default: ./iridium-sniffer)
 # Exit 0 = good to run; exit 1 = something's missing (details printed).

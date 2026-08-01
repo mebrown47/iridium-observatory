@@ -1,7 +1,7 @@
 /*
  * JSONL archive of classified frames and decoded messages
  *
- * Copyright (c) 2026 CEMAXECUTER LLC
+ * Copyright (c) 2026 Mike Brown
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 

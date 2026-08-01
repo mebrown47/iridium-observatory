@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Mike Brown
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
  * Standalone regression check for the IIP CRC-24.
  *
  * The constants below MUST match ida_decode.c's iip_crc24(). The expected

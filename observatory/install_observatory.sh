@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Mike Brown
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # install_observatory.sh — one-shot installer for the Iridium Observatory
 # analytics layer (rollup timer + Trends/Aviation/Doppler dashboards on :8890).
