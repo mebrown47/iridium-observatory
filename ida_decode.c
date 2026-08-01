@@ -536,10 +536,13 @@ static void format_lcw_header(int ft, const lcw_t *lcw, char *out, int outsz)
         break;
     }
 
-    /* Format: LCW(%d,T:%s,C:%s,%s) padded to 110 chars + 1 space */
-    char raw[128];
+    /* Format: LCW(%d,T:%s,C:%s,%s) as a fixed 110-wide column + 1 space.
+     * raw is sized to hold the worst-case code[]/remain[] content before
+     * the .110 precision below caps the column to the caller's buffer;
+     * in practice the string is far shorter than 110. */
+    char raw[256];
     snprintf(raw, sizeof(raw), "LCW(%d,T:%s,C:%s,%s)", ft, ty, code, remain);
-    snprintf(out, outsz, "%-110s ", raw);
+    snprintf(out, outsz, "%-110.110s ", raw);
 }
 
 /* ---- LCW-only classification ----
