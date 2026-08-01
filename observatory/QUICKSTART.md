@@ -8,12 +8,14 @@ Python 3 only — **no pip, no packages to install.**
 
 1. **A working `iridium-sniffer` checkout** on the receiver box (the same repo
    this folder lives in).
+   
 2. **The sniffer running with `--archive`** so there's data to chart, e.g.
    ```
    iridium-sniffer ... --web --archive
    ```
    This writes `archive/iridium-YYYYMMDD.jsonl`. Without it the dashboards load
    but stay empty.
+   
 3. **systemd + sudo** (for the auto-start install). Python 3.
 
 ## Install (one command)

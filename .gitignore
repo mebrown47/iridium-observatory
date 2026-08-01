@@ -9,3 +9,8 @@ test-data/
 resume_claude.txt
 burst_sample/
 *.log
+# Generated aircraft DB snapshot (fetch with --update-db; do not commit)
+aircraft.csv
+# Local archive output + release bundles
+archive/
+*.zip
