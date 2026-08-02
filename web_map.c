@@ -983,9 +983,22 @@ static int build_doppler_json(char *buf, int bufsize)
     int n = doppler_pos_get_active_sats(sat_ids, latest_freq, latest_ts,
                                         now_ns, MAX_DOPPLER_SATS);
 
+    /* Reference the plot's time axis to the newest measurement's own clock,
+     * not wall time. Frame timestamps ride a sample-derived clock that drifts
+     * behind CLOCK_REALTIME over runtime (see doppler_pos_get_active_sats);
+     * subtracting wall time would shove the whole S-curve off-axis by the
+     * accumulated drift. The max measurement timestamp keeps the newest sample
+     * near dt=0. Fall back to wall time when there are no active sats. */
+    uint64_t ref_ns = 0;
+    for (int i = 0; i < n; i++)
+        if (latest_ts[i] > ref_ns)
+            ref_ns = latest_ts[i];
+    if (ref_ns == 0)
+        ref_ns = now_ns;
+
     int off = snprintf(buf, bufsize, "{\"enabled\":true,\"now_ms\":%llu,"
                        "\"sats\":[",
-                       (unsigned long long)(now_ns / 1000000ULL));
+                       (unsigned long long)(ref_ns / 1000000ULL));
 
     int emitted = 0;
     for (int i = 0; i < n && off < bufsize - 512; i++) {
@@ -1000,7 +1013,7 @@ static int build_doppler_json(char *buf, int bufsize)
                         "\"dt\":[", emitted ? "," : "", sat_ids[i], h);
         for (int j = 0; j < h && off < bufsize - 64; j++)
             off += snprintf(buf + off, bufsize - off, "%s%lld", j ? "," : "",
-                            ((long long)stamps[j] - (long long)now_ns)
+                            ((long long)stamps[j] - (long long)ref_ns)
                                 / 1000000LL);
         off += snprintf(buf + off, bufsize - off, "],\"f\":[");
         for (int j = 0; j < h && off < bufsize - 64; j++)

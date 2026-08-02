@@ -1344,13 +1344,35 @@ int doppler_pos_get_active_sats(int *sat_ids, double *latest_freq,
 {
     const uint64_t MAX_AGE_NS = 60000000000ULL;
     pthread_mutex_lock(&pos_lock);
+
+    /* Age measurements against the newest measurement's own clock, NOT the
+     * caller's wall clock. Frame timestamps ride a sample-derived clock
+     * (anchored to CLOCK_REALTIME once at startup, then advanced by processed
+     * sample count). Dropped sample buffers and any SDR sample-rate offset make
+     * that clock drift monotonically behind wall time; comparing against a
+     * fresh CLOCK_REALTIME therefore ages *every* satellite out after enough
+     * runtime (~a day at ~0.07% rate error), zeroing the Doppler display until
+     * a restart re-anchors the clock. Using the max stored timestamp as the
+     * reference keeps "active" meaning "seen within 60 s of the latest burst",
+     * which is drift-immune and matches how doppler_pos_solve() defines now.
+     * now_ns is retained for API compatibility but intentionally unused. */
+    (void)now_ns;
+    uint64_t ref_ns = 0;
+    for (int i = 0; i < n_satellites; i++) {
+        sat_buffer_t *s = &satellites[i];
+        if (s->count == 0) continue;
+        sat_meas_t *latest = sat_buf_get(s, s->count - 1);
+        if (latest && latest->timestamp > ref_ns)
+            ref_ns = latest->timestamp;
+    }
+
     int written = 0;
     for (int i = 0; i < n_satellites && written < max_out; i++) {
         sat_buffer_t *s = &satellites[i];
         if (s->count == 0) continue;
         sat_meas_t *latest = sat_buf_get(s, s->count - 1);
         if (!latest) continue;
-        if (now_ns - latest->timestamp > MAX_AGE_NS) continue;
+        if (ref_ns - latest->timestamp > MAX_AGE_NS) continue;
         sat_ids[written] = s->sat_id;
         latest_freq[written] = latest->freq;
         latest_timestamp[written] = latest->timestamp;
