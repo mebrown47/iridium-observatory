@@ -1042,3 +1042,4 @@ This project builds on the work of several open-source projects:
 - [VkFFT](https://github.com/DTolm/VkFFT) (MIT) by Dmitrii Tolmachev -- header-only GPU FFT library used for both OpenCL and Vulkan burst detection
 - [iridium-toolkit](https://github.com/muccc/iridium-toolkit) (BSD-2-Clause) by Sec and schneider42 -- the downstream frame parser and reassembler, and the reference implementation for BCH error correction and de-interleaving algorithms
 - [libacars](https://github.com/szpajder/libacars) (MIT) by Tomasz Lemiech (szpajder) -- optional dependency for ARINC-622, ADS-C, and CPDLC decoding within ACARS messages
+# iridium-observatory
