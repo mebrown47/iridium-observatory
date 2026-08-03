@@ -1,16 +1,29 @@
-# iridium-sniffer
+# iridium-observatory
 
-A standalone Iridium satellite burst detector and demodulator written in C. It provides an alternative to [gr-iridium](https://github.com/muccc/gr-iridium) by eliminating the GNU Radio dependency, while producing the same [iridium-toolkit](https://github.com/muccc/iridium-toolkit) compatible RAW output on stdout. For users who want a lighter-weight, dependency-free option or need embedded deployment, this offers similar functionality with a different architectural approach.
+A generalized monitoring tool and dashboard for the Iridium satellite network. It builds on a standalone Iridium burst detector and demodulator written in C -- no GNU Radio, no Python pipeline -- and layers on in-process frame decoding (pager, IP, and aviation datalink), a live tabbed web dashboard, Doppler-based receiver positioning, and an append-only analytics layer (the **Observatory**) for long-run trends. The aim is to surface as much of the Iridium air interface as possible, in real time, from a single binary -- and to keep widening that coverage as the network evolves.
 
-Supports HackRF, BladeRF, USRP (UHD), SDRplay (native API), and SoapySDR for live capture, or processes IQ recordings from file. Optional GPU-accelerated burst detection is available via OpenCL (NVIDIA, AMD, Intel) as a runtime plugin -- the main binary works on systems without GPU support. Runs on Raspberry Pi 5 and other ARM boards in CPU-only mode with FFTW wisdom pre-generation.
+## Origin & provenance
 
-A built-in web map (`--web`, beta) provides a real-time Leaflet.js visualization of decoded ring alert positions and active satellites -- no external tools or Python required.
+iridium-observatory is a fork of [iridium-sniffer](https://github.com/alphafox02/iridium-sniffer) (© CEMAXECUTER LLC), licensed under **GPL-3.0-or-later**. The upstream project supplies the RF engine -- burst detection, downmix, DQPSK demodulation, and iridium-toolkit--compatible RAW output -- which remains the foundation here and is used unmodified at its core. This fork adds the frame-decoding, dashboard, and analytics layers described below. All upstream copyright and license notices are retained; per-file headers record authorship, and [SCOPE_COMPARISON.md](SCOPE_COMPARISON.md) gives a complete file-by-file diff against upstream.
 
-Built-in ACARS/SBD decoding (`--acars`) extracts aviation messages directly from IDA frames. When [libacars-2](https://github.com/szpajder/libacars) is installed, ARINC-622 application payloads (ADS-C, CPDLC, OHMA) are fully decoded -- no Python pipeline needed.
+> **Binary name:** the build still produces an executable named `iridium-sniffer` (the upstream engine name), so every command below invokes `./iridium-sniffer`. Runtime paths such as `~/.iridium-sniffer/` and `~/.iridium-sniffer-fftw-wisdom` keep the upstream name as well.
 
-Native GSMTAP output (`--gsmtap`) sends decoded IDA (Iridium Data) frames directly to Wireshark via UDP, eliminating the need for the Python `iridium-parser.py -m gsmtap` pipeline.
+## What this fork adds
 
-## Features
+Beyond the upstream engine, iridium-observatory contributes:
+
+- **In-process pager (MSG) decoding** -- RIC, format, sequence, and 7-bit ASCII / 4-bit BCD text decoded directly, with BCH error correction (no external `iridium-parser.py`).
+- **IIP (IP-over-PPP) decoding** -- header / seq / ack / payload with CRC-24 validation.
+- **Per-frame classification** -- every demodulated frame labeled (IRA, IBC, MSG, IDA, ISY, IIP, VOC, ITL, IU3, IU6, RAW).
+- **Tabbed web dashboard** -- the upstream Leaflet map extended with Pager, AT1 (ADS-C), and CPDLC message tabs, plus a live frame-type histogram.
+- **Aviation datalink surfacing** -- ADS-C position reports and CPDLC clearances rendered as operator-readable lines (see [docs/AT1_DECODE.md](docs/AT1_DECODE.md)).
+- **Doppler S-curve tracking** -- a live per-satellite Doppler page backed by `GET /api/doppler`, on top of the upstream `--position` solver.
+- **Signal-quality gating** -- `--uw-reject=T`, a matched-filter unique-word sync-score gate that drops burst-detector false positives.
+- **Observability & analytics** -- `--archive[=DIR]` writes an append-only JSONL archive that the stdlib-only **Observatory** (`observatory/`) folds into SQLite and serves as Trends / Aviation / Doppler dashboards. The RF engine is never touched; the Observatory is a read-only consumer.
+
+See [docs/NEW_FEATURES.md](docs/NEW_FEATURES.md), [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md), and [observatory/QUICKSTART.md](observatory/QUICKSTART.md) for details.
+
+## Core engine features (from iridium-sniffer)
 
 - Full Iridium L-band burst detection, downmix, and DQPSK demodulation pipeline
 - Direct iridium-toolkit RAW output, compatible with iridium-parser.py and reassembler.py
@@ -37,8 +50,8 @@ Native GSMTAP output (`--gsmtap`) sends decoded IDA (Iridium Data) frames direct
 DragonOS Noble ships with HackRF, BladeRF, USRP (UHD), SoapySDR, and OpenCL drivers pre-installed. Just clone and build:
 
 ```bash
-git clone https://github.com/alphafox02/iridium-sniffer.git
-cd iridium-sniffer
+git clone https://github.com/mebrown47/iridium-observatory.git
+cd iridium-observatory
 mkdir build && cd build
 cmake ..
 make -j$(nproc)
@@ -49,8 +62,8 @@ CMake auto-detects the available SDR libraries, GPU support, and libacars. All S
 ### Ubuntu / Debian
 
 ```bash
-git clone https://github.com/alphafox02/iridium-sniffer.git
-cd iridium-sniffer
+git clone https://github.com/mebrown47/iridium-observatory.git
+cd iridium-observatory
 
 # Core dependencies
 sudo apt install build-essential cmake libfftw3-dev
@@ -95,8 +108,8 @@ The downmix worker count auto-scales based on CPU cores: 4 workers on 8+ cores, 
 The Pi 5's VideoCore VII GPU passes basic Vulkan compute tests but cannot sustain the throughput needed for real-time FFT batch processing. Build CPU-only and use `--no-gpu`:
 
 ```bash
-git clone https://github.com/alphafox02/iridium-sniffer.git
-cd iridium-sniffer
+git clone https://github.com/mebrown47/iridium-observatory.git
+cd iridium-observatory
 sudo apt install build-essential cmake libfftw3-dev libsoapysdr-dev
 
 mkdir build && cd build
@@ -1033,13 +1046,15 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for design documentation covering the sig
 
 GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
 
+Copyright © CEMAXECUTER LLC (upstream iridium-sniffer) and Mike Brown (this fork's modifications). Individual source files carry the applicable copyright and SPDX headers; the `qpsk_demod` sources additionally retain their Free Software Foundation / GNU Radio origin notice. As a GPL-3.0 derivative, this fork preserves all upstream notices and remains under the same license.
+
 ## Acknowledgments
 
-This project builds on the work of several open-source projects:
+iridium-observatory is a fork of, and builds directly on, **iridium-sniffer**. Full credit to that project and to the wider ecosystem it draws from:
 
+- [iridium-sniffer](https://github.com/alphafox02/iridium-sniffer) (GPL-3.0-or-later) © CEMAXECUTER LLC -- the upstream project this is forked from. It provides the core RF engine (burst detection, downmix, DQPSK demodulation, RAW output) plus the ACARS/SBD, GSMTAP, BaseStation, and Doppler-positioning functionality that this fork extends.
 - [gr-iridium](https://github.com/muccc/gr-iridium) (GPL-3.0-or-later) by Sec and schneider42 (muccc) -- the signal processing algorithms for burst detection, downmix, and QPSK demodulation are clean-room C ports of gr-iridium's GNU Radio blocks
 - [ice9-bluetooth-sniffer](https://github.com/mikeryan/ice9-bluetooth-sniffer) (GPL-2.0) by Mike Ryan / ICE9 Consulting LLC -- the SDR backend abstraction, build system, and threading infrastructure are adapted from this project
 - [VkFFT](https://github.com/DTolm/VkFFT) (MIT) by Dmitrii Tolmachev -- header-only GPU FFT library used for both OpenCL and Vulkan burst detection
 - [iridium-toolkit](https://github.com/muccc/iridium-toolkit) (BSD-2-Clause) by Sec and schneider42 -- the downstream frame parser and reassembler, and the reference implementation for BCH error correction and de-interleaving algorithms
 - [libacars](https://github.com/szpajder/libacars) (MIT) by Tomasz Lemiech (szpajder) -- optional dependency for ARINC-622, ADS-C, and CPDLC decoding within ACARS messages
-# iridium-observatory
