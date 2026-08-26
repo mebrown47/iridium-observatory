@@ -29,6 +29,9 @@
 #ifdef HAVE_HACKRF
 #include "hackrf.h"
 #endif
+#ifdef HAVE_AIRSPY
+#include "airspy.h"
+#endif
 #ifdef HAVE_BLADERF
 #include "bladerf.h"
 #endif
@@ -135,6 +138,13 @@ int soapy_gain_elem_count = 0;
 #ifdef HAVE_SDRPLAY
 char *sdrplay_serial = NULL;
 #endif
+#ifdef HAVE_AIRSPY
+char *airspy_serial = NULL;
+/* Distinct from airspy_serial: "-i airspy" with no serial is legitimate and
+ * means "the first device found", so a null serial cannot stand in for
+ * "no Airspy was asked for". */
+int airspy_selected = 0;
+#endif
 
 /* Per-SDR gain settings (defaults from gr-iridium example configs) */
 int hackrf_lna_gain = 40;
@@ -144,6 +154,16 @@ int bladerf_gain_val = 40;
 int usrp_gain_val = 40;
 double soapy_gain_val = 30.0;
 int sdrplay_gain_val = -1;  /* -1 = AGC (default), 0-59 = manual */
+/* -1 means "not set". The individual gains win if any is given, then
+ * linearity, then sensitivity -- which is the default because Iridium
+ * bursts are short and weak, so noise figure decides whether they clear
+ * the detector at all. See airspy.c for why linearity is worth trying. */
+int airspy_lna_gain = -1;
+int airspy_mixer_gain = -1;
+int airspy_vga_gain = -1;
+int airspy_linearity_gain = -1;
+int airspy_sensitivity_gain = 12;
+int airspy_packing = 1;
 int bias_tee = 0;
 int web_enabled = 0;
 int web_port = 8888;
@@ -1134,6 +1154,9 @@ int main(int argc, char **argv) {
 #ifdef HAVE_HACKRF
     hackrf_device *hackrf = NULL;
 #endif
+#ifdef HAVE_AIRSPY
+    struct airspy_device *airspy = NULL;
+#endif
 #ifdef HAVE_BLADERF
     struct bladerf *bladerf_dev = NULL;
     pthread_t bladerf_thread;
@@ -1449,6 +1472,13 @@ int main(int argc, char **argv) {
             sdr_started = 1;
         }
 #endif
+#ifdef HAVE_AIRSPY
+        if (!sdr_started && airspy_selected) {
+            airspy = airspy_setup();
+            airspy_start_rx(airspy, airspy_rx_cb, NULL);
+            sdr_started = 1;
+        }
+#endif
 #ifdef HAVE_HACKRF
         if (!sdr_started && serial != NULL) {
             hackrf = hackrf_setup();
@@ -1483,6 +1513,10 @@ int main(int argc, char **argv) {
         if (live && hackrf != NULL && !hackrf_is_streaming(hackrf))
             break;
 #endif
+#ifdef HAVE_AIRSPY
+        if (live && airspy != NULL && !airspy_is_streaming(airspy))
+            break;
+#endif
         pause();
     }
     running = 0;
@@ -1494,6 +1528,12 @@ int main(int argc, char **argv) {
             hackrf_stop_rx(hackrf);
             hackrf_close(hackrf);
             hackrf_exit();
+        }
+#endif
+#ifdef HAVE_AIRSPY
+        if (airspy != NULL) {
+            airspy_stop_rx(airspy);
+            airspy_close(airspy);
         }
 #endif
 #ifdef HAVE_BLADERF

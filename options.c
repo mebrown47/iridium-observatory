@@ -27,6 +27,9 @@
 #ifdef HAVE_HACKRF
 #include "hackrf.h"
 #endif
+#ifdef HAVE_AIRSPY
+#include "airspy.h"
+#endif
 #ifdef HAVE_BLADERF
 #include "bladerf.h"
 #endif
@@ -66,6 +69,12 @@ extern char *usrp_serial;
 #ifdef HAVE_SOAPYSDR
 extern int soapy_num;
 extern char *soapy_args;
+#ifdef HAVE_AIRSPY
+extern char *airspy_serial;
+extern int airspy_selected;
+extern int airspy_lna_gain, airspy_mixer_gain, airspy_vga_gain;
+extern int airspy_linearity_gain, airspy_sensitivity_gain, airspy_packing;
+#endif
 #define SOAPY_SETTINGS_MAX 8
 extern char *soapy_setting_keys[SOAPY_SETTINGS_MAX];
 extern char *soapy_setting_vals[SOAPY_SETTINGS_MAX];
@@ -285,6 +294,9 @@ static void list_interfaces(void) {
 #ifdef HAVE_SDRPLAY
     sdrplay_list();
 #endif
+#ifdef HAVE_AIRSPY
+    airspy_list();
+#endif
 #ifdef HAVE_SOAPYSDR
     soapy_list();
 #endif
@@ -342,6 +354,12 @@ void parse_options(int argc, char **argv) {
         OPT_CLOCK_SOURCE,
         OPT_TIME_SOURCE,
         OPT_SDRPLAY_GAIN,
+        OPT_AIRSPY_LNA,
+        OPT_AIRSPY_MIXER,
+        OPT_AIRSPY_VGA,
+        OPT_AIRSPY_LINEARITY,
+        OPT_AIRSPY_SENSITIVITY,
+        OPT_AIRSPY_NO_PACKING,
         OPT_VITA49,
         OPT_BASESTATION,
         OPT_BASESTATION_BEAM,
@@ -401,6 +419,12 @@ void parse_options(int argc, char **argv) {
         { "clock-source",   required_argument, NULL, OPT_CLOCK_SOURCE },
         { "time-source",    required_argument, NULL, OPT_TIME_SOURCE },
         { "sdrplay-gain",   required_argument, NULL, OPT_SDRPLAY_GAIN },
+        { "airspy-lna",     required_argument, NULL, OPT_AIRSPY_LNA },
+        { "airspy-mixer",   required_argument, NULL, OPT_AIRSPY_MIXER },
+        { "airspy-vga",     required_argument, NULL, OPT_AIRSPY_VGA },
+        { "airspy-linearity",   required_argument, NULL, OPT_AIRSPY_LINEARITY },
+        { "airspy-sensitivity", required_argument, NULL, OPT_AIRSPY_SENSITIVITY },
+        { "airspy-no-packing",  no_argument,   NULL, OPT_AIRSPY_NO_PACKING },
         { "vita49",         optional_argument, NULL, OPT_VITA49 },
         { "basestation",    optional_argument, NULL, OPT_BASESTATION },
         { "basestation-beam", no_argument,     NULL, OPT_BASESTATION_BEAM },
@@ -424,6 +448,17 @@ void parse_options(int argc, char **argv) {
                 break;
 
             case 'i':
+#ifdef HAVE_AIRSPY
+                if (strstr(optarg, "airspy-") == optarg) {
+                    airspy_serial = strdup(optarg + 7);
+                    airspy_selected = 1;
+                    break;
+                }
+                if (strcmp(optarg, "airspy") == 0) {
+                    airspy_selected = 1;     /* first device found */
+                    break;
+                }
+#endif
 #ifdef HAVE_HACKRF
                 if (strstr(optarg, "hackrf-") == optarg) {
                     serial = strdup(optarg + 7);
@@ -532,6 +567,14 @@ void parse_options(int argc, char **argv) {
             case OPT_USRP_GAIN:   usrp_gain_val    = atoi(optarg); break;
             case OPT_SOAPY_GAIN:  soapy_gain_val   = atof(optarg); break;
             case OPT_SDRPLAY_GAIN: sdrplay_gain_val = atoi(optarg); break;
+#ifdef HAVE_AIRSPY
+            case OPT_AIRSPY_LNA:   airspy_lna_gain = atoi(optarg);   break;
+            case OPT_AIRSPY_MIXER: airspy_mixer_gain = atoi(optarg); break;
+            case OPT_AIRSPY_VGA:   airspy_vga_gain = atoi(optarg);   break;
+            case OPT_AIRSPY_LINEARITY:   airspy_linearity_gain = atoi(optarg);   break;
+            case OPT_AIRSPY_SENSITIVITY: airspy_sensitivity_gain = atoi(optarg); break;
+            case OPT_AIRSPY_NO_PACKING:  airspy_packing = 0;         break;
+#endif
             case OPT_NO_GPU:      use_gpu = 0;                       break;
             case OPT_NO_SIMD:     simd_mode = SIMD_SCALAR;           break;
             case OPT_SIMD:
@@ -891,6 +934,9 @@ void parse_options(int argc, char **argv) {
 #endif
 #ifdef HAVE_SDRPLAY
         || sdrplay_serial
+#endif
+#ifdef HAVE_AIRSPY
+        || airspy_selected
 #endif
     )
         live = 1;
