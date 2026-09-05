@@ -123,8 +123,22 @@ endif()
 option(USE_OPENCL "Use OpenCL GPU acceleration for burst detection" ${OPENCL_DEFAULT})
 option(USE_VULKAN "Use Vulkan GPU acceleration for burst detection" OFF)
 
-if(USE_OPENCL AND USE_VULKAN)
-    message(FATAL_ERROR "USE_OPENCL and USE_VULKAN are mutually exclusive. Choose one.")
+# The dlopen plugin interface (create/process/destroy over a batch of frames)
+# is not actually GPU-specific, so the same seam carries a CPU thread pool.
+# Burst detection is otherwise single-threaded, and window+FFT+magnitude is
+# ~79% of it and perfectly per-frame independent. Useful anywhere the GPU
+# backends are unavailable or, as on Mali, slower than the CPU.
+option(USE_CPU_POOL "Use a CPU thread pool for batched burst-detection FFT" OFF)
+
+set(_fft_backends 0)
+foreach(_b USE_OPENCL USE_VULKAN USE_CPU_POOL)
+    if(${_b})
+        math(EXPR _fft_backends "${_fft_backends} + 1")
+    endif()
+endforeach()
+if(_fft_backends GREATER 1)
+    message(FATAL_ERROR "USE_OPENCL, USE_VULKAN and USE_CPU_POOL are mutually "
+                        "exclusive: they all build ${GPU_PLUGIN_NAME}. Choose one.")
 endif()
 
 configure_file(${PROJECT_SOURCE_DIR}/config.h.in ${PROJECT_BINARY_DIR}/config.h)
@@ -168,15 +182,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|x86|i[3-6]86")
         PROPERTIES COMPILE_FLAGS "-msse4.2")
     set_source_files_properties(${PROJECT_SOURCE_DIR}/simd_avx2.c
         PROPERTIES COMPILE_FLAGS "-mavx2 -mfma")
-    list(APPEND SOURCES
+    # Kept in their own variable so the FFT plugin can link the same kernels.
+    set(SIMD_SOURCES
         ${PROJECT_SOURCE_DIR}/simd_sse42.c
         ${PROJECT_SOURCE_DIR}/simd_avx2.c)
+    list(APPEND SOURCES ${SIMD_SOURCES})
     message(STATUS "SIMD: SSE4.2 + AVX2+FMA kernels enabled (runtime-detected)")
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|ARM|aarch64|AARCH64")
     # AArch64: NEON is part of the base ISA, always present.
     # No extra compile flags required; <arm_neon.h> is unconditionally available.
-    list(APPEND SOURCES 
-        ${PROJECT_SOURCE_DIR}/simd_neon.c)
+    set(SIMD_SOURCES ${PROJECT_SOURCE_DIR}/simd_neon.c)
+    list(APPEND SOURCES ${SIMD_SOURCES})
     message(STATUS "SIMD: NEON kernels enabled (AArch64)")
 else()
     message(STATUS "SIMD: scalar only (unrecognised platform)")
@@ -339,6 +355,25 @@ elseif(USE_VULKAN AND Vulkan_FOUND)
         install(TARGETS iridium-sniffer-gpu DESTINATION lib)
         message(STATUS "GPU acceleration: Vulkan (plugin)")
     endif()
+elseif(USE_CPU_POOL)
+    add_library(iridium-sniffer-gpu SHARED
+        ${PROJECT_SOURCE_DIR}/cpu/burst_fft_pool.c
+        ${PROJECT_SOURCE_DIR}/simd_generic.c
+        ${SIMD_SOURCES})
+    target_include_directories(iridium-sniffer-gpu PRIVATE
+        "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/opencl"
+        "${PROJECT_BINARY_DIR}" ${FFTW_INCLUDE_DIR} ${FFTW_INCLUDE_DIRS})
+    target_link_libraries(iridium-sniffer-gpu PRIVATE
+        ${FFTW_FLOAT_LIB} Threads::Threads m)
+    # Same dialect as the main target: simd_kernels.h uses posix_memalign,
+    # which needs the GNU/POSIX feature set to be declared.
+    set_target_properties(iridium-sniffer-gpu PROPERTIES
+        C_STANDARD 99
+        C_EXTENSIONS ON
+        C_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+    install(TARGETS iridium-sniffer-gpu DESTINATION lib)
+    message(STATUS "Burst-detection FFT: CPU thread pool (plugin)")
 else()
     message(STATUS "GPU acceleration: disabled (no plugin built)")
 endif()

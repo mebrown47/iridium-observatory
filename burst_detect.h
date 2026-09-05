@@ -91,6 +91,9 @@ float burst_detector_noise_floor(burst_detector_t *det);
 float burst_detector_peak_signal(burst_detector_t *det);
 
 /* Destroy and free all resources */
+/* Drain any partially accumulated detection batch (see DETECT_BATCH_FRAMES).
+ * Call once at end of stream, before destroy. */
+void burst_detector_flush(burst_detector_t *det, burst_callback_t cb, void *user);
 void burst_detector_destroy(burst_detector_t *det);
 
 /* Thread function: pulls from samples_queue, pushes to burst_queue */

@@ -293,7 +293,22 @@ volatile sig_atomic_t running = 1;
 pid_t self_pid;
 
 /* Queues */
-#define SAMPLES_QUEUE_SIZE 4096
+/*
+ * SAMPLES_QUEUE_SIZE was 4096. The file reader fills it in 32768-sample
+ * blocks, so at 10 MS/s that is 4096 * 32768 = 134 M samples -- 13.4
+ * SECONDS of signal. On a device that cannot quite keep up, the queue does
+ * not prevent loss, it postpones it: measured on an Android tablet taking
+ * Iridium at 10 MS/s, q_max climbed linearly for 44 s, hit the ceiling,
+ * and only then did the producer start dropping. All the depth bought was
+ * 44 s of grace followed by a receiver running 13.4 s behind the antenna,
+ * with every decoded frame timestamped that late.
+ *
+ * 512 is ~1.7 s at 10 MS/s and ~6.7 s at 2.5 -- ample for scheduler jitter
+ * and a USB hiccup, short enough that the pipeline stays current and a
+ * sustained deficit shows up as drops immediately, where it can be seen
+ * and fixed, rather than 44 s later.
+ */
+#define SAMPLES_QUEUE_SIZE 512
 #define BURST_QUEUE_SIZE   2048
 #define FRAME_QUEUE_SIZE   512
 #define OUTPUT_QUEUE_SIZE  1024
