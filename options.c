@@ -437,9 +437,29 @@ void parse_options(int argc, char **argv) {
     while ((ch = getopt_long(argc, argv, "f:li:c:r:Bd:vh", longopts, NULL)) != -1) {
         switch (ch) {
             case 'f':
-                in_file = fopen(optarg, "rb");
-                if (in_file == NULL)
-                    err(1, "Cannot open input file '%s'", optarg);
+                /*
+                 * "-" means stdin, taken as the descriptor we already have
+                 * rather than reopened through the filesystem. dumpvdl2 and
+                 * dumphfdl spell it the same way (--iq-file -), and an app
+                 * feeding all three down a pipe should not have to spell
+                 * this one differently.
+                 *
+                 * It used to be given /dev/stdin, which does not exist on
+                 * Android 5.1 -- there is no /dev/fd there either -- so on a
+                 * Fire HD 8 the decoder died at startup with ENOENT while
+                 * its siblings ran. The producer then took EPIPE on its
+                 * first write and the sample queue backed up behind a
+                 * process that was already gone, which reads as a queue
+                 * overflow rather than as a missing file. Wanting no
+                 * filesystem at all is the fix.
+                 */
+                if (strcmp(optarg, "-") == 0) {
+                    in_file = stdin;
+                } else {
+                    in_file = fopen(optarg, "rb");
+                    if (in_file == NULL)
+                        err(1, "Cannot open input file '%s'", optarg);
+                }
                 in_filename = optarg;
                 break;
 
