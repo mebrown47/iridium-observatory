@@ -96,7 +96,17 @@ GPU_API gpu_burst_fft_t *gpu_burst_fft_create(int fft_size, int batch_size,
     g->batch_size = batch_size;
 
     const char *e = getenv("IRIDIUM_POOL_THREADS");
-    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    /*
+     * _SC_NPROCESSORS_CONF, not _ONLN. Devices that hotplug idle cores
+     * report only the cores that happen to be awake when this runs, and a
+     * pool is sized once at startup: on a Fire HD 8 (MT8173, 2x A72 +
+     * 2x A53) three of the four were offline at that moment, so _ONLN
+     * returned 1 and the pool built itself a single thread -- which is
+     * worse than no pool at all, because it still pays for the batch copy.
+     * The cores come online as soon as there is load, i.e. immediately
+     * after this decision has already been made.
+     */
+    long ncpu = sysconf(_SC_NPROCESSORS_CONF);
     g->nthreads = e ? atoi(e) : (int)(ncpu > 0 ? ncpu : 1);
     if (g->nthreads < 1) g->nthreads = 1;
     if (g->nthreads > MAX_THREADS) g->nthreads = MAX_THREADS;

@@ -1401,7 +1401,11 @@ int main(int argc, char **argv) {
 
     /* Auto-detect worker count from CPU cores if not set via --workers */
     if (num_downmix_workers <= 0) {
-        long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+        /* _CONF rather than _ONLN: a device that hotplugs idle cores
+         * reports only what is awake right now, and this runs before there
+         * is any load to wake them. Measured on a Fire HD 8: _ONLN said 1
+         * of 4. */
+        long ncpu = sysconf(_SC_NPROCESSORS_CONF);
         if (ncpu >= 8)
             num_downmix_workers = 4;
         else if (ncpu >= 4)
@@ -1412,7 +1416,7 @@ int main(int argc, char **argv) {
     if (num_downmix_workers > MAX_DOWNMIX_WORKERS)
         num_downmix_workers = MAX_DOWNMIX_WORKERS;
     fprintf(stderr, "iridium-sniffer: %d downmix workers (%ld CPU cores)\n",
-            num_downmix_workers, sysconf(_SC_NPROCESSORS_ONLN));
+            num_downmix_workers, sysconf(_SC_NPROCESSORS_CONF));
 
     burst_downmix_t *dm[num_downmix_workers];
     for (int i = 0; i < num_downmix_workers; i++) {
