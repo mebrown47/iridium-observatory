@@ -23,7 +23,7 @@ extern int verbose;
 /* ---- Configuration ---- */
 
 #define MAX_SATELLITES       128
-#define MEAS_PER_SAT         200     /* circular buffer depth per satellite */
+#define MEAS_PER_SAT         200     /* measurements kept per satellite (newest by time) */
 #define MIN_MEASUREMENTS     8       /* minimum to attempt a solution */
 #define MIN_SATELLITES       2       /* need geometry from multiple passes */
 #define MAX_ITERATIONS       200     /* WLS iteration limit */
@@ -46,8 +46,7 @@ typedef struct {
 
 typedef struct {
     int sat_id;
-    sat_meas_t meas[MEAS_PER_SAT];
-    int head;               /* next write index */
+    sat_meas_t meas[MEAS_PER_SAT];   /* sorted by timestamp, oldest first */
     int count;              /* total stored (capped at MEAS_PER_SAT) */
     double channel_freq;    /* estimated true channel frequency (0 = unknown) */
 } sat_buffer_t;
@@ -73,6 +72,14 @@ static int height_aiding_enabled;
 static double prev_ecef[3] = {0, 0, 0};
 static double prev_clock_drift = 0;
 static int has_prev_solution = 0;
+
+void doppler_pos_reset_solution(void)
+{
+    pthread_mutex_lock(&pos_lock);
+    has_prev_solution = 0;
+    prev_clock_drift = 0;
+    pthread_mutex_unlock(&pos_lock);
+}
 static int jump_reject_count = 0;
 
 /* ---- Helpers ---- */
@@ -125,29 +132,40 @@ static sat_buffer_t *find_or_create_sat(int sat_id)
     return s;
 }
 
-/* Add measurement to a satellite's circular buffer */
+/* Add a measurement, keeping the buffer sorted by timestamp. Frames arrive
+ * slightly out of order (the downmix/demod workers run in parallel), so
+ * keeping arrival order - as a ring buffer did - made which measurements
+ * survive, and so the solution, vary from run to run on the same input.
+ * When full, the oldest by time goes (or the new one, if it is older). */
 static void sat_buf_add(sat_buffer_t *s, const double ecef[3],
                          double freq, uint64_t ts)
 {
-    sat_meas_t *m = &s->meas[s->head];
+    if (s->count == MEAS_PER_SAT) {
+        if (ts < s->meas[0].timestamp)
+            return;
+        memmove(&s->meas[0], &s->meas[1], sizeof(sat_meas_t) * (MEAS_PER_SAT - 1));
+        s->count--;
+    }
+    int k = s->count;
+    while (k > 0 && s->meas[k - 1].timestamp > ts) {
+        s->meas[k] = s->meas[k - 1];
+        k--;
+    }
+    sat_meas_t *m = &s->meas[k];
     m->sat_ecef[0] = ecef[0];
     m->sat_ecef[1] = ecef[1];
     m->sat_ecef[2] = ecef[2];
     m->freq = freq;
     m->timestamp = ts;
     m->valid = 1;
-    s->head = (s->head + 1) % MEAS_PER_SAT;
-    if (s->count < MEAS_PER_SAT)
-        s->count++;
+    s->count++;
 }
 
-/* Get measurement by index (0 = oldest) */
+/* Get measurement by index (0 = oldest by time) */
 static sat_meas_t *sat_buf_get(sat_buffer_t *s, int idx)
 {
     if (idx < 0 || idx >= s->count) return NULL;
-    int start = (s->count < MEAS_PER_SAT) ? 0 :
-                (s->head - s->count + MEAS_PER_SAT) % MEAS_PER_SAT;
-    return &s->meas[(start + idx) % MEAS_PER_SAT];
+    return &s->meas[idx];
 }
 
 /* The frequency a satellite's measurements were transmitted on. Every
@@ -356,8 +374,12 @@ void doppler_pos_add_measurement(const ira_data_t *ira, double frequency,
     sat_buffer_t *s = find_or_create_sat(ira->sat_id);
     if (s) {
         if (s->count > 0) {
-            int last = (s->head - 1 + MEAS_PER_SAT) % MEAS_PER_SAT;
-            double dt = (double)(timestamp - s->meas[last].timestamp) / 1e9;
+            /* compare with the measurement just before it in time (or the
+             * first one, if it is the oldest) - not the last to arrive */
+            int last = s->count - 1;
+            while (last > 0 && s->meas[last].timestamp > timestamp)
+                last--;
+            double dt = ((double)timestamp - (double)s->meas[last].timestamp) / 1e9;
 
             /* Long gap: likely a different physical satellite reusing
              * this 7-bit sat_id. Reset the buffer to avoid mixing
@@ -368,7 +390,6 @@ void doppler_pos_add_measurement(const ira_data_t *ira, double frequency,
                             "resetting buffer (likely new pass)\n",
                             ira->sat_id, dt);
                 s->count = 0;
-                s->head = 0;
                 s->channel_freq = 0;
             } else {
                 /* Short gap: verify position consistency.
@@ -377,7 +398,7 @@ void doppler_pos_add_measurement(const ira_data_t *ira, double frequency,
                 double dy = sat_ecef[1] - s->meas[last].sat_ecef[1];
                 double dz = sat_ecef[2] - s->meas[last].sat_ecef[2];
                 double dist = sqrt(dx*dx + dy*dy + dz*dz);
-                if (dt > 0 && dt < 120 && dist / dt > 10000.0) {
+                if (fabs(dt) > 0 && fabs(dt) < 120 && dist / fabs(dt) > 10000.0) {
                     dbg_vel_rej++;
                     pthread_mutex_unlock(&pos_lock);
                     goto dbg_print;

@@ -40,6 +40,11 @@ void doppler_pos_add_measurement(const ira_data_t *ira, double frequency,
  * Returns 1 if a valid solution was produced, 0 otherwise. */
 int doppler_pos_solve(doppler_solution_t *out);
 
+/* Forget the previous solution, so the next solve starts from scratch (no
+ * warm start, no jump rejection against it): for a final solve that depends
+ * only on the measurements. */
+void doppler_pos_reset_solution(void);
+
 /* Set assumed receiver height for height aiding (meters above WGS-84).
  * A value of 0 disables height aiding. */
 void doppler_pos_set_height(double height_m);

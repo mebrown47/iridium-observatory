@@ -1327,6 +1327,21 @@ int main(int argc, char **argv) {
     pthread_join(output_worker, NULL);
     pthread_join(stats, NULL);
 
+    /* One last solve over every measurement received. The periodic solves run
+     * every 10 s of wall time and warm-start from the previous one, so when a
+     * file is decoded faster than real time their results depend on timing;
+     * this one starts fresh and depends only on the input. */
+    if (position_enabled) {
+        doppler_solution_t sol;
+        doppler_pos_reset_solution();
+        if (doppler_pos_solve(&sol))
+            fprintf(stderr, "POSITION FINAL: %.6f, %.6f (HDOP=%.1f, %d sats, %d meas)\n",
+                    sol.lat, sol.lon, sol.hdop, sol.n_satellites, sol.n_measurements);
+        else
+            fprintf(stderr, "POSITION FINAL: no solution (%d sats, %d meas)\n",
+                    sol.n_satellites, sol.n_measurements);
+    }
+
     if (web_enabled)
         web_map_shutdown();
 
