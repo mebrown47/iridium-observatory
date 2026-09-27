@@ -72,6 +72,7 @@ struct _burst_downmix {
 
     /* Filters */
     fir_filter_t *input_fir;    /* anti-alias LPF for decimation */
+    int input_fir_rate;         /* input rate input_fir was designed for */
     fir_filter_t *noise_fir;    /* noise-limiting LPF after decimation */
     fir_filter_t *start_fir;    /* magnitude smoothing */
     fir_filter_t *rrc_fir;      /* root-raised-cosine matched filter */
@@ -266,6 +267,7 @@ burst_downmix_t *burst_downmix_create(downmix_config_t *config) {
         int ntaps;
         float *taps = lpf_taps(&ntaps, 1.0f, 10000000.0f, cutoff, transition);
         dm->input_fir = fir_filter_create(taps, ntaps);
+        dm->input_fir_rate = 10000000;
         free(taps);
     }
 
@@ -431,6 +433,19 @@ static int decimate_burst(burst_downmix_t *dm, const float complex *in, int in_l
                            uint64_t *timestamp) {
     int decimation = (int)roundf((float)in_sample_rate / dm->output_sample_rate);
     if (decimation < 1) decimation = 1;
+
+    /* The taps are in normalized frequency: redesign them for this input
+     * rate, or the 100 kHz cutoff scales down with it (5 kHz at 500 kS/s). */
+    if (in_sample_rate != dm->input_fir_rate) {
+        int ntaps;
+        float *taps = lpf_taps(&ntaps, 1.0f, (float)in_sample_rate,
+                               dm->output_sample_rate * 0.4f,
+                               dm->output_sample_rate * 0.2f);
+        fir_filter_destroy(dm->input_fir);
+        dm->input_fir = fir_filter_create(taps, ntaps);
+        dm->input_fir_rate = in_sample_rate;
+        free(taps);
+    }
 
     int n_out = (in_len - dm->input_fir->ntaps + 1) / decimation;
     if (n_out <= 0) return 0;
