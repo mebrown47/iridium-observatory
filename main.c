@@ -336,13 +336,16 @@ static void *spewer_thread(void *arg) {
             break;
 
         case FMT_CI16: {
-            /* 4 bytes per sample -> convert to int8 */
-            s = malloc(sizeof(*s) + block * 2);
-            s->format = SAMPLE_FMT_INT8;
+            /* 4 bytes per sample -> float, full scale 1.0 like int8/128:
+             * keeps all 16 bits (int8 would drop 8, raising the noise floor
+             * of weak recordings) */
+            s = malloc(sizeof(*s) + block * 8);
+            s->format = SAMPLE_FMT_FLOAT;
             int16_t *tmp = malloc(block * 4);
             r = fread(tmp, 4, block, f);
+            float *out = (float *)s->samples;
             for (size_t i = 0; i < r * 2; i++)
-                s->samples[i] = (int8_t)(tmp[i] >> 8);
+                out[i] = tmp[i] * (1.0f / 32768.0f);
             free(tmp);
             break;
         }
@@ -462,14 +465,15 @@ static void *zmq_sub_thread(void *arg) {
             break;
 
         case FMT_CI16: {
-            /* 4 bytes per sample -> convert to int8 */
+            /* 4 bytes per sample -> float, all 16 bits (see the file reader) */
             num_samples = len / 4;
             if (num_samples == 0) { zmq_msg_close(&msg); continue; }
-            s = malloc(sizeof(*s) + num_samples * 2);
-            s->format = SAMPLE_FMT_INT8;
+            s = malloc(sizeof(*s) + num_samples * 8);
+            s->format = SAMPLE_FMT_FLOAT;
             int16_t *src = (int16_t *)data;
+            float *out = (float *)s->samples;
             for (size_t i = 0; i < num_samples * 2; i++)
-                s->samples[i] = (int8_t)(src[i] >> 8);
+                out[i] = src[i] * (1.0f / 32768.0f);
             break;
         }
 
