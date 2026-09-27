@@ -110,6 +110,7 @@ struct _burst_downmix {
     /* Working buffers (sized for max burst) */
     float complex *work_a;
     float complex *work_b;
+    float complex *work_frac;   /* intermediate for fractional-rate inputs */
     float *mag_f;
     float *mag_filtered_f;
     int work_size;
@@ -420,6 +421,7 @@ void burst_downmix_destroy(burst_downmix_t *dm) {
 
     free(dm->work_a);
     free(dm->work_b);
+    free(dm->work_frac);
     free(dm->mag_f);
     free(dm->mag_filtered_f);
 
@@ -428,10 +430,37 @@ void burst_downmix_destroy(burst_downmix_t *dm) {
 
 /* ---- Step 2: Decimate ---- */
 
+/* Cubic (Catmull-Rom) interpolation of in[0..n_in) onto a grid `step` input
+ * samples apart. Returns the number of output samples written. */
+static int resample_cubic(const float complex *in, int n_in, double step,
+                          float complex *out, int max_out) {
+    int n_out = (int)((n_in - 2) / step);
+    if (n_out > max_out) n_out = max_out;
+    for (int k = 0; k < n_out; k++) {
+        double t = k * step;
+        int i = (int)t;
+        float f = (float)(t - i);
+        float complex xm1 = in[i > 0 ? i - 1 : 0];
+        float complex x0 = in[i];
+        float complex x1 = in[i + 1];
+        float complex x2 = in[i + 2 < n_in ? i + 2 : n_in - 1];
+        out[k] = x0 + 0.5f * f * (x1 - xm1 +
+                 f * (2.0f * xm1 - 5.0f * x0 + 4.0f * x1 - x2 +
+                 f * (3.0f * (x0 - x1) + x2 - xm1)));
+    }
+    return n_out > 0 ? n_out : 0;
+}
+
 static int decimate_burst(burst_downmix_t *dm, const float complex *in, int in_len,
                            float complex *out, int in_sample_rate,
                            uint64_t *timestamp) {
-    int decimation = (int)roundf((float)in_sample_rate / dm->output_sample_rate);
+    /* Everything downstream assumes exactly output_sample_rate. When the
+     * input isn't a multiple of it, integer-decimate to at least twice the
+     * output rate and interpolate onto the exact grid: rounding the ratio
+     * instead left e.g. 2.4 MS/s at 240 kS/s, a 4% symbol-timing error. */
+    int exact = in_sample_rate % dm->output_sample_rate == 0;
+    int decimation = exact ? in_sample_rate / dm->output_sample_rate
+                           : in_sample_rate / (2 * dm->output_sample_rate);
     if (decimation < 1) decimation = 1;
 
     /* The taps are in normalized frequency: redesign them for this input
@@ -451,7 +480,19 @@ static int decimate_burst(burst_downmix_t *dm, const float complex *in, int in_l
     if (n_out <= 0) return 0;
     if (n_out > dm->work_size) n_out = dm->work_size;
 
-    fir_filter_ccf_dec(dm->input_fir, out, in, n_out, decimation);
+    if (exact) {
+        fir_filter_ccf_dec(dm->input_fir, out, in, n_out, decimation);
+    } else {
+        /* The input LPF's stopband starts near 125 kHz, the output Nyquist,
+         * so the interpolation needs no filter of its own. */
+        if (!dm->work_frac)
+            dm->work_frac = aligned_alloc_32(sizeof(float complex) * dm->work_size);
+        if (!dm->work_frac) return 0;
+        fir_filter_ccf_dec(dm->input_fir, dm->work_frac, in, n_out, decimation);
+        double step = (double)in_sample_rate / decimation / dm->output_sample_rate;
+        n_out = resample_cubic(dm->work_frac, n_out, step, out, dm->work_size);
+        if (n_out <= 0) return 0;
+    }
 
     /* Adjust timestamp for filter delay */
     if (timestamp) {
