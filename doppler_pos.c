@@ -101,14 +101,6 @@ static void vec3_cross(const double a[3], const double b[3], double out[3])
     out[2] = a[0]*b[1] - a[1]*b[0];
 }
 
-/* Assign the nearest Iridium channel frequency to a measured frequency */
-static double assign_channel_freq(double freq)
-{
-    double offset = freq - IR_BASE_FREQ;
-    double chan = round(offset / IR_CHANNEL_WIDTH);
-    return IR_BASE_FREQ + chan * IR_CHANNEL_WIDTH;
-}
-
 /* Convert IRA-encoded satellite position to ECEF meters.
  * IRA uses 12-bit signed XYZ where 1 unit ~ 4 km of geocentric distance. */
 static void ira_xyz_to_ecef(const int pos_xyz[3], double ecef[3])
@@ -158,44 +150,26 @@ static sat_meas_t *sat_buf_get(sat_buffer_t *s, int idx)
     return &s->meas[(start + idx) % MEAS_PER_SAT];
 }
 
-/* Estimate the true channel frequency for a satellite from its measurements.
- * Problem: Iridium Doppler can exceed half the channel width (±20.8 kHz of
- * 41.667 kHz channels), so naive nearest-channel assignment is wrong ~49%
- * of the time. Solution: vote across all measurements -- each measurement
- * maps to its nearest channel center, and the channel with the most votes
- * wins. Wrong assignments scatter across different channels, but the correct
- * channel accumulates a majority of votes (measurements near zero Doppler
- * all agree on the correct channel). */
+/* The frequency a satellite's measurements were transmitted on. Every
+ * measurement comes from a ring alert (IRA), and ring alerts are always sent
+ * on the ring-alert channel: channel 246 ("S.07"), whose center is half a
+ * channel into it, 1626.270833 MHz (iridium-toolkit util.py numbering).
+ * Checked on a 20 min recording: 905 of 905 IRA frames with satellite
+ * positions were on it (Doppler from TLEs).
+ *
+ * This used to vote over nearest channel centers at IR_BASE_FREQ +
+ * k * IR_CHANNEL_WIDTH, which are half a channel off the real centers: every
+ * satellite came out +-20.8 kHz (+-3.84 km/s of range rate) wrong, with the
+ * sign varying by satellite, so the common clock term could not absorb it,
+ * and positions landed ~1500 km off. Voting on the corrected raster still
+ * fails for passes spent mostly past +-20.8 kHz of Doppler. */
+#define IR_RING_ALERT_FREQ (IR_BASE_FREQ + (246 + 0.5) * IR_CHANNEL_WIDTH)
+
 static double estimate_channel_freq(sat_buffer_t *s, uint64_t now)
 {
-    /* Collect nearest-channel assignments for all valid measurements */
-    double channels[MEAS_PER_SAT];
-    int n_valid = 0;
-
-    for (int i = 0; i < s->count; i++) {
-        sat_meas_t *m = sat_buf_get(s, i);
-        if (!m || !m->valid) continue;
-        if (now > 0 && now - m->timestamp > MAX_MEAS_AGE_NS) continue;
-        channels[n_valid++] = assign_channel_freq(m->freq);
-    }
-    if (n_valid == 0) return 0;
-
-    /* Find the channel with the most votes */
-    double best_freq = 0;
-    int best_count = 0;
-
-    for (int i = 0; i < n_valid; i++) {
-        int count = 0;
-        for (int j = 0; j < n_valid; j++) {
-            if (fabs(channels[j] - channels[i]) < 1.0)
-                count++;
-        }
-        if (count > best_count) {
-            best_count = count;
-            best_freq = channels[i];
-        }
-    }
-    return best_freq;
+    (void)s;
+    (void)now;
+    return IR_RING_ALERT_FREQ;
 }
 
 /* Estimate satellite velocity using orbital mechanics.
@@ -241,8 +215,23 @@ static int estimate_velocity(sat_buffer_t *s, int idx, double vel[3])
     /* Orbital angular momentum vector: h = r_cur x r_other
      * Defines the orbital plane normal. Direction depends on which
      * position is "first" but we fix the sign below using temporal order. */
+    /* Both positions are Earth-fixed, but the orbit is a plane in inertial
+     * space: express the other position in the current epoch's axes by
+     * undoing the Earth's rotation over the interval (2.5 deg in 10 min,
+     * ~300 km at orbit radius). The plane - and the velocity - are then the
+     * inertial ones the range-rate model (sat_vel - omega x r_rx) assumes.
+     * Fitting the Earth-fixed positions directly put the velocity off by
+     * ~185 m/s at 1-3 min separation (4 m/s with this correction). */
+    double other[3];
+    {
+        double dt_s = ((double)best_other->timestamp - (double)cur->timestamp) / 1e9;
+        double a = OMEGA_EARTH * dt_s, ca = cos(a), sa = sin(a);
+        other[0] = ca * best_other->sat_ecef[0] - sa * best_other->sat_ecef[1];
+        other[1] = sa * best_other->sat_ecef[0] + ca * best_other->sat_ecef[1];
+        other[2] = best_other->sat_ecef[2];
+    }
     double h[3];
-    vec3_cross(cur->sat_ecef, best_other->sat_ecef, h);
+    vec3_cross(cur->sat_ecef, other, h);
     double h_norm = vec3_norm(h);
     if (h_norm < 1e6) return -1;  /* nearly collinear positions */
 
@@ -259,9 +248,9 @@ static int estimate_velocity(sat_buffer_t *s, int idx, double vel[3])
      * from the earlier to later position to check. */
     double forward[3];
     if (best_other->timestamp > cur->timestamp)
-        vec3_sub(best_other->sat_ecef, cur->sat_ecef, forward);
+        vec3_sub(other, cur->sat_ecef, forward);
     else
-        vec3_sub(cur->sat_ecef, best_other->sat_ecef, forward);
+        vec3_sub(cur->sat_ecef, other, forward);
 
     double sign = (vec3_dot(v_dir, forward) >= 0) ? 1.0 : -1.0;
 
@@ -789,14 +778,16 @@ done_collect:
             }
         }
 
-        /* Levenberg-Marquardt damping: add lambda * I to diagonal
-         * to regularize when geometry is poor.
-         * Adaptive: start high and decrease as corrections shrink. */
-        double lambda = (iter < 10) ? 10.0 : (iter < 50) ? 1.0 : 0.01;
+        /* Plain Gauss-Newton (a tiny ridge only keeps the inverse finite).
+         * This used Levenberg-Marquardt damping (diagonal x11 for 10
+         * iterations, x2 to 50): each step then covered a small fraction of
+         * the way, the steps shrank below CONVERGENCE_M within a few km, and
+         * the solve "converged" next to its initial guess - often ~2000 km
+         * away. The 500 km step limit below still guards the first steps. */
         for (int i = 0; i < 4; i++)
-            HtWH[i][i] += lambda * HtWH[i][i] + 1e-6;
+            HtWH[i][i] += 1e-6;
 
-        /* Solve: delta_x = (H^T W H + lambda*diag)^-1 * H^T W y */
+        /* Solve: delta_x = (H^T W H)^-1 * H^T W y */
         double HtWH_copy[4][4];
         memcpy(HtWH_copy, HtWH, sizeof(HtWH));
         double inv[4][4];
