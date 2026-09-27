@@ -431,6 +431,7 @@ static void *zmq_sub_thread(void *arg) {
     fprintf(stderr, "zmq-sub: connected to %s (format=%s)\n", ep,
             iq_format == FMT_CF32 ? "cf32" :
             iq_format == FMT_CI16 ? "cs16" : "cs8");
+    int first_msg = 1;     /* carries --file-start: the time of the first sample */
 
     while (running) {
         zmq_msg_t msg;
@@ -486,7 +487,8 @@ static void *zmq_sub_thread(void *arg) {
         zmq_msg_close(&msg);
 
         s->num = num_samples;
-        s->hw_timestamp_ns = 0;
+        s->hw_timestamp_ns = first_msg ? file_start_ns : 0;
+        first_msg = 0;
         push_samples(s);
     }
 
