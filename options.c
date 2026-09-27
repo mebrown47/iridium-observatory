@@ -50,6 +50,7 @@ extern double center_freq;
 extern int verbose;
 extern int live;
 extern char *file_info;
+extern uint64_t file_start_ns;
 extern double threshold_db;
 extern iq_format_t iq_format;
 extern FILE *in_file;
@@ -195,6 +196,11 @@ static void usage(int exitcode) {
 "\n"
 "Output options:\n"
 "    --file-info=STR         file info string for output (default: auto)\n"
+"    --file-start=TIME       time of the file's first sample: Unix seconds, ISO 8601\n"
+"                             UTC, or 'sigmf' (captures[0].core:datetime of the\n"
+"                             .sigmf-meta, also <name>.sigmf-meta beside any file).\n"
+"                             Frame times then follow the recording's clock instead\n"
+"                             of the wall clock at start (default).\n"
 "    --save-bursts=DIR       save IQ samples of decoded bursts to directory\n"
 "    --diagnostic            setup verification mode (suppresses RAW output)\n"
 "    --no-gardner           disable Gardner timing recovery (enabled by default)\n"
@@ -265,6 +271,7 @@ static void list_interfaces(void) {
 void parse_options(int argc, char **argv) {
     int ch;
     int format_explicit = 0;
+    int file_start_from_sigmf = 0;
     const char *in_filename = NULL;
 
     enum {
@@ -275,6 +282,7 @@ void parse_options(int argc, char **argv) {
         OPT_USRP_GAIN,
         OPT_SOAPY_GAIN,
         OPT_FILE_INFO,
+        OPT_FILE_START,
         OPT_FORMAT,
         OPT_LIST,
         OPT_NO_GPU,
@@ -320,6 +328,7 @@ void parse_options(int argc, char **argv) {
         { "bias-tee",       no_argument,       NULL, 'B' },
         { "threshold",      required_argument, NULL, 'd' },
         { "file-info",      required_argument, NULL, OPT_FILE_INFO },
+        { "file-start",     required_argument, NULL, OPT_FILE_START },
         { "format",         required_argument, NULL, OPT_FORMAT },
         { "verbose",        no_argument,       NULL, 'v' },
         { "help",           no_argument,       NULL, 'h' },
@@ -440,6 +449,27 @@ void parse_options(int argc, char **argv) {
 
             case OPT_FILE_INFO:
                 file_info = strdup(optarg);
+                break;
+
+            case OPT_FILE_START:
+                if (strcmp(optarg, "sigmf") == 0) {
+                    file_start_from_sigmf = 1;
+                } else if (strchr(optarg, 'T')) {
+                    if (sigmf_parse_datetime(optarg, &file_start_ns) != 0)
+                        errx(1, "--file-start: cannot parse '%s' (ISO 8601 UTC, e.g. "
+                             "2026-09-27T10:22:59.128Z)", optarg);
+                } else {
+                    /* integer and fraction apart: a double can't hold Unix ns exactly */
+                    char *end;
+                    unsigned long long sec = strtoull(optarg, &end, 10);
+                    uint64_t ns = 0, scale = 100000000ULL;
+                    if (*end == '.')
+                        for (end++; *end >= '0' && *end <= '9'; end++, scale /= 10)
+                            ns += (uint64_t)(*end - '0') * scale;
+                    if (*end != '\0' || sec == 0)
+                        errx(1, "--file-start: expected Unix seconds, ISO 8601 or 'sigmf', got '%s'", optarg);
+                    file_start_ns = (uint64_t)sec * 1000000000ULL + ns;
+                }
                 break;
 
             case OPT_FORMAT:
@@ -860,6 +890,25 @@ void parse_options(int argc, char **argv) {
                 }
             }
         }
+    }
+
+    /* --file-start=sigmf: the recording's own start time, from the .sigmf-meta
+     * named by -f or sitting beside the data file as <name>.sigmf-meta */
+    if (file_start_from_sigmf) {
+        if (!in_filename)
+            errx(1, "--file-start=sigmf needs a file (-f)");
+        char meta[PATH_MAX];
+        const char *ext = strrchr(in_filename, '.');
+        const char *slash = strrchr(in_filename, '/');
+        size_t base_len = (ext && (!slash || ext > slash)) ? (size_t)(ext - in_filename)
+                                                           : strlen(in_filename);
+        if (ext && strcmp(ext, ".sigmf-meta") == 0)
+            snprintf(meta, sizeof(meta), "%s", in_filename);
+        else
+            snprintf(meta, sizeof(meta), "%.*s.sigmf-meta", (int)base_len, in_filename);
+        if (sigmf_read_datetime(meta, &file_start_ns) != 0)
+            errx(1, "--file-start=sigmf: no captures[0].core:datetime in %s", meta);
+        fprintf(stderr, "sigmf: file starts at %s (core:datetime)\n", meta);
     }
 
     /* Skip validation if VITA 49 will auto-detect from context packets */

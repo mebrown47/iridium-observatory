@@ -105,6 +105,7 @@ double center_freq = IR_DEFAULT_CENTER_FREQ;
 int verbose = 0;
 int live = 0;
 char *file_info = NULL;
+uint64_t file_start_ns = 0;   /* --file-start: time of the file's first sample, 0 = wall clock */
 double threshold_db = IR_DEFAULT_THRESHOLD;
 iq_format_t iq_format = FMT_CI8;
 
@@ -320,6 +321,7 @@ static inline int8_t clamp8(float v) {
 static void *spewer_thread(void *arg) {
     FILE *f = (FILE *)arg;
     size_t block = 32768;  /* samples per read (each sample = I + Q) */
+    int first_block = 1;   /* carries --file-start, like a hardware timestamp */
 
     while (running) {
         sample_buf_t *s;
@@ -365,7 +367,8 @@ static void *spewer_thread(void *arg) {
             break;
         }
         s->num = r;
-        s->hw_timestamp_ns = 0;
+        s->hw_timestamp_ns = first_block ? file_start_ns : 0;
+        first_block = 0;
         if (blocking_queue_put(&samples_queue, s) != 0) {
             free(s);
             break;
