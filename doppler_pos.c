@@ -23,9 +23,24 @@ extern int verbose;
 /* ---- Configuration ---- */
 
 #define MAX_SATELLITES       128
-#define MEAS_PER_SAT         200     /* measurements kept per satellite (newest by time) */
+#define MEAS_PER_SAT         1500    /* measurements kept per satellite (newest by time):
+                                        * a whole pass at ~2 IRA/s. At 200 only its last
+                                        * ~100 s survived - not the zero crossing and
+                                        * curvature that locate the receiver */
 #define MIN_MEASUREMENTS     8       /* minimum to attempt a solution */
 #define MIN_SATELLITES       2       /* need geometry from multiple passes */
+#define MIN_PASS_MEAS        20      /* usable measurements for a satellite to count as a
+                                        * pass: stray decodes (1-10 IRAs with corrupted
+                                        * positions, velocities and so ~MHz residuals)
+                                        * otherwise met MIN_SATELLITES and wrecked the fit */
+#define GRID_STEP_DEG        1.0     /* coarse misfit grid for the starting points */
+#define GRID_HALF_LAT        25.0
+#define GRID_HALF_LON        30.0
+#define GRID_MAX_MEAS        600     /* thin the measurements to this many for the grid */
+#define N_GRID_STARTS        4       /* separated grid minima tried as starting points */
+#define START_SEPARATION     500e3   /* between grid starts (m) */
+#define AMBIGUOUS_DIST       100e3   /* a distinct second solution this far away... */
+#define AMBIGUOUS_RMS_RATIO  1.25    /* ...fitting within this ratio: no fix (mirror) */
 #define MAX_ITERATIONS       200     /* WLS iteration limit */
 #define CONVERGENCE_M        100.0   /* position correction threshold (m) */
 #define OUTLIER_SIGMA        3.0     /* residual rejection threshold */
@@ -215,18 +230,33 @@ static int estimate_velocity(sat_buffer_t *s, int idx, double vel[3])
     sat_meas_t *best_other = NULL;
     double best_dt = 0;
 
-    for (int i = 0; i < s->count; i++) {
-        if (i == idx) continue;
+    /* The buffer is sorted by time, so the qualifying measurement farthest
+     * away on each side is the first one met scanning in from that end. */
+    for (int i = 0; i < idx; i++) {
         sat_meas_t *m = sat_buf_get(s, i);
         if (!m || !m->valid) continue;
-        double dt = fabs((double)(m->timestamp - cur->timestamp) / 1e9);
-        if (dt >= MIN_VEL_INTERVAL_NS / 1e9 && dt < 600.0 && dt > best_dt) {
-            /* Verify the other position is also at valid orbit altitude */
-            double other_r = vec3_norm(m->sat_ecef);
-            if (other_r < 7050e3 || other_r > 7250e3) continue;
+        double dt = (double)(cur->timestamp - m->timestamp) / 1e9;
+        if (dt >= 600.0) continue;
+        if (dt < MIN_VEL_INTERVAL_NS / 1e9) break;
+        double other_r = vec3_norm(m->sat_ecef);
+        if (other_r < 7050e3 || other_r > 7250e3) continue;
+        best_dt = dt;
+        best_other = m;
+        break;
+    }
+    for (int i = s->count - 1; i > idx; i--) {
+        sat_meas_t *m = sat_buf_get(s, i);
+        if (!m || !m->valid) continue;
+        double dt = (double)(m->timestamp - cur->timestamp) / 1e9;
+        if (dt >= 600.0) continue;
+        if (dt < MIN_VEL_INTERVAL_NS / 1e9) break;
+        double other_r = vec3_norm(m->sat_ecef);
+        if (other_r < 7050e3 || other_r > 7250e3) continue;
+        if (dt > best_dt) {
             best_dt = dt;
             best_other = m;
         }
+        break;
     }
     if (!best_other) return -1;
 
@@ -427,6 +457,295 @@ dbg_print:
                 dbg_vel_rej);
 }
 
+/* ---- Solver ---- */
+
+/* Predicted range rate for one measurement from receiver position rx (the
+ * receiver turning with the Earth) and clock term clk, with its partials
+ * with respect to [rx, clk] in H_row. */
+static double predict_range_rate(const solver_meas_t *m, const double rx[3],
+                                 double clk, double H_row[4])
+{
+    double rx_vel[3] = { -OMEGA_EARTH * rx[1], OMEGA_EARTH * rx[0], 0.0 };
+    double los[3];
+    vec3_sub(m->sat_ecef, rx, los);
+    double rho = vec3_norm(los);
+    if (rho < 1.0) return NAN;
+    double rel_vel[3] = { m->sat_vel[0] - rx_vel[0],
+                          m->sat_vel[1] - rx_vel[1],
+                          m->sat_vel[2] - rx_vel[2] };
+    double rho_dot_geom = vec3_dot(los, rel_vel) / rho;
+    if (H_row) {
+        /* d(rho_dot)/d(rx_i) = -(v_rel_i)/rho + los_i * rho_dot_geom / rho^2
+         *                      + los . d(-v_rx)/d(rx_i) / rho
+         * where d(v_rx_x)/d(rx_y) = -omega, d(v_rx_y)/d(rx_x) = omega */
+        double rho2 = rho * rho;
+        H_row[0] = -rel_vel[0] / rho + los[0] * rho_dot_geom / rho2
+                    + OMEGA_EARTH * los[1] / rho;
+        H_row[1] = -rel_vel[1] / rho + los[1] * rho_dot_geom / rho2
+                    - OMEGA_EARTH * los[0] / rho;
+        H_row[2] = -rel_vel[2] / rho + los[2] * rho_dot_geom / rho2;
+        H_row[3] = 1.0;  /* clock drift */
+    }
+    return rho_dot_geom + clk;
+}
+
+/* Iterated weighted least squares (plain Gauss-Newton) over the measurements
+ * with weight > 0, from rx/clk, which it updates. State: [x, y, z, clock
+ * drift], with height aiding when enabled. Returns 1 if it converged.
+ *
+ * No Levenberg-Marquardt damping (a tiny ridge only keeps the inverse
+ * finite): with it each step covered a small fraction of the way, the steps
+ * shrank below CONVERGENCE_M within a few km, and the solve "converged" next
+ * to its initial guess. The 500 km step limit guards the first steps. */
+static int gauss_newton(solver_meas_t *meas, int n, double rx[3], double *clk)
+{
+    for (int iter = 0; iter < MAX_ITERATIONS; iter++) {
+        double HtWH[4][4] = {{0}};
+        double HtWy[4] = {0};
+
+        for (int i = 0; i < n; i++) {
+            solver_meas_t *m = &meas[i];
+            if (m->weight == 0) continue;
+            double H_row[4];
+            double pred = predict_range_rate(m, rx, *clk, H_row);
+            if (isnan(pred)) continue;
+            double dy = m->range_rate - pred;
+            for (int r = 0; r < 4; r++) {
+                for (int c = 0; c < 4; c++)
+                    HtWH[r][c] += H_row[r] * m->weight * H_row[c];
+                HtWy[r] += H_row[r] * m->weight * dy;
+            }
+        }
+
+        /* Height aiding: constrain geodetic altitude to height_aiding_m.
+         * Uses geodetic altitude (not ECEF radius) because WGS-84 surface
+         * radius varies by ~21 km with latitude. The radial unit vector
+         * approximates d(altitude)/d(ecef). */
+        if (height_aiding_enabled) {
+            double r0 = vec3_norm(rx);
+            if (r0 > 0) {
+                double hlat, hlon, halt;
+                ecef_to_geodetic(rx, &hlat, &hlon, &halt);
+                double dy_h = height_aiding_m - halt;
+                double H_h[4] = { rx[0] / r0, rx[1] / r0, rx[2] / r0, 0.0 };
+                double w_h = 100.0;   /* height constraint weighted heavily */
+                for (int r = 0; r < 4; r++) {
+                    for (int c = 0; c < 4; c++)
+                        HtWH[r][c] += H_h[r] * w_h * H_h[c];
+                    HtWy[r] += H_h[r] * w_h * dy_h;
+                }
+            }
+        }
+
+        for (int i = 0; i < 4; i++)
+            HtWH[i][i] += 1e-6;
+
+        double inv[4][4];
+        if (mat4_invert(HtWH, inv) != 0)
+            return 0;
+
+        double delta[4] = {0};
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++)
+                delta[i] += inv[i][j] * HtWy[j];
+
+        double step = sqrt(delta[0]*delta[0] + delta[1]*delta[1] +
+                           delta[2]*delta[2]);
+        double max_step = 500000.0;  /* 500 km max step */
+        if (step > max_step) {
+            double scale = max_step / step;
+            for (int i = 0; i < 4; i++)
+                delta[i] *= scale;
+            step = max_step;
+        }
+
+        rx[0] += delta[0];
+        rx[1] += delta[1];
+        rx[2] += delta[2];
+        *clk += delta[3];
+
+        if (step < CONVERGENCE_M)
+            return 1;
+    }
+    return 0;
+}
+
+/* RMS range-rate residual (m/s) over the measurements with weight > 0. */
+static double rms_residual(const solver_meas_t *meas, int n, const double rx[3],
+                           double clk, int *n_used)
+{
+    double sum = 0;
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        if (meas[i].weight == 0) continue;
+        double pred = predict_range_rate(&meas[i], rx, clk, NULL);
+        if (isnan(pred)) continue;
+        double res = meas[i].range_rate - pred;
+        sum += res * res;
+        k++;
+    }
+    if (n_used) *n_used = k;
+    return k ? sqrt(sum / k) : INFINITY;
+}
+
+/* Distinct satellites among the measurements with weight > 0. */
+static int count_sats(const solver_meas_t *meas, int n)
+{
+    int seen[MAX_SATELLITES] = {0}, k = 0;
+    for (int i = 0; i < n; i++)
+        if (meas[i].weight > 0 && meas[i].sat_idx >= 0 &&
+            meas[i].sat_idx < MAX_SATELLITES && !seen[meas[i].sat_idx]) {
+            seen[meas[i].sat_idx] = 1;
+            k++;
+        }
+    return k;
+}
+
+/* The full solve from one starting point: Gauss-Newton on every
+ * measurement, then again without the 3-sigma outliers, then again without
+ * any satellite whose mean residual is > 3x the median satellite's (a wrong
+ * channel or corrupted positions). Resets the weights first. Returns 1 with
+ * rx, clk and the weights of the result, 0 if a stage failed. */
+static int refine(solver_meas_t *meas, int n, double rx[3], double *clk)
+{
+    for (int i = 0; i < n; i++)
+        meas[i].weight = 1.0;
+    if (!gauss_newton(meas, n, rx, clk))
+        return 0;
+
+    /* Outlier rejection */
+    int n_valid;
+    double sigma = rms_residual(meas, n, rx, *clk, &n_valid);
+    if (n_valid > 4) {
+        sigma *= sqrt((double)n_valid / (n_valid - 4));
+        int rejected = 0;
+        for (int i = 0; i < n; i++) {
+            double pred = predict_range_rate(&meas[i], rx, *clk, NULL);
+            if (isnan(pred) || fabs(meas[i].range_rate - pred) > OUTLIER_SIGMA * sigma) {
+                meas[i].weight = 0;
+                rejected++;
+            }
+        }
+        if (rejected > 0 && n_valid - rejected >= MIN_MEASUREMENTS &&
+            !gauss_newton(meas, n, rx, clk))
+            return 0;
+    }
+
+    /* Per-satellite residual screening */
+    double sat_res_sum[MAX_SATELLITES] = {0};
+    int sat_res_count[MAX_SATELLITES] = {0};
+    for (int i = 0; i < n; i++) {
+        solver_meas_t *m = &meas[i];
+        if (m->weight == 0 || m->sat_idx < 0 || m->sat_idx >= MAX_SATELLITES) continue;
+        double pred = predict_range_rate(m, rx, *clk, NULL);
+        if (isnan(pred)) continue;
+        sat_res_sum[m->sat_idx] += fabs(m->range_rate - pred);
+        sat_res_count[m->sat_idx]++;
+    }
+    double sorted_res[MAX_SATELLITES];
+    int n_active = 0;
+    for (int s = 0; s < MAX_SATELLITES; s++)
+        if (sat_res_count[s]) {
+            double v = sat_res_sum[s] / sat_res_count[s];
+            int j = n_active++;
+            while (j > 0 && sorted_res[j - 1] > v) { sorted_res[j] = sorted_res[j - 1]; j--; }
+            sorted_res[j] = v;
+        }
+    if (n_active >= 3) {
+        double median_res = sorted_res[n_active / 2];
+        int sat_dropped = 0;
+        for (int s = 0; s < MAX_SATELLITES; s++) {
+            if (!sat_res_count[s] || median_res <= 0) continue;
+            double mean_res = sat_res_sum[s] / sat_res_count[s];
+            if (mean_res <= 3.0 * median_res) continue;
+            if (verbose)
+                fprintf(stderr, "DOPPLER: dropping sat_idx=%d (sat_id=%d) "
+                        "residual=%.1f vs median=%.1f\n", s,
+                        satellites[s].sat_id, mean_res, median_res);
+            for (int i = 0; i < n; i++)
+                if (meas[i].sat_idx == s)
+                    meas[i].weight = 0;
+            sat_dropped++;
+        }
+        if (sat_dropped > 0) {
+            int remaining;
+            rms_residual(meas, n, rx, *clk, &remaining);
+            if (remaining < MIN_MEASUREMENTS || count_sats(meas, n) < MIN_SATELLITES)
+                return 0;
+            if (!gauss_newton(meas, n, rx, clk))
+                return 0;
+        }
+    }
+    return 1;
+}
+
+/* Starting points: the minima of the misfit on a coarse grid around the
+ * satellites' mean sub-satellite point (the clock term at each point being
+ * the mean residual). Doppler from a single pass fits the receiver's mirror
+ * image across the ground track as well as the receiver, and a solve from
+ * one start (the last fix, or the sub-satellite point) settles in whichever
+ * basin it starts in - which put fixes ~750-2200 km away, and kept them
+ * there. Writes up to max_starts ECEF points, the best first, at least
+ * START_SEPARATION apart. Returns the count. */
+static int grid_starts(const solver_meas_t *meas, int n, double starts[][3],
+                       int max_starts)
+{
+    enum { NLAT = (int)(2 * GRID_HALF_LAT / GRID_STEP_DEG) + 1,
+           NLON = (int)(2 * GRID_HALF_LON / GRID_STEP_DEG) + 1 };
+    static double cost[NLAT * NLON];
+    static double pts[NLAT * NLON][3];
+    double h = height_aiding_enabled ? height_aiding_m : 0.0;
+
+    double c[3] = {0, 0, 0};
+    for (int i = 0; i < n; i++) {
+        double r = vec3_norm(meas[i].sat_ecef);
+        for (int k = 0; k < 3; k++)
+            c[k] += meas[i].sat_ecef[k] / r;
+    }
+    double lat0 = atan2(c[2], sqrt(c[0]*c[0] + c[1]*c[1])) * 180.0 / M_PI;
+    double lon0 = atan2(c[1], c[0]) * 180.0 / M_PI;
+    int stride = n / GRID_MAX_MEAS + 1;
+
+    int np = 0;
+    for (int a = 0; a < NLAT; a++) {
+        double lat = lat0 - GRID_HALF_LAT + a * GRID_STEP_DEG;
+        if (lat < -89.0 || lat > 89.0) continue;
+        for (int b = 0; b < NLON; b++) {
+            double lon = lon0 - GRID_HALF_LON + b * GRID_STEP_DEG;
+            geodetic_to_ecef(lat, lon, h, pts[np]);
+            double sum = 0, sum2 = 0;
+            int k = 0;
+            for (int i = 0; i < n; i += stride) {
+                double pred = predict_range_rate(&meas[i], pts[np], 0.0, NULL);
+                if (isnan(pred)) continue;
+                double res = meas[i].range_rate - pred;
+                sum += res;
+                sum2 += res * res;
+                k++;
+            }
+            cost[np++] = k ? sum2 / k - (sum / k) * (sum / k) : INFINITY;
+        }
+    }
+
+    int ns = 0;
+    while (ns < max_starts) {
+        int best = -1;
+        for (int p = 0; p < np; p++) {
+            if (best >= 0 && cost[p] >= cost[best]) continue;
+            int far = 1;
+            for (int s = 0; s < ns && far; s++) {
+                double d[3];
+                vec3_sub(pts[p], starts[s], d);
+                if (vec3_norm(d) < START_SEPARATION) far = 0;
+            }
+            if (far && isfinite(cost[p])) best = p;
+        }
+        if (best < 0) break;
+        memcpy(starts[ns++], pts[best], sizeof(pts[best]));
+    }
+    return ns;
+}
+
 int doppler_pos_solve(doppler_solution_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -589,6 +908,7 @@ int doppler_pos_solve(doppler_solution_t *out)
          * center (smallest Doppler = most reliable channel assignment). */
         double sat_chan_freq = estimate_channel_freq(&satellites[s], now);
         if (sat_chan_freq == 0) continue;
+        int first_meas = n_meas;
 
         for (int i = 0; i < satellites[s].count; i++) {
             sat_meas_t *m = sat_buf_get(&satellites[s], i);
@@ -624,6 +944,11 @@ int doppler_pos_solve(doppler_solution_t *out)
                 goto done_collect;
         }
 
+        if (n_meas - first_meas < MIN_PASS_MEAS) {
+            n_meas = first_meas;          /* a stray decode, not a pass */
+            sat_contributed = 0;
+        }
+
         if (sat_contributed)
             sats_used++;
     }
@@ -650,582 +975,78 @@ done_collect:
         return 0;
     }
 
-    /* Initial position estimate: use previous solution if available,
-     * otherwise use weighted mean of satellite subsatellite points.
-     * Weight by per-satellite measurement count to prefer satellites
-     * with consistently decoded positions over one-off corrupted decodes. */
-    double rx_ecef[3] = {0, 0, 0};
-    double clock_drift = 0;
-
+    /* Solve from several starting points - the separated minima of a
+     * coarse misfit grid, and the previous fix - and keep the best fit. */
+    double starts[N_GRID_STARTS + 1][3];
+    double start_clk[N_GRID_STARTS + 1] = {0};
+    int n_starts = grid_starts(all_meas, n_meas, starts, N_GRID_STARTS);
     if (has_prev_solution) {
-        rx_ecef[0] = prev_ecef[0];
-        rx_ecef[1] = prev_ecef[1];
-        rx_ecef[2] = prev_ecef[2];
-        clock_drift = prev_clock_drift;
-    } else {
-        /* Weight each satellite's sub-satellite point by its measurement
-         * count. Satellites with many consistent positions are more likely
-         * real; one-off corrupted decodes carry less weight. */
-        double total_weight = 0;
-        for (int s = 0; s < n_satellites; s++) {
-            if (!sat_keep[s] || satellites[s].count == 0) continue;
-            /* Use latest valid measurement position */
-            sat_meas_t *latest = NULL;
-            for (int i = satellites[s].count - 1; i >= 0; i--) {
-                sat_meas_t *m = sat_buf_get(&satellites[s], i);
-                if (m && m->valid) { latest = m; break; }
-            }
-            if (!latest) continue;
-
-            double r = vec3_norm(latest->sat_ecef);
-            if (r <= 0) continue;
-            double scale = WGS84_A / r;
-            double w = (double)satellites[s].count;
-            rx_ecef[0] += latest->sat_ecef[0] * scale * w;
-            rx_ecef[1] += latest->sat_ecef[1] * scale * w;
-            rx_ecef[2] += latest->sat_ecef[2] * scale * w;
-            total_weight += w;
-        }
-        if (total_weight > 0) {
-            rx_ecef[0] /= total_weight;
-            rx_ecef[1] /= total_weight;
-            rx_ecef[2] /= total_weight;
-        }
-
-        /* If height aiding, adjust initial position to correct altitude.
-         * Must use geodetic conversion (not simple radius scaling) because
-         * WGS-84 is an oblate ellipsoid: surface radius varies by ~21 km
-         * between equator and poles. */
-        if (height_aiding_enabled) {
-            double ilat, ilon, ialt;
-            ecef_to_geodetic(rx_ecef, &ilat, &ilon, &ialt);
-            geodetic_to_ecef(ilat, ilon, height_aiding_m, rx_ecef);
-        }
+        memcpy(starts[n_starts], prev_ecef, sizeof(prev_ecef));
+        start_clk[n_starts++] = prev_clock_drift;
     }
 
-    if (verbose) {
-        double lat0, lon0, alt0;
-        ecef_to_geodetic(rx_ecef, &lat0, &lon0, &alt0);
-        fprintf(stderr, "DOPPLER: init pos=%.4f,%.4f alt=%.0f "
-                "n_meas=%d n_sats=%d\n", lat0, lon0, alt0, n_meas, sats_used);
-    }
-
-    /* Iterated Weighted Least Squares */
-    int converged = 0;
-    int use_height = (height_aiding_enabled);
-    int rejected = 0;
-
-    for (int iter = 0; iter < MAX_ITERATIONS; iter++) {
-        /* Build H matrix and residual vector.
-         * State: [dx, dy, dz, d_clock_drift]
-         * H is n_rows x 4, stored row-major in flat arrays */
-        double HtWH[4][4] = {{0}};
-        double HtWy[4] = {0};
-
-        /* Receiver velocity from Earth rotation: v_rx = omega x r_rx */
-        double rx_vel[3];
-        rx_vel[0] = -OMEGA_EARTH * rx_ecef[1];
-        rx_vel[1] =  OMEGA_EARTH * rx_ecef[0];
-        rx_vel[2] = 0.0;
-
-        for (int i = 0; i < n_meas; i++) {
-            solver_meas_t *m = &all_meas[i];
-
-            /* Line-of-sight vector and range */
-            double los[3];
-            vec3_sub(m->sat_ecef, rx_ecef, los);
-            double rho = vec3_norm(los);
-            if (rho < 1.0) continue;
-
-            /* Relative velocity (satellite minus receiver due to Earth rotation) */
-            double rel_vel[3];
-            rel_vel[0] = m->sat_vel[0] - rx_vel[0];
-            rel_vel[1] = m->sat_vel[1] - rx_vel[1];
-            rel_vel[2] = m->sat_vel[2] - rx_vel[2];
-
-            /* Predicted range rate including Earth rotation */
-            double rho_dot_geom = vec3_dot(los, rel_vel) / rho;
-            double rho_dot_pred = rho_dot_geom + clock_drift;
-
-            /* Residual */
-            double dy = m->range_rate - rho_dot_pred;
-
-            /* Partial derivatives including Earth rotation cross terms.
-             * d(rho_dot)/d(rx_i) = -(v_rel_i)/rho + los_i * rho_dot_geom / rho^2
-             *                      + los . d(-v_rx)/d(rx_i) / rho
-             * where d(v_rx_x)/d(rx_y) = -omega, d(v_rx_y)/d(rx_x) = omega */
-            double H_row[4];
-            double rho2 = rho * rho;
-            H_row[0] = -rel_vel[0] / rho + los[0] * rho_dot_geom / rho2
-                        + OMEGA_EARTH * los[1] / rho;
-            H_row[1] = -rel_vel[1] / rho + los[1] * rho_dot_geom / rho2
-                        - OMEGA_EARTH * los[0] / rho;
-            H_row[2] = -rel_vel[2] / rho + los[2] * rho_dot_geom / rho2;
-            H_row[3] = 1.0;  /* clock drift */
-
-            double w = m->weight;
-
-            /* Accumulate H^T W H and H^T W y */
-            for (int r = 0; r < 4; r++) {
-                for (int c = 0; c < 4; c++)
-                    HtWH[r][c] += H_row[r] * w * H_row[c];
-                HtWy[r] += H_row[r] * w * dy;
-            }
-        }
-
-        /* Height aiding: constrain geodetic altitude to height_aiding_m.
-         * Uses geodetic altitude (not ECEF radius) because WGS-84 surface
-         * radius varies by ~21 km with latitude. The radial unit vector
-         * approximates d(altitude)/d(ecef). */
-        if (use_height) {
-            double r0 = vec3_norm(rx_ecef);
-            if (r0 > 0) {
-                double hlat, hlon, halt;
-                ecef_to_geodetic(rx_ecef, &hlat, &hlon, &halt);
-                double dy_h = height_aiding_m - halt;
-                double H_h[4];
-                H_h[0] = rx_ecef[0] / r0;
-                H_h[1] = rx_ecef[1] / r0;
-                H_h[2] = rx_ecef[2] / r0;
-                H_h[3] = 0.0;
-
-                /* Height constraint weighted heavily */
-                double w_h = 100.0;
-                for (int r = 0; r < 4; r++) {
-                    for (int c = 0; c < 4; c++)
-                        HtWH[r][c] += H_h[r] * w_h * H_h[c];
-                    HtWy[r] += H_h[r] * w_h * dy_h;
-                }
-            }
-        }
-
-        /* Plain Gauss-Newton (a tiny ridge only keeps the inverse finite).
-         * This used Levenberg-Marquardt damping (diagonal x11 for 10
-         * iterations, x2 to 50): each step then covered a small fraction of
-         * the way, the steps shrank below CONVERGENCE_M within a few km, and
-         * the solve "converged" next to its initial guess - often ~2000 km
-         * away. The 500 km step limit below still guards the first steps. */
-        for (int i = 0; i < 4; i++)
-            HtWH[i][i] += 1e-6;
-
-        /* Solve: delta_x = (H^T W H)^-1 * H^T W y */
-        double HtWH_copy[4][4];
-        memcpy(HtWH_copy, HtWH, sizeof(HtWH));
-        double inv[4][4];
-        if (mat4_invert(HtWH_copy, inv) != 0) {
-            fprintf(stderr, "DOPPLER: solver FAIL - singular matrix at iter %d\n", iter);
-            return 0;
-        }
-
-        double delta[4] = {0};
-        for (int i = 0; i < 4; i++)
-            for (int j = 0; j < 4; j++)
-                delta[i] += inv[i][j] * HtWy[j];
-
-        /* Limit step size to prevent divergence */
-        double step = sqrt(delta[0]*delta[0] + delta[1]*delta[1] +
-                           delta[2]*delta[2]);
-        double max_step = 500000.0;  /* 500 km max step */
-        if (step > max_step) {
-            double scale = max_step / step;
-            delta[0] *= scale;
-            delta[1] *= scale;
-            delta[2] *= scale;
-            delta[3] *= scale;
-        }
-
-        /* Apply correction */
-        rx_ecef[0] += delta[0];
-        rx_ecef[1] += delta[1];
-        rx_ecef[2] += delta[2];
-        clock_drift += delta[3];
-
-        double correction = sqrt(delta[0]*delta[0] + delta[1]*delta[1] +
-                                  delta[2]*delta[2]);
-
-        if (verbose && (iter < 3 || iter == MAX_ITERATIONS - 1)) {
-            double lat, lon, alt;
-            ecef_to_geodetic(rx_ecef, &lat, &lon, &alt);
-            fprintf(stderr, "DOPPLER: iter %d: correction=%.0f m, "
-                    "pos=%.4f,%.4f alt=%.0f clk=%.1f\n",
-                    iter, correction, lat, lon, alt, clock_drift);
-        }
-
-        if (correction < CONVERGENCE_M) {
-            converged = 1;
-            break;
-        }
-    }
-
-    if (!converged) {
+    double sol[N_GRID_STARTS + 1][3], sol_clk[N_GRID_STARTS + 1];
+    double sol_rms[N_GRID_STARTS + 1];
+    int n_sol = 0, best = -1;
+    for (int k = 0; k < n_starts; k++) {
+        double rx[3] = { starts[k][0], starts[k][1], starts[k][2] };
+        double clk = start_clk[k];
+        if (!refine(all_meas, n_meas, rx, &clk) ||
+            count_sats(all_meas, n_meas) < MIN_SATELLITES)
+            continue;
+        memcpy(sol[n_sol], rx, sizeof(rx));
+        sol_clk[n_sol] = clk;
+        sol_rms[n_sol] = rms_residual(all_meas, n_meas, rx, clk, NULL);
         if (verbose) {
-            double flat, flon, falt;
-            ecef_to_geodetic(rx_ecef, &flat, &flon, &falt);
-            fprintf(stderr, "DOPPLER: solver FAIL - %d iters, %d meas, %d sats, "
-                    "final=%.2f,%.2f alt=%.0fkm clk=%.1f\n",
-                    MAX_ITERATIONS, n_meas, sats_used, flat, flon, falt/1000,
-                    clock_drift);
+            double lat, lon, alt, slat, slon, salt;
+            ecef_to_geodetic(starts[k], &slat, &slon, &salt);
+            ecef_to_geodetic(rx, &lat, &lon, &alt);
+            fprintf(stderr, "DOPPLER: start %.1f,%.1f -> %.4f,%.4f "
+                    "rms %.2f m/s\n", slat, slon, lat, lon, sol_rms[n_sol]);
         }
+        if (best < 0 || sol_rms[n_sol] < sol_rms[best])
+            best = n_sol;
+        n_sol++;
+    }
+    if (best < 0) {
+        if (verbose)
+            fprintf(stderr, "DOPPLER: solver FAIL - no start converged "
+                    "(%d meas, %d sats)\n", n_meas, sats_used);
         out->n_measurements = n_meas;
         out->n_satellites = sats_used;
-        /* Reset previous solution -- starting from a bad position may prevent
-         * convergence indefinitely. Let the solver try fresh next time. */
-        has_prev_solution = 0;
         return 0;
     }
 
-    /* Outlier rejection: recompute residuals, remove 3-sigma outliers */
-    double sum_res2 = 0;
-    int n_valid = 0;
-    {
-        double orx_vel[3];
-        orx_vel[0] = -OMEGA_EARTH * rx_ecef[1];
-        orx_vel[1] =  OMEGA_EARTH * rx_ecef[0];
-        orx_vel[2] = 0.0;
-
-        for (int i = 0; i < n_meas; i++) {
-            solver_meas_t *m = &all_meas[i];
-            double los[3];
-            vec3_sub(m->sat_ecef, rx_ecef, los);
-            double rho = vec3_norm(los);
-            if (rho < 1.0) { m->weight = 0; continue; }
-            double orel[3] = { m->sat_vel[0] - orx_vel[0],
-                               m->sat_vel[1] - orx_vel[1],
-                               m->sat_vel[2] - orx_vel[2] };
-            double rho_dot_pred = vec3_dot(los, orel) / rho + clock_drift;
-            double res = m->range_rate - rho_dot_pred;
-            sum_res2 += res * res;
-            n_valid++;
+    /* A distinct solution that fits nearly as well: the measurements
+     * cannot tell the receiver from its mirror image (one pass, or passes
+     * along nearly the same track). Report nothing rather than a side. */
+    for (int k = 0; k < n_sol; k++) {
+        double d[3];
+        vec3_sub(sol[k], sol[best], d);
+        if (vec3_norm(d) > AMBIGUOUS_DIST &&
+            sol_rms[k] < AMBIGUOUS_RMS_RATIO * sol_rms[best]) {
+            if (verbose) {
+                double lat, lon, alt, alat, alon, aalt;
+                ecef_to_geodetic(sol[best], &lat, &lon, &alt);
+                ecef_to_geodetic(sol[k], &alat, &alon, &aalt);
+                fprintf(stderr, "DOPPLER: ambiguous - %.4f,%.4f (rms %.2f) "
+                        "and %.4f,%.4f (rms %.2f)\n", lat, lon, sol_rms[best],
+                        alat, alon, sol_rms[k]);
+            }
+            out->n_measurements = n_meas;
+            out->n_satellites = sats_used;
+            return 0;
         }
     }
 
-    if (n_valid > 4) {
-        double sigma = sqrt(sum_res2 / (n_valid - 4));
-        rejected = 0;
-        double orx_vel[3];
-        orx_vel[0] = -OMEGA_EARTH * rx_ecef[1];
-        orx_vel[1] =  OMEGA_EARTH * rx_ecef[0];
-        orx_vel[2] = 0.0;
-
-        for (int i = 0; i < n_meas; i++) {
-            solver_meas_t *m = &all_meas[i];
-            if (m->weight == 0) continue;
-            double los[3];
-            vec3_sub(m->sat_ecef, rx_ecef, los);
-            double rho = vec3_norm(los);
-            if (rho < 1.0) continue;
-            double orel[3] = { m->sat_vel[0] - orx_vel[0],
-                               m->sat_vel[1] - orx_vel[1],
-                               m->sat_vel[2] - orx_vel[2] };
-            double rho_dot_pred = vec3_dot(los, orel) / rho + clock_drift;
-            double res = fabs(m->range_rate - rho_dot_pred);
-            if (res > OUTLIER_SIGMA * sigma) {
-                m->weight = 0;
-                rejected++;
-            }
-        }
-
-        /* Re-solve if outliers were rejected.
-         * Keep position and clock drift from first solve as starting point. */
-        if (rejected > 0 && n_valid - rejected >= MIN_MEASUREMENTS) {
-            converged = 0;
-
-            for (int iter = 0; iter < MAX_ITERATIONS; iter++) {
-                double HtWH2[4][4] = {{0}};
-                double HtWy2[4] = {0};
-
-                double rx_vel2[3];
-                rx_vel2[0] = -OMEGA_EARTH * rx_ecef[1];
-                rx_vel2[1] =  OMEGA_EARTH * rx_ecef[0];
-                rx_vel2[2] = 0.0;
-
-                for (int i = 0; i < n_meas; i++) {
-                    solver_meas_t *m = &all_meas[i];
-                    if (m->weight == 0) continue;
-
-                    double los[3];
-                    vec3_sub(m->sat_ecef, rx_ecef, los);
-                    double rho = vec3_norm(los);
-                    if (rho < 1.0) continue;
-
-                    double rel_vel2[3];
-                    rel_vel2[0] = m->sat_vel[0] - rx_vel2[0];
-                    rel_vel2[1] = m->sat_vel[1] - rx_vel2[1];
-                    rel_vel2[2] = m->sat_vel[2] - rx_vel2[2];
-
-                    double rho_dot_geom = vec3_dot(los, rel_vel2) / rho;
-                    double rho_dot_pred = rho_dot_geom + clock_drift;
-                    double dy = m->range_rate - rho_dot_pred;
-
-                    double H_row[4];
-                    double rho2 = rho * rho;
-                    H_row[0] = -rel_vel2[0] / rho + los[0] * rho_dot_geom / rho2
-                                + OMEGA_EARTH * los[1] / rho;
-                    H_row[1] = -rel_vel2[1] / rho + los[1] * rho_dot_geom / rho2
-                                - OMEGA_EARTH * los[0] / rho;
-                    H_row[2] = -rel_vel2[2] / rho + los[2] * rho_dot_geom / rho2;
-                    H_row[3] = 1.0;
-
-                    double w = m->weight;
-                    for (int r = 0; r < 4; r++) {
-                        for (int c = 0; c < 4; c++)
-                            HtWH2[r][c] += H_row[r] * w * H_row[c];
-                        HtWy2[r] += H_row[r] * w * dy;
-                    }
-                }
-
-                if (use_height) {
-                    double r0 = vec3_norm(rx_ecef);
-                    if (r0 > 0) {
-                        double hlat2, hlon2, halt2;
-                        ecef_to_geodetic(rx_ecef, &hlat2, &hlon2, &halt2);
-                        double dy_h = height_aiding_m - halt2;
-                        double H_h[4] = { rx_ecef[0]/r0, rx_ecef[1]/r0,
-                                           rx_ecef[2]/r0, 0 };
-                        double w_h = 100.0;
-                        for (int r = 0; r < 4; r++) {
-                            for (int c = 0; c < 4; c++)
-                                HtWH2[r][c] += H_h[r] * w_h * H_h[c];
-                            HtWy2[r] += H_h[r] * w_h * dy_h;
-                        }
-                    }
-                }
-
-                double HtWH2_copy[4][4];
-                memcpy(HtWH2_copy, HtWH2, sizeof(HtWH2));
-                double inv2[4][4];
-                if (mat4_invert(HtWH2_copy, inv2) != 0) {
-                    fprintf(stderr, "DOPPLER: re-solve FAIL - singular matrix\n");
-                    return 0;
-                }
-
-                double delta[4] = {0};
-                for (int i = 0; i < 4; i++)
-                    for (int j = 0; j < 4; j++)
-                        delta[i] += inv2[i][j] * HtWy2[j];
-
-                rx_ecef[0] += delta[0];
-                rx_ecef[1] += delta[1];
-                rx_ecef[2] += delta[2];
-                clock_drift += delta[3];
-
-                double correction = sqrt(delta[0]*delta[0] + delta[1]*delta[1] +
-                                          delta[2]*delta[2]);
-                if (correction < CONVERGENCE_M) {
-                    converged = 1;
-                    break;
-                }
-            }
-
-            if (!converged) {
-                fprintf(stderr, "DOPPLER: re-solve FAIL - did not converge\n");
-                return 0;
-            }
-
-            n_meas = n_valid - rejected;
-        }
-    }
-
-    /* Per-satellite residual screening: if one satellite's measurements
-     * have systematically higher residuals than others, it likely has
-     * a wrong channel assignment or corrupted orbital data. Drop it. */
-    {
-        int n_total_now = n_meas + rejected;
-
-        /* Compute receiver velocity for residual calculation */
-        double ps_rx_vel[3];
-        ps_rx_vel[0] = -OMEGA_EARTH * rx_ecef[1];
-        ps_rx_vel[1] =  OMEGA_EARTH * rx_ecef[0];
-        ps_rx_vel[2] = 0.0;
-
-        /* Accumulate per-satellite mean absolute residual */
-        double sat_res_sum[MAX_SATELLITES] = {0};
-        int sat_res_count[MAX_SATELLITES] = {0};
-
-        for (int i = 0; i < n_total_now; i++) {
-            solver_meas_t *m = &all_meas[i];
-            if (m->weight == 0) continue;
-            if (m->sat_idx < 0 || m->sat_idx >= MAX_SATELLITES) continue;
-
-            double los[3];
-            vec3_sub(m->sat_ecef, rx_ecef, los);
-            double rho = vec3_norm(los);
-            if (rho < 1.0) continue;
-
-            double rel[3] = { m->sat_vel[0] - ps_rx_vel[0],
-                              m->sat_vel[1] - ps_rx_vel[1],
-                              m->sat_vel[2] - ps_rx_vel[2] };
-            double rho_dot_pred = vec3_dot(los, rel) / rho + clock_drift;
-            double res = fabs(m->range_rate - rho_dot_pred);
-
-            sat_res_sum[m->sat_idx] += res;
-            sat_res_count[m->sat_idx]++;
-        }
-
-        /* Collect per-satellite mean residuals */
-        double sat_mean_res[MAX_SATELLITES];
-        int active_sats[MAX_SATELLITES];
-        int n_active = 0;
-
-        for (int s = 0; s < MAX_SATELLITES; s++) {
-            if (sat_res_count[s] == 0) continue;
-            sat_mean_res[s] = sat_res_sum[s] / sat_res_count[s];
-            active_sats[n_active++] = s;
-        }
-
-        if (n_active >= 3) {
-            /* Find median residual across satellites */
-            double sorted_res[MAX_SATELLITES];
-            for (int i = 0; i < n_active; i++)
-                sorted_res[i] = sat_mean_res[active_sats[i]];
-            /* Simple insertion sort for small n */
-            for (int i = 1; i < n_active; i++) {
-                double key = sorted_res[i];
-                int j = i - 1;
-                while (j >= 0 && sorted_res[j] > key) {
-                    sorted_res[j + 1] = sorted_res[j];
-                    j--;
-                }
-                sorted_res[j + 1] = key;
-            }
-            double median_res = sorted_res[n_active / 2];
-
-            /* Drop satellites with mean residual > 3x median */
-            int sat_dropped = 0;
-            for (int i = 0; i < n_active; i++) {
-                int s = active_sats[i];
-                if (sat_mean_res[s] > 3.0 * median_res && median_res > 0) {
-                    if (verbose)
-                        fprintf(stderr, "DOPPLER: dropping sat_idx=%d "
-                                "(sat_id=%d) residual=%.1f vs median=%.1f\n",
-                                s, satellites[s].sat_id,
-                                sat_mean_res[s], median_res);
-                    /* Zero out all measurements from this satellite */
-                    for (int j = 0; j < n_total_now; j++) {
-                        if (all_meas[j].sat_idx == s)
-                            all_meas[j].weight = 0;
-                    }
-                    sat_dropped++;
-                    sats_used--;
-                }
-            }
-
-            /* Re-solve if satellites were dropped and enough remain */
-            if (sat_dropped > 0) {
-                int remaining = 0;
-                for (int i = 0; i < n_total_now; i++)
-                    if (all_meas[i].weight > 0) remaining++;
-
-                if (remaining >= MIN_MEASUREMENTS && sats_used >= MIN_SATELLITES) {
-                    converged = 0;
-                    n_meas = remaining;
-
-                    for (int iter = 0; iter < MAX_ITERATIONS; iter++) {
-                        double HtWH3[4][4] = {{0}};
-                        double HtWy3[4] = {0};
-
-                        double rv3[3];
-                        rv3[0] = -OMEGA_EARTH * rx_ecef[1];
-                        rv3[1] =  OMEGA_EARTH * rx_ecef[0];
-                        rv3[2] = 0.0;
-
-                        for (int i = 0; i < n_total_now; i++) {
-                            solver_meas_t *m = &all_meas[i];
-                            if (m->weight == 0) continue;
-
-                            double los[3];
-                            vec3_sub(m->sat_ecef, rx_ecef, los);
-                            double rho = vec3_norm(los);
-                            if (rho < 1.0) continue;
-
-                            double rv[3] = { m->sat_vel[0] - rv3[0],
-                                             m->sat_vel[1] - rv3[1],
-                                             m->sat_vel[2] - rv3[2] };
-                            double rho_dot_geom = vec3_dot(los, rv) / rho;
-                            double rho_dot_pred = rho_dot_geom + clock_drift;
-                            double dy = m->range_rate - rho_dot_pred;
-
-                            double H_row[4];
-                            double rho2 = rho * rho;
-                            H_row[0] = -rv[0]/rho + los[0]*rho_dot_geom/rho2
-                                        + OMEGA_EARTH * los[1] / rho;
-                            H_row[1] = -rv[1]/rho + los[1]*rho_dot_geom/rho2
-                                        - OMEGA_EARTH * los[0] / rho;
-                            H_row[2] = -rv[2]/rho + los[2]*rho_dot_geom/rho2;
-                            H_row[3] = 1.0;
-
-                            double w = m->weight;
-                            for (int r = 0; r < 4; r++) {
-                                for (int c = 0; c < 4; c++)
-                                    HtWH3[r][c] += H_row[r] * w * H_row[c];
-                                HtWy3[r] += H_row[r] * w * dy;
-                            }
-                        }
-
-                        if (use_height) {
-                            double r0 = vec3_norm(rx_ecef);
-                            if (r0 > 0) {
-                                double hlat3, hlon3, halt3;
-                                ecef_to_geodetic(rx_ecef, &hlat3, &hlon3, &halt3);
-                                double dy_h = height_aiding_m - halt3;
-                                double H_h[4] = { rx_ecef[0]/r0, rx_ecef[1]/r0,
-                                                   rx_ecef[2]/r0, 0 };
-                                double w_h = 100.0;
-                                for (int r = 0; r < 4; r++) {
-                                    for (int c = 0; c < 4; c++)
-                                        HtWH3[r][c] += H_h[r] * w_h * H_h[c];
-                                    HtWy3[r] += H_h[r] * w_h * dy_h;
-                                }
-                            }
-                        }
-
-                        double HtWH3_copy[4][4];
-                        memcpy(HtWH3_copy, HtWH3, sizeof(HtWH3));
-                        double inv3[4][4];
-                        if (mat4_invert(HtWH3_copy, inv3) != 0) {
-                            fprintf(stderr, "DOPPLER: per-sat re-solve "
-                                    "FAIL - singular matrix\n");
-                            return 0;
-                        }
-
-                        double delta[4] = {0};
-                        for (int i = 0; i < 4; i++)
-                            for (int j = 0; j < 4; j++)
-                                delta[i] += inv3[i][j] * HtWy3[j];
-
-                        rx_ecef[0] += delta[0];
-                        rx_ecef[1] += delta[1];
-                        rx_ecef[2] += delta[2];
-                        clock_drift += delta[3];
-
-                        double correction = sqrt(delta[0]*delta[0] +
-                                                  delta[1]*delta[1] +
-                                                  delta[2]*delta[2]);
-                        if (correction < CONVERGENCE_M) {
-                            converged = 1;
-                            break;
-                        }
-                    }
-
-                    if (!converged) {
-                        if (verbose)
-                            fprintf(stderr, "DOPPLER: per-sat re-solve "
-                                    "FAIL - did not converge\n");
-                        return 0;
-                    }
-                } else {
-                    if (verbose)
-                        fprintf(stderr, "DOPPLER: per-sat screening left "
-                                "too few measurements (%d meas, %d sats)\n",
-                                remaining, sats_used);
-                    return 0;
-                }
-            }
-        }
-    }
+    /* The chosen solution, with its weights (the last refine was another's) */
+    double rx_ecef[3] = { sol[best][0], sol[best][1], sol[best][2] };
+    double clock_drift = sol_clk[best];
+    if (!refine(all_meas, n_meas, rx_ecef, &clock_drift))
+        return 0;
 
     /* Compute HDOP from the final solution's covariance */
-    int n_total = n_meas + rejected;  /* original array size */
+    int n_total = n_meas;  /* all collected; weight 0 = rejected */
     double hdop = 99.9;
     {
         double HtH[4][4] = {{0}};
@@ -1290,6 +1111,9 @@ done_collect:
             }
         }
     }
+
+    rms_residual(all_meas, n_total, rx_ecef, clock_drift, &n_meas);
+    sats_used = count_sats(all_meas, n_total);
 
     /* Note: HDOP is reported in the solution for the caller to assess.
      * With few satellite passes (early operation), HDOP can be 100+
