@@ -12,6 +12,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "doppler_pos.h"
@@ -41,6 +42,17 @@ extern int verbose;
 #define START_SEPARATION     500e3   /* between grid starts (m) */
 #define AMBIGUOUS_DIST       100e3   /* a distinct second solution this far away... */
 #define AMBIGUOUS_RMS_RATIO  1.25    /* ...fitting within this ratio: no fix (mirror) */
+#define IRA_FREQ_WINDOW      100e3   /* Hz around the ring-alert channel: Doppler (+-37
+                                        * kHz) plus a cheap oscillator's offset. Frames
+                                        * decoded as IRAs MHz away are corrupted, with
+                                        * corrupted positions too */
+#define PARTNER_TOL_RAD      0.006   /* ~40 km at orbit radius: how far a velocity
+                                        * partner may sit from where the orbit puts it */
+#define TRACK_WINDOW_S       20.0    /* on_track: neighbours this close in time... */
+#define TRACK_TOL_RAD        0.0015  /* ...must agree to ~11 km */
+#define ROBUST_K             5.0     /* per iteration, set aside residuals > K robust
+                                        * sigmas from the median */
+#define MAX_HDOP             1000.0  /* weaker geometry than this: no fix */
 #define MAX_ITERATIONS       200     /* WLS iteration limit */
 #define CONVERGENCE_M        100.0   /* position correction threshold (m) */
 #define OUTLIER_SIGMA        3.0     /* residual rejection threshold */
@@ -216,6 +228,52 @@ static double estimate_channel_freq(sat_buffer_t *s, uint64_t now)
  * Two positions separated by 5 minutes span ~2200 km of arc, so the orbital
  * plane is determined with sub-degree accuracy despite 4 km quantization.
  * Speed magnitude comes from the vis-viva equation. */
+/* Is `m` where the satellite at `cur` would be after their time
+ * difference? The angle between the two positions (the other one rotated
+ * into cur's axes, undoing the Earth's turn) must match the orbital rate.
+ * A corrupted IRA carrying a real pass's sat_id failed this by 70-2000 km;
+ * picked as the partner, it gave the whole pass a wrong plane and wrong
+ * velocities. */
+static int on_orbit_within(const sat_meas_t *cur, const sat_meas_t *m, double tol)
+{
+    double dt = ((double)m->timestamp - (double)cur->timestamp) / 1e9;
+    double a = OMEGA_EARTH * dt, ca = cos(a), sa = sin(a);
+    double o[3] = { ca * m->sat_ecef[0] - sa * m->sat_ecef[1],
+                    sa * m->sat_ecef[0] + ca * m->sat_ecef[1],
+                    m->sat_ecef[2] };
+    double r1 = vec3_norm(cur->sat_ecef), r2 = vec3_norm(o);
+    double c = vec3_dot(cur->sat_ecef, o) / (r1 * r2);
+    double angle = acos(c > 1 ? 1 : c < -1 ? -1 : c);
+    double rate = sqrt(GM_EARTH / (r1 * r1 * r1));
+    return fabs(angle - rate * fabs(dt)) < tol;
+}
+
+static int partner_on_orbit(const sat_meas_t *cur, const sat_meas_t *m)
+{
+    return on_orbit_within(cur, m, PARTNER_TOL_RAD);
+}
+
+/* Is measurement idx on its satellite's track? Some measurement 2-20 s
+ * away must agree with it to ~11 km. Checking against the partner alone is
+ * not enough: an angle test barely sees a cross-track error at a long
+ * separation (off by d, the angle changes by ~d^2 / (2 x arc)) - minutes
+ * apart, points ~300-600 km off-track passed. 20 s apart it is ~57 km. */
+static int on_track(sat_buffer_t *s, int idx)
+{
+    const sat_meas_t *cur = sat_buf_get(s, idx);
+    for (int dir = -1; dir <= 1; dir += 2) {
+        for (int i = idx + dir; i >= 0 && i < s->count; i += dir) {
+            const sat_meas_t *m = sat_buf_get(s, i);
+            if (!m || !m->valid) continue;
+            double dt = fabs(((double)m->timestamp - (double)cur->timestamp) / 1e9);
+            if (dt > TRACK_WINDOW_S) break;
+            if (dt < MIN_VEL_INTERVAL_NS / 1e9) continue;
+            if (on_orbit_within(cur, m, TRACK_TOL_RAD)) return 1;
+        }
+    }
+    return 0;
+}
+
 static int estimate_velocity(sat_buffer_t *s, int idx, double vel[3])
 {
     sat_meas_t *cur = sat_buf_get(s, idx);
@@ -223,6 +281,7 @@ static int estimate_velocity(sat_buffer_t *s, int idx, double vel[3])
 
     double r_norm = vec3_norm(cur->sat_ecef);
     if (r_norm < 1e6) return -1;
+    if (!on_track(s, idx)) return -1;       /* a corrupted position */
 
     /* Find the most temporally separated measurement for best orbital plane
      * accuracy. Prefer larger separation (more arc = less quantization noise).
@@ -240,6 +299,7 @@ static int estimate_velocity(sat_buffer_t *s, int idx, double vel[3])
         if (dt < MIN_VEL_INTERVAL_NS / 1e9) break;
         double other_r = vec3_norm(m->sat_ecef);
         if (other_r < 7050e3 || other_r > 7250e3) continue;
+        if (!partner_on_orbit(cur, m) || !on_track(s, i)) continue;
         best_dt = dt;
         best_other = m;
         break;
@@ -252,6 +312,7 @@ static int estimate_velocity(sat_buffer_t *s, int idx, double vel[3])
         if (dt < MIN_VEL_INTERVAL_NS / 1e9) break;
         double other_r = vec3_norm(m->sat_ecef);
         if (other_r < 7050e3 || other_r > 7250e3) continue;
+        if (!partner_on_orbit(cur, m) || !on_track(s, i)) continue;
         if (dt > best_dt) {
             best_dt = dt;
             best_other = m;
@@ -385,6 +446,10 @@ void doppler_pos_add_measurement(const ira_data_t *ira, double frequency,
     dbg_total++;
 
     if (ira->sat_id == 0) { dbg_sat0++; goto dbg_print; }
+    if (fabs(frequency - IR_RING_ALERT_FREQ) > IRA_FREQ_WINDOW) {
+        dbg_coord++;
+        goto dbg_print;
+    }
     if (ira->lat < -90 || ira->lat > 90) { dbg_coord++; goto dbg_print; }
     if (ira->lon < -180 || ira->lon > 180) { dbg_coord++; goto dbg_print; }
 
@@ -421,14 +486,28 @@ void doppler_pos_add_measurement(const ira_data_t *ira, double frequency,
                             ira->sat_id, dt);
                 s->count = 0;
                 s->channel_freq = 0;
-            } else {
-                /* Short gap: verify position consistency.
-                 * At ~7.5 km/s, speed > 10 km/s is impossible. */
-                double dx = sat_ecef[0] - s->meas[last].sat_ecef[0];
-                double dy = sat_ecef[1] - s->meas[last].sat_ecef[1];
-                double dz = sat_ecef[2] - s->meas[last].sat_ecef[2];
-                double dist = sqrt(dx*dx + dy*dy + dz*dz);
-                if (fabs(dt) > 0 && fabs(dt) < 120 && dist / fabs(dt) > 10000.0) {
+            }
+            else {
+                /* Short gap: verify position consistency (> 10 km/s is
+                 * impossible, allowing 14 km for two positions each rounded
+                 * to the 4 km grid) - against any of the last 3 measurements
+                 * before it within 2 min, not just the last: when that one
+                 * was a corrupted IRA, checking it alone rejected every
+                 * real measurement after it for 2 min. */
+                int checked = 0, consistent = 0;
+                for (int j = last; j >= 0 && j > last - 3; j--) {
+                    double dtj = fabs(((double)timestamp - (double)s->meas[j].timestamp) / 1e9);
+                    if (dtj == 0 || dtj >= 120) continue;
+                    double dx = sat_ecef[0] - s->meas[j].sat_ecef[0];
+                    double dy = sat_ecef[1] - s->meas[j].sat_ecef[1];
+                    double dz = sat_ecef[2] - s->meas[j].sat_ecef[2];
+                    checked++;
+                    if (sqrt(dx*dx + dy*dy + dz*dz) - 14000.0 <= 10000.0 * dtj) {
+                        consistent = 1;
+                        break;
+                    }
+                }
+                if (checked && !consistent) {
                     dbg_vel_rej++;
                     pthread_mutex_unlock(&pos_lock);
                     goto dbg_print;
@@ -497,18 +576,45 @@ static double predict_range_rate(const solver_meas_t *m, const double rx[3],
  * finite): with it each step covered a small fraction of the way, the steps
  * shrank below CONVERGENCE_M within a few km, and the solve "converged" next
  * to its initial guess. The 500 km step limit guards the first steps. */
+static int cmp_double(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
 static int gauss_newton(solver_meas_t *meas, int n, double rx[3], double *clk)
 {
+    static double res[MAX_SATELLITES * MEAS_PER_SAT];
+    static double tmp[MAX_SATELLITES * MEAS_PER_SAT];
     for (int iter = 0; iter < MAX_ITERATIONS; iter++) {
         double HtWH[4][4] = {{0}};
         double HtWy[4] = {0};
 
+        /* Robust mask for this step: a few wild measurements (a corrupted
+         * position that slipped through gives ~1 km/s) must not outweigh
+         * hundreds of good ones (~8 m/s) in plain least squares. */
+        int k = 0;
+        for (int i = 0; i < n; i++) {
+            res[i] = NAN;
+            if (meas[i].weight == 0) continue;
+            double pred = predict_range_rate(&meas[i], rx, *clk, NULL);
+            if (isnan(pred)) continue;
+            res[i] = meas[i].range_rate - pred;
+            tmp[k++] = res[i];
+        }
+        if (k < MIN_MEASUREMENTS) return 0;
+        qsort(tmp, k, sizeof(double), cmp_double);
+        double med = tmp[k / 2];
+        for (int i = 0; i < k; i++) tmp[i] = fabs(tmp[i] - med);
+        qsort(tmp, k, sizeof(double), cmp_double);
+        double cut = ROBUST_K * 1.4826 * tmp[k / 2];
+        if (cut < 5.0) cut = 5.0;              /* m/s */
+
         for (int i = 0; i < n; i++) {
             solver_meas_t *m = &meas[i];
-            if (m->weight == 0) continue;
-            double H_row[4];
+            if (m->weight == 0 || isnan(res[i]) || fabs(res[i] - med) > cut) continue;
+            double H_row[4] = {0};
             double pred = predict_range_rate(m, rx, *clk, H_row);
-            if (isnan(pred)) continue;
             double dy = m->range_rate - pred;
             for (int r = 0; r < 4; r++) {
                 for (int c = 0; c < 4; c++)
@@ -1112,6 +1218,13 @@ done_collect:
         }
     }
 
+    if (hdop > MAX_HDOP) {
+        if (verbose)
+            fprintf(stderr, "DOPPLER: HDOP %.0f too weak, no fix\n", hdop);
+        out->n_measurements = n_meas;
+        out->n_satellites = sats_used;
+        return 0;
+    }
     rms_residual(all_meas, n_total, rx_ecef, clock_drift, &n_meas);
     sats_used = count_sats(all_meas, n_total);
 
