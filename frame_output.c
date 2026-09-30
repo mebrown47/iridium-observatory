@@ -213,6 +213,17 @@ void frame_output_print(demod_frame_t *frame)
     buf_flush(!suppress_stdout);
 }
 
+void frame_output_print_text(const char *line)
+{
+    int suppress_stdout = diagnostic_mode || acars_enabled;
+    if (suppress_stdout && !ZMQ_ACTIVE)
+        return;
+    buf_start();
+    buf_printf("%s", line);
+    buf_char('\n');
+    buf_flush(!suppress_stdout);
+}
+
 int frame_output_format_parsed(demod_frame_t *frame, char *out, size_t n)
 {
     format_raw_line(frame);

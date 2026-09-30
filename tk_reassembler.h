@@ -24,6 +24,27 @@ tkr_mode_t tkr_mode_from_name(const char *name);
  * no effect in these modes). Returns 0, or -1 for an unknown one. */
 int tkr_set_arg(const char *arg);
 
+/* ---- Instances (several can run side by side) ---- */
+
+typedef struct tkr tkr_t;
+
+/* A reassembler in `mode` printing to out. */
+tkr_t *tkr_new(tkr_mode_t mode, FILE *out);
+/* reassembler.py -a option (as tkr_set_arg). */
+int tkr_arg(tkr_t *t, const char *arg);
+/* Tagged output instead of out: every message's line goes to emit as
+ * "RSM: <name> <n> <t1>,...,<tn> | <reassembler.py line>" (RSM: no
+ * iridium-parser.py line starts so - MSG: is its pager type), where t1..tn are
+ * the Unix times (s, 6 decimals) of the IDA frames the message was built
+ * from; no summary lines at the end. */
+void tkr_set_emit(tkr_t *t, const char *name, void (*emit)(const char *line, void *ctx), void *ctx);
+/* One parser line. */
+void tkr_feed(tkr_t *t, const char *line);
+/* End of input: the summary lines (untagged instances), then free t. */
+void tkr_finish(tkr_t *t);
+
+/* ---- The single instance of --reassemble (and tests/reasm_check) ---- */
+
 /* Start a reassembler writing to out. Not thread-safe: one caller. */
 void tkr_init(tkr_mode_t mode, FILE *out);
 

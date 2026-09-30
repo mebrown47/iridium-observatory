@@ -195,6 +195,31 @@ identical to the toolkit in every mode - the parser (default and --harder, all
 (plain, json), each with and without --parse-harder. 121 ACARS messages in the
 hour, 138 with --harder.
 
+## Messages stream (for the Iridium analyzer's Messages window, its M0)
+
+`--messages=MODE[,ARG...]` (repeatable, up to 4) runs reassemblers alongside
+the frames and prints each message, right after the frame line that
+completed it, as
+
+    RSM: <mode> <n> <t1>,...,<tn> | <the reassembler.py line>
+
+with the Unix times of the n IDA frames it was built from (across all
+packets of a multi-packet SBD message). `RSM:` because no iridium-parser.py
+line starts so (`MSG:` is its pager type). libacars needs `json` (one line
+per message). tk_reassembler.c now keeps its state per instance
+(`tkr_new` / `tkr_set_emit` / `tkr_feed` / `tkr_finish`); `--reassemble`
+and tests/reasm_check.c use one, unchanged.
+
+Checked (2026-09-29): on the 10- and 60-min live R2 sets the frame lines
+are identical to `--parsed=full` alone (50,605 / 395,365), the text after
+` | ` equals `--reassemble` output for sbd, acars, acars json, libacars
+json and ida, and every listed time is an `IDA ... CRC:OK` frame of the
+run, in order (736 of 17,678 ida messages in the hour span several
+frames). Synthetic (reasm_check --tagged): 988 multi-packet SBD messages,
+each listing at least one frame per packet. The whole reassembler suite
+(corpus, live, synthetic, every mode) still matches the toolkit after
+the refactor.
+
 ## Later, if wanted
 
 `msg`/`page` (pager messages), `ida`/`idapp`/`lap`/`gsmtap` (Wireshark),

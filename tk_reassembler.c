@@ -163,25 +163,83 @@ static void iso_local(long t, char *out, size_t n)
 
 static tkr_mode_t mode;
 static FILE *out;
-static long stat_line, stat_filter;
 /* ReassembleIDA */
 typedef struct { long freq; double *time; int ntime; int ctr; char *dat; int cont, ul; } idabuf_t;
-static idabuf_t *buf; static int nbuf, capbuf;
-static long stat_broken, stat_ok, stat_fragments, stat_dupes;
-static double otime; static char *odata; static long ofreq; static double olevel;
 /* ReassembleIDASBD */
-typedef struct { char *typ; double time; int ul; bytes_t prehdr, data; } sbdobj_t;
+typedef struct { char *typ; double time; int ul; bytes_t prehdr, data; double *ft; int nft; } sbdobj_t;
 typedef struct { int no, cnt; sbdobj_t *p; double t; } multi_t;
-static multi_t *multi; static int nmulti, capmulti;
-static long sbd_short, sbd_single, sbd_cnt, sbd_multi, sbd_assembled, sbd_broken;
 static regex_t re_ida;
-static int arg_json, arg_showerrs, arg_nopings;
 
-int tkr_set_arg(const char *a)
+/* One reassembler (reassembler.py run in one mode). */
+struct tkr {
+    tkr_mode_t mode;
+    FILE *out;
+    long stat_line, stat_filter;
+    /* ReassembleIDA */
+    idabuf_t *buf; int nbuf, capbuf;
+    long stat_broken, stat_ok, stat_fragments, stat_dupes;
+    double otime; char *odata; long ofreq; double olevel;
+    /* ReassembleIDASBD */
+    multi_t *multi; int nmulti, capmulti;
+    long sbd_short, sbd_single, sbd_cnt, sbd_multi, sbd_assembled, sbd_broken;
+    int arg_json, arg_showerrs, arg_nopings;
+#ifdef HAVE_LIBACARS
+    struct la_reasm_ctx_s *la_ctx;
+#endif
+    /* tagged output (--messages): each message's lines go to emit */
+    void (*emit)(const char *line, void *ctx);
+    void *emit_ctx;
+    char name[16];
+};
+
+/* The instance being run: every entry point sets R, mode and out, so the
+ * ported functions below read like the Python they follow. */
+static tkr_t *R;
+
+static void append_times(double **ft, int *nft, const double *add, int nadd)
 {
-    if (!strcmp(a, "json")) arg_json = 1;
-    else if (!strcmp(a, "showerrs")) arg_showerrs = 1;
-    else if (!strcmp(a, "nopings")) arg_nopings = 1;
+    if (nadd <= 0) return;
+    *ft = realloc(*ft, sizeof(double) * (size_t)(*nft + nadd));
+    if (!*ft) abort();
+    memcpy(*ft + *nft, add, sizeof(double) * (size_t)nadd);
+    *nft += nadd;
+}
+
+/* Run fn(arg) with out captured; if it printed, emit "RSM: <name> <n>
+ * <t1>,...,<tn> | <line>" for each line it printed. */
+static void emit_captured(void (*fn)(void *), void *arg, const double *ft, int nft)
+{
+    if (!R->emit) { fn(arg); return; }
+    char *mb = NULL; size_t ml = 0;
+    FILE *saved = out;
+    out = open_memstream(&mb, &ml);
+    if (!out) { out = saved; return; }
+    fn(arg);
+    fclose(out);
+    out = saved;
+    sb_t times = { 0 };
+    for (int i = 0; i < nft; i++) sb_printf(&times, "%s%.6f", i ? "," : "", ft[i]);
+    char *p = mb, *e = mb + ml;
+    while (p < e) {
+        char *nl = memchr(p, '\n', (size_t)(e - p));
+        size_t len = nl ? (size_t)(nl - p) : (size_t)(e - p);
+        sb_t line = { 0 };
+        sb_printf(&line, "RSM: %s %d %s | ", R->name, nft, sb_str(&times));
+        sb_putb(&line, (const unsigned char *)p, len);
+        R->emit(sb_str(&line), R->emit_ctx);
+        free(line.s);
+        p += len + (nl ? 1 : 0);
+    }
+    free(times.s);
+    free(mb);
+}
+
+int tkr_arg(tkr_t *t, const char *a)
+{
+    R = t;
+    if (!strcmp(a, "json")) R->arg_json = 1;
+    else if (!strcmp(a, "showerrs")) R->arg_showerrs = 1;
+    else if (!strcmp(a, "nopings")) R->arg_nopings = 1;
     else if (!strcmp(a, "perfect")) ;
     else return -1;
     return 0;
@@ -246,15 +304,45 @@ tkr_mode_t tkr_mode_from_name(const char *name)
     return TKR_OFF;
 }
 
-void tkr_init(tkr_mode_t m, FILE *o)
+static void compile_regex(void)
 {
-    mode = m; out = o;
-
+    static int done;
+    if (done) return;
     /* ida.py filter regex (one " cont=" per IDA line, so leftmost-longest
      * POSIX matching picks the same groups as Python's) */
     if (regcomp(&re_ida, "^.* cont=([0-9]) ([0-9]) ctr=([0-9]+) [0-9]+ len=([0-9]+) 0:.000 "
                          "\\[([0-9a-f.!]*)\\][[:space:]]+..../.... CRC:OK", REG_EXTENDED) != 0)
         abort();
+    done = 1;
+}
+
+tkr_t *tkr_new(tkr_mode_t m, FILE *o)
+{
+    compile_regex();
+    tkr_t *t = calloc(1, sizeof(*t));
+    if (!t) abort();
+    t->mode = m; t->out = o;
+    return t;
+}
+
+void tkr_set_emit(tkr_t *t, const char *name, void (*emit)(const char *line, void *ctx), void *ctx)
+{
+    t->emit = emit; t->emit_ctx = ctx;
+    snprintf(t->name, sizeof(t->name), "%s", name);
+}
+
+static tkr_t *def;                       /* the --reassemble instance */
+
+int tkr_set_arg(const char *a)
+{
+    if (!def) def = tkr_new(TKR_OFF, stdout);
+    return tkr_arg(def, a);
+}
+
+void tkr_init(tkr_mode_t m, FILE *o)
+{
+    if (!def) def = tkr_new(m, o);
+    def->mode = m; def->out = o;
 }
 
 /* ------------------------------------------------------------ SBD / ACARS */
@@ -316,13 +404,13 @@ static void acars_consume_l2(sbdobj_t *q)
     }
     int nerr = e_crc_fail + e_crc_missing + e_parity + e_etx;
     int ping = label.n == 2 && label.d[0] == '_' && label.d[1] == 0x7f;
-    if ((nerr == 0 || arg_showerrs) && !(ping && arg_nopings)) {
+    if ((nerr == 0 || R->arg_showerrs) && !(ping && R->arg_nopings)) {
         char ts[40];
         iso_utc_seconds(q->time, ts, sizeof(ts));
         size_t k = 0;
         while (k < f_reg.n && f_reg.d[k] == '.') k++;
         sb_t o = { 0 };
-        if (arg_json) {
+        if (R->arg_json) {
             sb_puts(&o, "{\"app\": {\"name\": \"iridium-toolkit\", \"version\": \"0.0.1\"}, "
                         "\"source\": {\"transport\": \"iridium\", \"protocol\": \"acars\"}, \"acars\": {");
             sb_printf(&o, "\"timestamp\": \"%s\", \"errors\": %d, \"link_direction\": \"%s\", \"block_end\": %s",
@@ -339,8 +427,8 @@ static void acars_consume_l2(sbdobj_t *q)
             if (ack.n == 1 && ack.d[0] == 0x15) put_json_str(&o, (const unsigned char *)"!", 1);
             else put_json_str(&o, ack.d, ack.n);
             sb_puts(&o, ", \"text\": "); put_json_str(&o, txt.d, txt.n);
-            sb_printf(&o, "}, \"freq\": %ld, \"level\": ", ofreq);
-            put_json_float(&o, olevel);
+            sb_printf(&o, "}, \"freq\": %ld, \"level\": ", R->ofreq);
+            put_json_float(&o, R->olevel);
             sb_puts(&o, ", \"header\": \"");
             put_hex(&o, hdr, NULL);
             sb_puts(&o, "\"}");
@@ -618,7 +706,6 @@ static void jv_dump(sb_t *o, const jv_t *v)
 
 /* sbd.ReassembleIDASBDlibACARS.consume_l2 with the toolkit's libacars.py
  * wrapper */
-static la_reasm_ctx *la_ctx;
 static void libacars_consume_l2(sbdobj_t *q)
 {
     if (q->data.n <= 2) return;
@@ -626,11 +713,11 @@ static void libacars_consume_l2(sbdobj_t *q)
     la_msg_dir d = q->ul ? LA_MSG_DIR_AIR2GND : LA_MSG_DIR_GND2AIR;
     bytes_t x = b_slice(q->data, 1, (long)q->data.n);
     if (x.n && x.d[0] == 3) { bytes_t y = b_slice(x, 8, (long)x.n); b_free(&x); x = y; }
-    if (!la_ctx) la_ctx = la_reasm_ctx_new();
+    if (!R->la_ctx) R->la_ctx = la_reasm_ctx_new();
     /* libacars.py: timeval(int(time), int(time-int(time))*1000000) - the
      * microseconds are always 0 (int() of the fraction first) */
     struct timeval tv = { (time_t)(long)q->time, 0 };
-    la_proto_node *p = la_acars_parse_and_reassemble(x.d, (int)x.n, d, la_ctx, tv);
+    la_proto_node *p = la_acars_parse_and_reassemble(x.d, (int)x.n, d, R->la_ctx, tv);
     b_free(&x);
     if (!p) return;                     /* Python: NULL pointer access (raises) */
     int is_acars = p->td && p->td->json_key && !strcmp(p->td->json_key, "acars");
@@ -638,10 +725,10 @@ static void libacars_consume_l2(sbdobj_t *q)
     int is_err = am ? am->err : 0;
     int is_ping = am && !am->err && (!strcmp(am->label, "_d") || !strcmp(am->label, "Q0"));
     int interesting = !is_acars || p->next != NULL;
-    if ((is_err && !arg_showerrs) || (is_ping && arg_nopings)) { la_proto_tree_destroy(p); return; }
+    if ((is_err && !R->arg_showerrs) || (is_ping && R->arg_nopings)) { la_proto_tree_destroy(p); return; }
     char ts[40];
     iso_utc_seconds(q->time, ts, sizeof(ts));
-    if (arg_json) {
+    if (R->arg_json) {
         /* {app, source, timestamp, link_direction,
          *  acars: json.loads(o.json())['acars']} through json.dumps */
         la_vstring *v = la_proto_tree_format_json(NULL, p);
@@ -693,10 +780,10 @@ static void consume_l2(sbdobj_t *p)
     else sbd_consume_l2(p);
 }
 
-static void sbd_free(sbdobj_t *p) { if (!p) return; free(p->typ); b_free(&p->prehdr); b_free(&p->data); free(p); }
+static void sbd_free(sbdobj_t *p) { if (!p) return; free(p->typ); b_free(&p->prehdr); b_free(&p->data); free(p->ft); free(p); }
 
 /* sbd.ReassembleIDASBD.process_l2; returns a packet to consume, or NULL */
-static sbdobj_t *process_l2(bytes_t data, double time, int ul)
+static sbdobj_t *process_l2(bytes_t data, double time, int ul, const double *ft, int nft)
 {
     if (data.n < 5) return NULL;
     if (data.d[0] == 0x76 && data.d[1] != 5) ;
@@ -713,7 +800,7 @@ static sbdobj_t *process_l2(bytes_t data, double time, int ul)
             return NULL;
         }
     }
-    sbd_cnt++;
+    R->sbd_cnt++;
     char typ[8];
     snprintf(typ, sizeof(typ), "%02x%02x", data.d[0], data.d[1]);
     bytes_t d = b_slice(data, 2, (long)data.n), prehdr = { NULL, 0 }, hdr = { NULL, 0 };
@@ -752,48 +839,51 @@ static sbdobj_t *process_l2(bytes_t data, double time, int ul)
     b_free(&hdr);
     sbdobj_t *pkt = calloc(1, sizeof(*pkt));
     pkt->typ = strdup(typ); pkt->time = time; pkt->ul = ul; pkt->prehdr = prehdr; pkt->data = d;
+    append_times(&pkt->ft, &pkt->nft, ft, nft);
 
-    for (int i = nmulti - 1; i >= 0; i--)
-        if (multi[i].t + 5 < time) {
-            sbd_broken++;
-            sbd_free(multi[i].p);
-            memmove(&multi[i], &multi[i + 1], sizeof(multi_t) * (size_t)(nmulti - i - 1));
-            nmulti--;
+    for (int i = R->nmulti - 1; i >= 0; i--)
+        if (R->multi[i].t + 5 < time) {
+            R->sbd_broken++;
+            sbd_free(R->multi[i].p);
+            memmove(&R->multi[i], &R->multi[i + 1], sizeof(multi_t) * (size_t)(R->nmulti - i - 1));
+            R->nmulti--;
         }
-    if (msgno == 0) { sbd_short++; return pkt; }
-    else if (msgcnt == 1 && msgno == 1) { sbd_single++; return pkt; }
+    if (msgno == 0) { R->sbd_short++; return pkt; }
+    else if (msgcnt == 1 && msgno == 1) { R->sbd_single++; return pkt; }
     else if (msgcnt > 1) {
-        if (nmulti == capmulti) { capmulti = capmulti ? capmulti * 2 : 16; multi = realloc(multi, sizeof(multi_t) * (size_t)capmulti); }
-        multi[nmulti++] = (multi_t){ msgno, msgcnt, pkt, time };
-        sbd_assembled++;
+        if (R->nmulti == R->capmulti) { R->capmulti = R->capmulti ? R->capmulti * 2 : 16; R->multi = realloc(R->multi, sizeof(multi_t) * (size_t)R->capmulti); }
+        R->multi[R->nmulti++] = (multi_t){ msgno, msgcnt, pkt, time };
+        R->sbd_assembled++;
         return NULL;
     } else if (msgno > 1) {
-        for (int i = nmulti - 1; i >= 0; i--) {
-            multi_t *mm = &multi[i];
+        for (int i = R->nmulti - 1; i >= 0; i--) {
+            multi_t *mm = &R->multi[i];
             if (msgno == mm->no + 1 && msgno < mm->cnt && mm->p->ul == ul) {
                 b_append(&mm->p->data, d);
+                append_times(&mm->p->ft, &mm->p->nft, ft, nft);
                 size_t l = strlen(mm->p->typ);
                 mm->p->typ = realloc(mm->p->typ, l + strlen(typ) + 1);
                 strcpy(mm->p->typ + l, typ);
                 mm->no++;
-                sbd_assembled++;
+                R->sbd_assembled++;
                 sbd_free(pkt);
                 return NULL;
             } else if (msgno == mm->no + 1 && msgno == mm->cnt && mm->p->ul == ul) {
                 sbdobj_t *p = mm->p;
                 b_append(&p->data, d);
+                append_times(&p->ft, &p->nft, ft, nft);
                 size_t l = strlen(p->typ);
                 p->typ = realloc(p->typ, l + strlen(typ) + 1);
                 strcpy(p->typ + l, typ);
-                memmove(&multi[i], &multi[i + 1], sizeof(multi_t) * (size_t)(nmulti - i - 1));
-                nmulti--;
-                sbd_assembled++;
-                sbd_multi++;
+                memmove(&R->multi[i], &R->multi[i + 1], sizeof(multi_t) * (size_t)(R->nmulti - i - 1));
+                R->nmulti--;
+                R->sbd_assembled++;
+                R->sbd_multi++;
                 sbd_free(pkt);
                 return p;
             }
         }
-        sbd_broken++;
+        R->sbd_broken++;
         sbd_free(pkt);
         return NULL;
     }
@@ -815,12 +905,21 @@ static void ida_consume(bytes_t data, double time, int ul, long freq)
     free(h.s); free(a.s);
 }
 
-static void consume(bytes_t data, double time, int ul, double level, long freq)
+struct ida_args { bytes_t data; double time; int ul; long freq; };
+static void ida_consume_cb(void *a) { struct ida_args *x = a; ida_consume(x->data, x->time, x->ul, x->freq); }
+static void consume_l2_cb(void *a) { consume_l2(a); }
+
+/* One reassembled IDA message; ft/nft: the times of its IDA frames */
+static void consume(bytes_t data, double time, int ul, double level, long freq, const double *ft, int nft)
 {
     (void)level;
-    if (mode == TKR_IDA) { ida_consume(data, time, ul, freq); return; }
-    sbdobj_t *p = process_l2(data, time, ul);
-    if (p) { consume_l2(p); sbd_free(p); }
+    if (mode == TKR_IDA) {
+        struct ida_args x = { data, time, ul, freq };
+        emit_captured(ida_consume_cb, &x, ft, nft);
+        return;
+    }
+    sbdobj_t *p = process_l2(data, time, ul, ft, nft);
+    if (p) { emit_captured(consume_l2_cb, p, p->ft, p->nft); sbd_free(p); }
 }
 
 /* bytes().fromhex(dat.replace('.',' ').replace('!',' ')) */
@@ -844,20 +943,20 @@ static bytes_t from_dotted_hex(const char *s)
 /* ReassembleIDA.process for one filtered, enriched line */
 static void ida_process(double time, long freq, double level, int ul, int cont, int ctr, const char *data)
 {
-    if (otime - 1 <= time && time <= otime + 1 && odata && !strcmp(odata, data) && ofreq - 200 < freq && freq < ofreq + 200) {
-        stat_dupes++;
+    if (R->otime - 1 <= time && time <= R->otime + 1 && R->odata && !strcmp(R->odata, data) && R->ofreq - 200 < freq && freq < R->ofreq + 200) {
+        R->stat_dupes++;
         return;
     }
-    otime = time; free(odata); odata = strdup(data); ofreq = freq; olevel = level;
+    R->otime = time; free(R->odata); R->odata = strdup(data); R->ofreq = freq; R->olevel = level;
 
     int ok = 0;
-    for (int i = 0; i < nbuf; i++) {
-        idabuf_t *e = &buf[i];
+    for (int i = 0; i < R->nbuf; i++) {
+        idabuf_t *e = &R->buf[i];
         if (e->freq - 260 < freq && freq < e->freq + 260 && e->time[e->ntime - 1] <= time && time <= e->time[e->ntime - 1] + 280 &&
             (e->ctr + 1) % 8 == ctr && e->ul == ul) {
             idabuf_t x = *e;
-            memmove(&buf[i], &buf[i + 1], sizeof(idabuf_t) * (size_t)(nbuf - i - 1));
-            nbuf--;
+            memmove(&R->buf[i], &R->buf[i + 1], sizeof(idabuf_t) * (size_t)(R->nbuf - i - 1));
+            R->nbuf--;
             size_t l = strlen(x.dat);
             x.dat = realloc(x.dat, l + 1 + strlen(data) + 1);
             x.dat[l] = '.'; strcpy(x.dat + l + 1, data);
@@ -865,17 +964,17 @@ static void ida_process(double time, long freq, double level, int ul, int cont, 
             x.time[x.ntime++] = time;
             if (cont) {
                 x.freq = freq; x.ctr = ctr; x.cont = cont; x.ul = ul;
-                if (nbuf == capbuf) { capbuf = capbuf ? capbuf * 2 : 16; buf = realloc(buf, sizeof(idabuf_t) * (size_t)capbuf); }
-                buf[nbuf++] = x;
+                if (R->nbuf == R->capbuf) { R->capbuf = R->capbuf ? R->capbuf * 2 : 16; R->buf = realloc(R->buf, sizeof(idabuf_t) * (size_t)R->capbuf); }
+                R->buf[R->nbuf++] = x;
             } else {
-                stat_ok++;
+                R->stat_ok++;
                 bytes_t b = from_dotted_hex(x.dat);
-                consume(b, time, x.ul, level, x.freq);
+                consume(b, time, x.ul, level, x.freq, x.time, x.ntime);
                 b_free(&b);
                 free(x.dat); free(x.time);
                 return;
             }
-            stat_fragments++;
+            R->stat_fragments++;
             ok = 1;
             break;
         }
@@ -883,34 +982,38 @@ static void ida_process(double time, long freq, double level, int ul, int cont, 
     if (ok) ;
     else if (ctr == 0 && !cont) {
         bytes_t b = from_dotted_hex(data);
-        consume(b, time, ul, level, freq);
+        consume(b, time, ul, level, freq, &time, 1);
         b_free(&b);
         return;
     } else if (ctr == 0 && cont) {
-        stat_fragments++;
-        if (nbuf == capbuf) { capbuf = capbuf ? capbuf * 2 : 16; buf = realloc(buf, sizeof(idabuf_t) * (size_t)capbuf); }
+        R->stat_fragments++;
+        if (R->nbuf == R->capbuf) { R->capbuf = R->capbuf ? R->capbuf * 2 : 16; R->buf = realloc(R->buf, sizeof(idabuf_t) * (size_t)R->capbuf); }
         idabuf_t x = { freq, malloc(sizeof(double)), 1, ctr, strdup(data), cont, ul };
         x.time[0] = time;
-        buf[nbuf++] = x;
+        R->buf[R->nbuf++] = x;
     } else if (ctr > 0) {
-        stat_broken++;
-        stat_fragments++;
+        R->stat_broken++;
+        R->stat_fragments++;
     }
     /* expire packets (the first one found) */
-    for (int i = 0; i < nbuf; i++)
-        if (buf[i].time[buf[i].ntime - 1] + 1000 <= time) {
-            stat_broken++;
-            free(buf[i].dat); free(buf[i].time);
-            memmove(&buf[i], &buf[i + 1], sizeof(idabuf_t) * (size_t)(nbuf - i - 1));
-            nbuf--;
+    for (int i = 0; i < R->nbuf; i++)
+        if (R->buf[i].time[R->buf[i].ntime - 1] + 1000 <= time) {
+            R->stat_broken++;
+            free(R->buf[i].dat); free(R->buf[i].time);
+            memmove(&R->buf[i], &R->buf[i + 1], sizeof(idabuf_t) * (size_t)(R->nbuf - i - 1));
+            R->nbuf--;
             break;
         }
 }
 
+void tkr_line(const char *line) { tkr_feed(def, line); }
+void tkr_end(void) { tkr_finish(def); def = NULL; }
+
 /* Reassemble.filter + ReassembleIDA.filter + MyObject.enrich, then process */
-void tkr_line(const char *line_in)
+void tkr_feed(tkr_t *t, const char *line_in)
 {
-    stat_line++;
+    R = t; mode = t->mode; out = t->out;
+    R->stat_line++;
     /* line.split(None, 8) */
     const char *f[9];
     size_t fl[9];
@@ -948,26 +1051,39 @@ void tkr_line(const char *line_in)
     char *lv = strndup(f[5], fl[5]);
     double level = strtod(lv, NULL);             /* "a|b|c": level = a */
     double time = starttime + mstime / 1000;
-    stat_filter++;
+    R->stat_filter++;
     ida_process(time, freq, level, ul, f1, ctr, hex);
     free(freqs); free(name); free(ms); free(lv); free(hex); free(data);
 }
 
-void tkr_end(void)
+void tkr_finish(tkr_t *t)
 {
-    if (stat_line > 0) fprintf(out, "Kept %ld/%ld (%3.1f%%) lines\n", stat_filter, stat_line, 100.0 * stat_filter / stat_line);
+    R = t; mode = t->mode; out = t->out;
+    if (t->emit) goto freeit;             /* tagged: no summary */
+    if (R->stat_line > 0) fprintf(out, "Kept %ld/%ld (%3.1f%%) lines\n", R->stat_filter, R->stat_line, 100.0 * R->stat_filter / R->stat_line);
     else fprintf(out, "No lines?\n");
-    fprintf(out, "%ld valid packets assembled from %ld fragments (1:%1.2f).\n", stat_ok, stat_fragments,
-            (double)stat_fragments / (stat_ok ? stat_ok : 1));
-    fprintf(out, "%ld/%ld (%3.1f%%) broken fragments.\n", stat_broken, stat_fragments,
-            100.0 * stat_broken / (stat_fragments ? stat_fragments : 1));
-    fprintf(out, "%ld dupes removed.\n", stat_dupes);
+    fprintf(out, "%ld valid packets assembled from %ld fragments (1:%1.2f).\n", R->stat_ok, R->stat_fragments,
+            (double)R->stat_fragments / (R->stat_ok ? R->stat_ok : 1));
+    fprintf(out, "%ld/%ld (%3.1f%%) broken fragments.\n", R->stat_broken, R->stat_fragments,
+            100.0 * R->stat_broken / (R->stat_fragments ? R->stat_fragments : 1));
+    fprintf(out, "%ld dupes removed.\n", R->stat_dupes);
     if (mode == TKR_SBD || mode == TKR_ACARS || mode == TKR_LIBACARS) {
-        fprintf(out, "SBD: %ld short & %ld single messages. (%1.1f%%).\n", sbd_short, sbd_single,
-                100 * (double)(sbd_short + sbd_single) / (sbd_cnt ? sbd_cnt : 1));
-        fprintf(out, "SBD: %ld successful multi-pkt messages.\n", sbd_multi);
-        fprintf(out, "SBD: %ld/%ld fragments could not be assembled. (%1.1f%%).\n", sbd_broken, sbd_assembled,
-                100 * (double)sbd_broken / (sbd_assembled ? sbd_assembled : 1));
+        fprintf(out, "SBD: %ld short & %ld single messages. (%1.1f%%).\n", R->sbd_short, R->sbd_single,
+                100 * (double)(R->sbd_short + R->sbd_single) / (R->sbd_cnt ? R->sbd_cnt : 1));
+        fprintf(out, "SBD: %ld successful multi-pkt messages.\n", R->sbd_multi);
+        fprintf(out, "SBD: %ld/%ld fragments could not be assembled. (%1.1f%%).\n", R->sbd_broken, R->sbd_assembled,
+                100 * (double)R->sbd_broken / (R->sbd_assembled ? R->sbd_assembled : 1));
     }
     fflush(out);
+freeit:
+    for (int i = 0; i < t->nbuf; i++) { free(t->buf[i].dat); free(t->buf[i].time); }
+    free(t->buf);
+    for (int i = 0; i < t->nmulti; i++) sbd_free(t->multi[i].p);
+    free(t->multi);
+    free(t->odata);
+#ifdef HAVE_LIBACARS
+    if (t->la_ctx) la_reasm_ctx_destroy(t->la_ctx);
+#endif
+    free(t);
+    R = NULL;
 }

@@ -167,7 +167,11 @@ int use_gardner = 1;
 float uw_reject_threshold = 0.70f;
 int parsed_mode = 0;
 int reassemble_mode = 0;
-int parse_harder = 0;           /* --parse-harder: iridium-parser.py --harder */         /* --reassemble: tkr_mode_t, 0 = off */
+int parse_harder = 0;
+char *messages_spec[4];           /* --messages=MODE[,ARG...] */
+int n_messages_spec = 0;
+static tkr_t *messages_tkr[4];
+static int n_messages_tkr;           /* --parse-harder: iridium-parser.py --harder */         /* --reassemble: tkr_mode_t, 0 = off */
 char *replay_raw_path = NULL;   /* --replay-raw: RAW lines in, output stage only */
 static uint64_t replay_t0_ns = 0;
 int use_chase = 0;
@@ -543,6 +547,13 @@ typedef struct {
     ida_burst_t burst;
 } output_item_t;
 
+/* --messages: a reassembled message's RSM: line, after the frame lines */
+static void messages_emit(const char *line, void *ctx)
+{
+    (void)ctx;
+    frame_output_print_text(line);
+}
+
 /* A demodulated frame: IDA decode, the stdout line, and the hand-off to the
  * output thread (web map, positioning, ACARS, GSMTAP, archive). Takes
  * ownership of demod, its bits and llr. Shared by the live pipeline and
@@ -566,8 +577,20 @@ static void handle_demod_frame(demod_frame_t *demod)
         static char pl[16384];
         frame_output_format_parsed(demod, pl, sizeof(pl));
         tkr_line(pl);
-    } else if (parsed_mode == 2)
-        frame_output_print_parsed(demod);
+    } else if (parsed_mode == 2 || n_messages_tkr > 0) {
+        /* --parsed=full prints the parsed line; --messages instances get it
+         * and print their RSM: lines after it */
+        static char pl[16384];
+        frame_output_format_parsed(demod, pl, sizeof(pl));
+        if (parsed_mode == 2)
+            frame_output_print_text(pl);
+        else if (parsed_mode && ida_ok)
+            frame_output_print_ida(&burst);
+        else
+            frame_output_print(demod);
+        for (int i = 0; i < n_messages_tkr; i++)
+            tkr_feed(messages_tkr[i], pl);
+    }
     else if (parsed_mode && ida_ok)
         frame_output_print_ida(&burst);
     else
@@ -1048,6 +1071,9 @@ static void sig_handler(int signo) {
  * shutdown of every output (shared by the live pipeline and --replay-raw). */
 static void shutdown_outputs(void)
 {
+    for (int i = 0; i < n_messages_tkr; i++)
+        tkr_finish(messages_tkr[i]);
+    n_messages_tkr = 0;
     if (reassemble_mode)
         tkr_end();
 
@@ -1149,6 +1175,17 @@ int main(int argc, char **argv) {
     bp_set_harder(parse_harder);
     if (reassemble_mode)
         tkr_init((tkr_mode_t)reassemble_mode, stdout);
+    for (int i = 0; i < n_messages_spec; i++) {
+        /* MODE[,ARG...] -> an instance emitting RSM: lines */
+        char *spec = strdup(messages_spec[i]), *save = NULL;
+        char *name = strtok_r(spec, ",", &save), *tok;
+        tkr_t *t = tkr_new(tkr_mode_from_name(name), stdout);
+        tkr_set_emit(t, name, messages_emit, NULL);
+        while ((tok = strtok_r(NULL, ",", &save)))
+            tkr_arg(t, tok);
+        messages_tkr[n_messages_tkr++] = t;
+        free(spec);
+    }
 
 #ifdef HAVE_ZMQ
     if (zmq_enabled) {

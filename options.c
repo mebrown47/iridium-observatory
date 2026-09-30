@@ -105,6 +105,8 @@ extern int parsed_mode;
 extern char *replay_raw_path;
 extern int reassemble_mode;
 extern int parse_harder;
+extern char *messages_spec[4];
+extern int n_messages_spec;
 extern int position_enabled;
 extern double position_height;
 extern int acars_enabled;
@@ -219,6 +221,10 @@ static void usage(int exitcode) {
 "                           reassembler.py -m MODE -a ARG,... does (MODE: ida,\n"
 "                           sbd, acars; ARG: json, showerrs, nopings, perfect)\n"
 "                           and print that instead of frames (native port)\n"
+"    --messages=MODE[,ARG,...]  alongside the frames (repeatable, up to 4):\n"
+"                           reassemble as --reassemble does and print each\n"
+"                           message as \"RSM: MODE N T1,...,TN | <line>\", with\n"
+"                           the times of its N IDA frames (libacars: json only)\n"
 "    --parse-harder         for --parsed=full and --reassemble: parse as\n"
 "                           iridium-parser.py --harder does (recovers frames\n"
 "                           with bit errors in their headers)\n"
@@ -318,6 +324,7 @@ void parse_options(int argc, char **argv) {
         OPT_REPLAY_RAW,
         OPT_REASSEMBLE,
         OPT_PARSE_HARDER,
+        OPT_MESSAGES,
         OPT_POSITION,
         OPT_ACARS,
         OPT_ACARS_JSON,
@@ -375,6 +382,7 @@ void parse_options(int argc, char **argv) {
         { "replay-raw",     required_argument, NULL, OPT_REPLAY_RAW },
         { "reassemble",     required_argument, NULL, OPT_REASSEMBLE },
         { "parse-harder",   no_argument,       NULL, OPT_PARSE_HARDER },
+        { "messages",       required_argument, NULL, OPT_MESSAGES },
         { "position",       optional_argument, NULL, OPT_POSITION },
         { "acars",          no_argument,       NULL, OPT_ACARS },
         { "acars-json",     no_argument,       NULL, OPT_ACARS_JSON },
@@ -587,6 +595,27 @@ void parse_options(int argc, char **argv) {
                 if (uw_reject_threshold < 0.0f) uw_reject_threshold = 0.0f;
                 if (uw_reject_threshold > 1.0f) uw_reject_threshold = 1.0f;
                 break;
+
+            case OPT_MESSAGES: {
+                if (n_messages_spec >= 4)
+                    errx(1, "--messages: at most 4");
+                char *spec = strdup(optarg), *save = NULL;
+                char *tok = strtok_r(spec, ",", &save);
+                tkr_mode_t m = tok ? tkr_mode_from_name(tok) : TKR_OFF;
+                if (m == TKR_OFF)
+                    errx(1, "--messages: ida, sbd, acars or libacars[,ARG...] (got '%s')", optarg);
+                int json = 0;
+                while ((tok = strtok_r(NULL, ",", &save))) {
+                    if (strcmp(tok, "json") && strcmp(tok, "showerrs") && strcmp(tok, "nopings") && strcmp(tok, "perfect"))
+                        errx(1, "--messages: unknown option '%s' (json, showerrs, nopings, perfect)", tok);
+                    if (!strcmp(tok, "json")) json = 1;
+                }
+                if (m == TKR_LIBACARS && !json)
+                    errx(1, "--messages=libacars needs json (its text spans lines)");
+                free(spec);
+                messages_spec[n_messages_spec++] = strdup(optarg);
+                break;
+            }
 
             case OPT_PARSE_HARDER:
                 parse_harder = 1;
