@@ -555,8 +555,11 @@ static void handle_demod_frame(demod_frame_t *demod)
         archive_enabled)
         ida_ok = ida_decode(demod, &burst);
 
-    /* Output: parsed IDA line if available, otherwise RAW */
-    if (parsed_mode && ida_ok)
+    /* Output: --parsed=full: every frame as iridium-parser.py prints it;
+     * --parsed: the IDA line when there is one, otherwise RAW */
+    if (parsed_mode == 2)
+        frame_output_print_parsed(demod);
+    else if (parsed_mode && ida_ok)
         frame_output_print_ida(&burst);
     else
         frame_output_print(demod);

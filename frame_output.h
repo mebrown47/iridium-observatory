@@ -28,6 +28,10 @@ void frame_output_set_origin(const char *file_info, uint64_t t0_ns);
 /* Print one demodulated frame in iridium-toolkit RAW format to stdout. */
 void frame_output_print(demod_frame_t *frame);
 
+/* --parsed=full: print what iridium-parser.py prints for the frame's RAW:
+ * line (bits_parser.c) instead of the RAW: line. */
+void frame_output_print_parsed(demod_frame_t *frame);
+
 #include "ida_decode.h"
 
 /* Print one decoded IDA burst in iridium-parser.py parsed format to stdout. */

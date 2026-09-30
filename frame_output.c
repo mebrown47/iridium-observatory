@@ -32,6 +32,7 @@
 
 #include "frame_output.h"
 #include "iridium.h"
+#include "bits_parser.h"
 
 extern int diagnostic_mode;
 extern int parsed_mode;
@@ -166,14 +167,9 @@ static void ensure_initialized(uint64_t timestamp)
     initialized = 1;
 }
 
-void frame_output_print(demod_frame_t *frame)
+/* The RAW: line for a frame, into line_buf (no newline). */
+static void format_raw_line(demod_frame_t *frame)
 {
-    int suppress_stdout = diagnostic_mode || acars_enabled;
-
-    /* Skip entirely if nothing would receive the output */
-    if (suppress_stdout && !ZMQ_ACTIVE)
-        return;
-
     ensure_initialized(frame->timestamp);
 
     /* Relative timestamp in milliseconds */
@@ -186,7 +182,6 @@ void frame_output_print(demod_frame_t *frame)
     int payload_syms = frame->n_payload_symbols;
     if (payload_syms < 0) payload_syms = 0;
 
-    /* Build line into buffer */
     buf_start();
     buf_printf("RAW: %s %012.4f %010d N:%05.2f%+06.2f I:%011" PRIu64
                " %3d%% %.5f %3d ",
@@ -202,7 +197,37 @@ void frame_output_print(demod_frame_t *frame)
 
     for (int i = 0; i < frame->n_bits; i++)
         buf_char('0' + frame->bits[i]);
+    line_buf[line_pos] = '\0';
+}
 
+void frame_output_print(demod_frame_t *frame)
+{
+    int suppress_stdout = diagnostic_mode || acars_enabled;
+
+    /* Skip entirely if nothing would receive the output */
+    if (suppress_stdout && !ZMQ_ACTIVE)
+        return;
+
+    format_raw_line(frame);
+    buf_char('\n');
+    buf_flush(!suppress_stdout);
+}
+
+/* --parsed=full: the line iridium-parser.py would print for the frame's
+ * RAW: line (bits_parser.c), in its place. */
+void frame_output_print_parsed(demod_frame_t *frame)
+{
+    int suppress_stdout = diagnostic_mode || acars_enabled;
+    if (suppress_stdout && !ZMQ_ACTIVE)
+        return;
+
+    format_raw_line(frame);
+    static char parsed[LINE_BUF_SIZE * 2];
+    int n = bp_parse_line(line_buf, parsed, sizeof(parsed));
+    buf_start();
+    buf_printf("%s", parsed);
+    if (n >= (int)sizeof(parsed))
+        line_pos = LINE_BUF_SIZE - 2;
     buf_char('\n');
     buf_flush(!suppress_stdout);
 }

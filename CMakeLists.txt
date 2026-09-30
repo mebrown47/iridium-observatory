@@ -138,6 +138,8 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/qpsk_demod.c
     ${PROJECT_SOURCE_DIR}/fir_filter.c
     ${PROJECT_SOURCE_DIR}/frame_output.c
+    ${PROJECT_SOURCE_DIR}/bits_parser.c
+    ${PROJECT_SOURCE_DIR}/tk_rs.c
     ${PROJECT_SOURCE_DIR}/frame_decode.c
     ${PROJECT_SOURCE_DIR}/ida_decode.c
     ${PROJECT_SOURCE_DIR}/gsmtap.c

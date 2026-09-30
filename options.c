@@ -210,6 +210,8 @@ static void usage(int exitcode) {
 "                           positives (default 0.70; 0 disables). Does not\n"
 "                           affect decoding, only the UW-fail count.\n"
 "    --parsed               output parsed IDA lines (pipe to reassembler.py)\n"
+"    --parsed=full          output every frame as iridium-parser.py prints it\n"
+"                           (native port; see docs/NATIVE_PARSER_PLAN.md)\n"
 "    --replay-raw=FILE      read RAW: lines (this program's output) instead of\n"
 "                           samples and run only the output stage on them\n"
 "                           (tests; hard bits only, as iridium-toolkit gets)\n"
@@ -357,7 +359,7 @@ void parse_options(int argc, char **argv) {
         { "gardner",        no_argument,       NULL, OPT_GARDNER },
         { "no-gardner",     no_argument,       NULL, OPT_NO_GARDNER },
         { "uw-reject",      required_argument, NULL, OPT_UW_REJECT },
-        { "parsed",         no_argument,       NULL, OPT_PARSED },
+        { "parsed",         optional_argument, NULL, OPT_PARSED },
         { "replay-raw",     required_argument, NULL, OPT_REPLAY_RAW },
         { "position",       optional_argument, NULL, OPT_POSITION },
         { "acars",          no_argument,       NULL, OPT_ACARS },
@@ -577,7 +579,12 @@ void parse_options(int argc, char **argv) {
                 break;
 
             case OPT_PARSED:
-                parsed_mode = 1;
+                if (optarg == NULL)
+                    parsed_mode = 1;
+                else if (strcmp(optarg, "full") == 0)
+                    parsed_mode = 2;
+                else
+                    errx(1, "--parsed takes no value, or =full (got '%s')", optarg);
                 break;
 
             case OPT_POSITION:
