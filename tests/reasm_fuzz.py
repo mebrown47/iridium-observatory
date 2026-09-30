@@ -45,8 +45,9 @@ def acars(ul):
         body += "".join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789/.-:,\r\n") for _ in range(random.randint(0, 120)))
     body += random.choice(["\x03", "\x03", "\x03", "\x17"])
     b = bytes(odd(ord(c)) for c in body)
-    if random.random() < 0.05:                                   # break parity
-        k = random.randrange(len(b)); b = b[:k] + bytes([b[k] ^ 0x01]) + b[k + 1:]
+    if random.random() < 0.05 and len(b) > 25:                   # break parity (in the text:
+        k = random.randrange(24, len(b))                          # a broken uplink STX makes
+        b = b[:k] + bytes([b[k] ^ 0x01]) + b[k + 1:]              # reassembler.py raise)
     crc = kermit(b)
     csum = bytes([crc & 0xff, crc >> 8])
     if random.random() < 0.05:                                   # break the CRC
@@ -60,7 +61,7 @@ def sbd_packets():
     """list of (ul, l2-payload) for one logical message"""
     ul = random.random() < 0.3
     kind = random.random()
-    content = acars(ul) if random.random() < 0.6 else bytes(random.randrange(256) for _ in range(random.randint(0, 60)))
+    content = acars(ul) if random.random() < 0.6 else bytes(random.randrange(2, 256) for _ in range(random.randint(0, 60)))
     if kind < 0.12:                                              # HELLO
         pre = bytes([0x20] + [random.randrange(256) for _ in range(14)] + [random.choice([0, 1])] + [random.randrange(256) for _ in range(13)])
         return [(ul, b"\x06\x00" + pre + content[:20])]

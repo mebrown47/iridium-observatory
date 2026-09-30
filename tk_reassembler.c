@@ -74,6 +74,10 @@ static void sb_printf(sb_t *b, const char *f, ...)
     b->n += (size_t)k;
 }
 static const char *sb_str(sb_t *b) { if (!b->s) { sb_grow(b, 0); b->s[0] = 0; } return b->s; }
+/* raw bytes, NULs included (Python's bytes.decode('latin-1') in a str) */
+static void sb_putb(sb_t *b, const unsigned char *d, size_t k) { sb_grow(b, k); memcpy(b->s + b->n, d, k); b->n += k; b->s[b->n] = 0; }
+/* the line, byte for byte, and a newline */
+static void sb_writeln(sb_t *b, FILE *f) { if (b->n) fwrite(b->s, 1, b->n, f); fputc('\n', f); }
 
 /* bytes.hex(sep) */
 static void put_hex(sb_t *o, bytes_t b, const char *sep)
@@ -163,6 +167,65 @@ typedef struct { int no, cnt; sbdobj_t *p; double t; } multi_t;
 static multi_t *multi; static int nmulti, capmulti;
 static long sbd_short, sbd_single, sbd_cnt, sbd_multi, sbd_assembled, sbd_broken;
 static regex_t re_ida;
+static int arg_json, arg_showerrs, arg_nopings;
+
+int tkr_set_arg(const char *a)
+{
+    if (!strcmp(a, "json")) arg_json = 1;
+    else if (!strcmp(a, "showerrs")) arg_showerrs = 1;
+    else if (!strcmp(a, "nopings")) arg_nopings = 1;
+    else if (!strcmp(a, "perfect")) ;
+    else return -1;
+    return 0;
+}
+
+/* json.dumps of a str (ensure_ascii) */
+static void put_json_str(sb_t *o, const unsigned char *s, size_t n)
+{
+    sb_puts(o, "\"");
+    for (size_t i = 0; i < n; i++) {
+        unsigned c = s[i];
+        if (c == '"') sb_puts(o, "\\\"");
+        else if (c == '\\') sb_puts(o, "\\\\");
+        else if (c == '\n') sb_puts(o, "\\n");
+        else if (c == '\r') sb_puts(o, "\\r");
+        else if (c == '\t') sb_puts(o, "\\t");
+        else if (c == '\b') sb_puts(o, "\\b");
+        else if (c == '\f') sb_puts(o, "\\f");
+        else if (c < 0x20 || c >= 0x7f) sb_printf(o, "\\u%04x", c);
+        else { char t[2] = { (char)c, 0 }; sb_puts(o, t); }
+    }
+    sb_puts(o, "\"");
+}
+
+/* repr(float) as json.dumps prints it: the shortest text that reads back */
+static void put_json_float(sb_t *o, double v)
+{
+    char t[40];
+    for (int p = 1; p <= 17; p++) {
+        snprintf(t, sizeof(t), "%.*e", p - 1, v);
+        if (strtod(t, NULL) == v) {
+            int e = atoi(strchr(t, 'e') + 1);
+            if (e < -4 || e >= 16) {                  /* scientific, as repr */
+                char mant[32]; int ex;
+                sscanf(t, "%31[^e]e%d", mant, &ex);
+                size_t ml = strlen(mant);
+                while (ml && mant[ml - 1] == '0' && strchr(mant, '.')) mant[--ml] = 0;
+                if (ml && mant[ml - 1] == '.') mant[--ml] = 0;
+                sb_printf(o, "%se%c%02d", mant, ex < 0 ? '-' : '+', ex < 0 ? -ex : ex);
+            } else {
+                int dec = p - 1 - e;
+                if (dec < 1) dec = 1;
+                snprintf(t, sizeof(t), "%.*f", dec, v);
+                size_t l = strlen(t);
+                while (l > 2 && t[l - 1] == '0' && t[l - 2] != '.') t[--l] = 0;
+                sb_puts(o, t);
+            }
+            return;
+        }
+    }
+    sb_printf(o, "%.17g", v);
+}
 
 tkr_mode_t tkr_mode_from_name(const char *name)
 {
@@ -239,24 +302,53 @@ static void acars_consume_l2(sbdobj_t *q)
         if (q->ul) { seqn = b_slice(rest, 1, 5); f_no = b_slice(rest, 5, 11); txt = b_slice(rest, 11, (long)rest.n); have_seq = 1; }
         else txt = b_slice(rest, 1, (long)rest.n);
     }
-    if (!(e_crc_fail || e_crc_missing || e_parity || e_etx)) {
+    int nerr = e_crc_fail + e_crc_missing + e_parity + e_etx;
+    int ping = label.n == 2 && label.d[0] == '_' && label.d[1] == 0x7f;
+    if ((nerr == 0 || arg_showerrs) && !(ping && arg_nopings)) {
         char ts[40];
         iso_utc_seconds(q->time, ts, sizeof(ts));
         size_t k = 0;
         while (k < f_reg.n && f_reg.d[k] == '.') k++;
         sb_t o = { 0 };
+        if (arg_json) {
+            sb_puts(&o, "{\"app\": {\"name\": \"iridium-toolkit\", \"version\": \"0.0.1\"}, "
+                        "\"source\": {\"transport\": \"iridium\", \"protocol\": \"acars\"}, \"acars\": {");
+            sb_printf(&o, "\"timestamp\": \"%s\", \"errors\": %d, \"link_direction\": \"%s\", \"block_end\": %s",
+                      ts, nerr, q->ul ? "uplink" : "downlink", cont ? "false" : "true");
+            sb_puts(&o, ", \"mode\": "); put_json_str(&o, mode_.d, mode_.n);
+            sb_puts(&o, ", \"tail\": "); put_json_str(&o, f_reg.d + k, f_reg.n - k);
+            if (have_seq) { sb_puts(&o, ", \"flight\": "); put_json_str(&o, f_no.d, f_no.n); }
+            sb_puts(&o, ", \"label\": ");
+            if (ping) put_json_str(&o, (const unsigned char *)"_d", 2);
+            else put_json_str(&o, label.d, label.n);
+            sb_puts(&o, ", \"block_id\": "); put_json_str(&o, b_id.d, b_id.n);
+            if (have_seq) { sb_puts(&o, ", \"message_number\": "); put_json_str(&o, seqn.d, seqn.n); }
+            sb_puts(&o, ", \"ack\": ");
+            if (ack.n == 1 && ack.d[0] == 0x15) put_json_str(&o, (const unsigned char *)"!", 1);
+            else put_json_str(&o, ack.d, ack.n);
+            sb_puts(&o, ", \"text\": "); put_json_str(&o, txt.d, txt.n);
+            sb_printf(&o, "}, \"freq\": %ld, \"level\": ", ofreq);
+            put_json_float(&o, olevel);
+            sb_puts(&o, ", \"header\": \"");
+            put_hex(&o, hdr, NULL);
+            sb_puts(&o, "\"}");
+            fprintf(out, "%s\n", sb_str(&o));
+            free(o.s);
+            goto freed;
+        }
         sb_printf(&o, "%s ", ts);
         if (hdr.n > 0) { sb_puts(&o, "[hdr: "); put_hex(&o, hdr, NULL); sb_puts(&o, "]"); }
         else sb_printf(&o, "%-23s", "");
         sb_puts(&o, " ");
         sb_printf(&o, "Dir:%s ", q->ul ? "UL" : "DL");
-        sb_printf(&o, "Mode:%.*s ", (int)mode_.n, (const char *)mode_.d);
-        sb_printf(&o, "REG:%-7.*s ", (int)(f_reg.n - k), (const char *)f_reg.d + k);
+        sb_puts(&o, "Mode:"); sb_putb(&o, mode_.d, mode_.n); sb_puts(&o, " ");
+        sb_puts(&o, "REG:"); sb_putb(&o, f_reg.d + k, f_reg.n - k);         /* "%-7s" */
+        for (size_t pad = f_reg.n - k; pad < 7; pad++) sb_puts(&o, " ");
+        sb_puts(&o, " ");
         if (ack.n && ack.d[0] == 21) sb_puts(&o, "NAK  ");
-        else sb_printf(&o, "ACK:%.*s", (int)ack.n, (const char *)ack.d);
+        else { sb_puts(&o, "ACK:"); sb_putb(&o, ack.d, ack.n); }
         sb_puts(&o, " ");
         sb_puts(&o, "Label:");
-        int ping = label.n == 2 && label.d[0] == '_' && label.d[1] == 0x7f;
         if (ping) sb_puts(&o, "_?");
         else put_ascii(&o, label, 0, 1);
         sb_puts(&o, " ");
@@ -271,9 +363,19 @@ static void acars_consume_l2(sbdobj_t *q)
         }
         if (txt.n > 0) { sb_puts(&o, "["); put_ascii(&o, txt, 0, 1); sb_puts(&o, "]"); }
         if (cont) sb_puts(&o, " CONT'd");
-        fprintf(out, "%s\n", sb_str(&o));
+        if (nerr) {
+            /* q.errors in order: CRC_FAIL / CRC_MISSING, PARITY_FAIL, ETX incorrect */
+            sb_puts(&o, " ");
+            int first = 1;
+            if (e_crc_fail) { sb_puts(&o, "CRC_FAIL"); first = 0; }
+            if (e_crc_missing) { sb_puts(&o, first ? "CRC_MISSING" : " CRC_MISSING"); first = 0; }
+            if (e_parity) { sb_puts(&o, first ? "PARITY_FAIL" : " PARITY_FAIL"); first = 0; }
+            if (e_etx) sb_puts(&o, first ? "ETX incorrect" : " ETX incorrect");
+        }
+        sb_writeln(&o, out);
         free(o.s);
     }
+freed:
     b_free(&mode_); b_free(&f_reg); b_free(&ack); b_free(&label); b_free(&b_id); b_free(&rest);
     b_free(&seqn); b_free(&f_no); b_free(&txt);
 done:

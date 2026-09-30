@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "tk_reassembler.h"
 #include <unistd.h>
 
 #include "aircraft_db.h"
@@ -213,9 +214,10 @@ static void usage(int exitcode) {
 "    --parsed               output parsed IDA lines (pipe to reassembler.py)\n"
 "    --parsed=full          output every frame as iridium-parser.py prints it\n"
 "                           (native port; see docs/NATIVE_PARSER_PLAN.md)\n"
-"    --reassemble=MODE      reassemble frames as iridium-toolkit's reassembler.py\n"
-"                           -m MODE does (ida, sbd, acars) and print that\n"
-"                           instead of frames (native port)\n"
+"    --reassemble=MODE[,ARG,...]  reassemble frames as iridium-toolkit's\n"
+"                           reassembler.py -m MODE -a ARG,... does (MODE: ida,\n"
+"                           sbd, acars; ARG: json, showerrs, nopings, perfect)\n"
+"                           and print that instead of frames (native port)\n"
 "    --replay-raw=FILE      read RAW: lines (this program's output) instead of\n"
 "                           samples and run only the output stage on them\n"
 "                           (tests; hard bits only, as iridium-toolkit gets)\n"
@@ -580,12 +582,19 @@ void parse_options(int argc, char **argv) {
                 if (uw_reject_threshold > 1.0f) uw_reject_threshold = 1.0f;
                 break;
 
-            case OPT_REASSEMBLE:
-                if (!strcmp(optarg, "ida")) reassemble_mode = 1;
-                else if (!strcmp(optarg, "sbd")) reassemble_mode = 2;
-                else if (!strcmp(optarg, "acars")) reassemble_mode = 3;
-                else errx(1, "--reassemble: ida, sbd or acars (got '%s')", optarg);
+            case OPT_REASSEMBLE: {
+                /* MODE[,ARG...]: the reassembler.py -m MODE -a ARG,... */
+                char *spec = strdup(optarg), *save = NULL;
+                char *tok = strtok_r(spec, ",", &save);
+                reassemble_mode = tok ? (int)tkr_mode_from_name(tok) : 0;
+                if (!reassemble_mode)
+                    errx(1, "--reassemble: ida, sbd or acars[,json|showerrs|nopings|perfect] (got '%s')", optarg);
+                while ((tok = strtok_r(NULL, ",", &save)))
+                    if (tkr_set_arg(tok) != 0)
+                        errx(1, "--reassemble: unknown option '%s' (json, showerrs, nopings, perfect)", tok);
+                free(spec);
                 break;
+            }
 
             case OPT_REPLAY_RAW:
                 replay_raw_path = strdup(optarg);

@@ -181,7 +181,7 @@ the port prints/skips there, and the generator avoids them.
 - [x] IDA reassembly (`ida` mode) — the base for both.
 - [x] `sbd` mode.
 - [x] `acars` mode, plain text.
-- [ ] `acars` `-a json` (and `showerrs`, `nopings`, `perfect` options).
+- [x] `acars` options, as `--reassemble=acars,json,showerrs,...` (`-a json,showerrs,...`): `json`, `showerrs`, `nopings`, `perfect` (accepted; no effect in these modes). Seeds 6-8: all 6 option combinations identical (≈13,000 acars lines per seed), live set too. Fixed on the way: ACARS fields are written byte for byte (Python prints NULs in `REG:` etc.).
 - [ ] `libacars` mode (libacars-2, already linked optionally for sbd_acars.c).
 - [ ] Reconcile with `sbd_acars.c` (the web map / UDP / archive path) — compare its reassembly with this one on the corpus, then share one.
 

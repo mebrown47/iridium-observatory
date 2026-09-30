@@ -19,6 +19,10 @@ typedef enum { TKR_OFF = 0, TKR_IDA, TKR_SBD, TKR_ACARS } tkr_mode_t;
 /* "ida", "sbd" or "acars" -> mode; TKR_OFF if unknown */
 tkr_mode_t tkr_mode_from_name(const char *name);
 
+/* reassembler.py -a options: json, showerrs, nopings, perfect (accepted,
+ * no effect in these modes). Returns 0, or -1 for an unknown one. */
+int tkr_set_arg(const char *arg);
+
 /* Start a reassembler writing to out. Not thread-safe: one caller. */
 void tkr_init(tkr_mode_t mode, FILE *out);
 
