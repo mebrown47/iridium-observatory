@@ -90,12 +90,25 @@ changes map onto the C one to one):
 
 ## Phase 0 — groundwork
 
-- [ ] `LICENSES/BSD-2-Clause-iridium-toolkit.txt`; notice text above in a header used by the ported files.
-- [ ] `--replay-raw FILE` in the sniffer: parse `RAW:` lines back into a demodulated frame (id, time, frequency, confidence, level, symbol count, direction, bits) and run the output stage only.
-- [ ] Corpus: decode the Q6 recording to RAW once; capture a few hours of feeder RAW (the feeder's owner runs it); store under the Data drive with SHA256SUMS; expected outputs generated at toolkit 8888124.
-- [ ] `tests/parser_equiv.sh`: for each corpus file, diff native vs toolkit; print per-type counts of matching and differing lines.
+- [x] `LICENSES/BSD-2-Clause-iridium-toolkit.txt` (the notice goes into each ported file's header when the first one lands).
+- [x] `--replay-raw=FILE` in the sniffer: reads `RAW:` lines, rebuilds each demodulated frame (tag and time base, time, frequency, magnitude, noise, id, confidence, level, payload symbols, bits; direction from the access code; no soft values, as the toolkit has none) and runs only the output stage (`handle_demod_frame()`, shared with the live pipeline). Round trip RAW -> RAW is byte-identical on all 50,986 corpus lines; a live decode is unchanged by the refactor (167/167 frames identical to the previous build).
+- [x] Corpus on the Data drive, `webspy-captures/parser-corpus/` (README, SHA256SUMS; expected outputs at toolkit 8888124): raw10m 167, chan1626 17, fc10m 16,723 (the 10 MS/s @1622 MHz cf32 capture), q6 34,263 frames. 18 toolkit types present; VOD, VDA, IIR, IAQ, NXT, MSG, MS3 missing.
+- [ ] Feeder RAW, a few hours (the feeder's owner runs it) — for the missing types and for ACARS/SBD in phase 2.
+- [x] `tests/parser_equiv.sh [-b SNIFFER] [-p FLAGS] CORPUS_DIR`: per corpus file and toolkit frame type, lines matching / total, and the first differing pair.
 
-Done when the harness runs and reports "0 of N lines match" honestly for the current code.
+Baseline with today's `--parsed` (2026-09-29): **0 of 51,170 lines match** —
+everything but IDA is printed as the sniffer's own RAW format. What the
+differences already show for phase 1:
+
+- The toolkit reformats the common header: file tag `i-<t0>-t1` becomes
+  `p-<t0>-e000`, the time is widened (`000000258.7722`), and it prints
+  `conf% level|noise|magnitude symbols DIR` instead of `N:` / `I:`.
+- The existing IDA line differs only in the tag (`-e000` missing) and
+  trailing padding.
+- The toolkit's `RAW` lines are not a pass-through either: bits grouped by
+  16 and an `ERR:` reason — the fall-through has to be ported too.
+- RAW bits are symbol-reversed by the parser before decoding (see
+  `tests/README.md`, "Bit convention note").
 
 ## Phase 1 — parser, all frame types
 

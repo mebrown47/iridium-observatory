@@ -101,6 +101,7 @@ extern int diagnostic_mode;
 extern int use_gardner;
 extern float uw_reject_threshold;
 extern int parsed_mode;
+extern char *replay_raw_path;
 extern int position_enabled;
 extern double position_height;
 extern int acars_enabled;
@@ -209,6 +210,9 @@ static void usage(int exitcode) {
 "                           positives (default 0.70; 0 disables). Does not\n"
 "                           affect decoding, only the UW-fail count.\n"
 "    --parsed               output parsed IDA lines (pipe to reassembler.py)\n"
+"    --replay-raw=FILE      read RAW: lines (this program's output) instead of\n"
+"                           samples and run only the output stage on them\n"
+"                           (tests; hard bits only, as iridium-toolkit gets)\n"
 "    --acars               decode and display ACARS messages from IDA\n"
 "    --acars-json          output ACARS as JSON (compatible with acars.py)\n"
 "    --acars-udp=HOST:PORT stream ACARS JSON via UDP (repeatable, max 4)\n"
@@ -299,6 +303,7 @@ void parse_options(int argc, char **argv) {
         OPT_NO_GARDNER,
         OPT_UW_REJECT,
         OPT_PARSED,
+        OPT_REPLAY_RAW,
         OPT_POSITION,
         OPT_ACARS,
         OPT_ACARS_JSON,
@@ -353,6 +358,7 @@ void parse_options(int argc, char **argv) {
         { "no-gardner",     no_argument,       NULL, OPT_NO_GARDNER },
         { "uw-reject",      required_argument, NULL, OPT_UW_REJECT },
         { "parsed",         no_argument,       NULL, OPT_PARSED },
+        { "replay-raw",     required_argument, NULL, OPT_REPLAY_RAW },
         { "position",       optional_argument, NULL, OPT_POSITION },
         { "acars",          no_argument,       NULL, OPT_ACARS },
         { "acars-json",     no_argument,       NULL, OPT_ACARS_JSON },
@@ -564,6 +570,10 @@ void parse_options(int argc, char **argv) {
                 uw_reject_threshold = (float)atof(optarg);
                 if (uw_reject_threshold < 0.0f) uw_reject_threshold = 0.0f;
                 if (uw_reject_threshold > 1.0f) uw_reject_threshold = 1.0f;
+                break;
+
+            case OPT_REPLAY_RAW:
+                replay_raw_path = strdup(optarg);
                 break;
 
             case OPT_PARSED:
@@ -808,11 +818,14 @@ void parse_options(int argc, char **argv) {
     )
         live = 1;
 
-    if (!live && in_file == NULL && !zmq_sub_enabled && !vita49_enabled)
+    if (!live && in_file == NULL && !zmq_sub_enabled && !vita49_enabled && !replay_raw_path)
         usage(1);
 
     if (live && in_file != NULL)
         errx(1, "Cannot use both --live and --file");
+
+    if (replay_raw_path && (live || in_file != NULL || zmq_sub_enabled || vita49_enabled))
+        errx(1, "--replay-raw replaces the input: no --file, --live, --zmq-sub or VITA 49 with it");
 
     if (zmq_sub_enabled && (live || in_file != NULL))
         errx(1, "Cannot use --zmq-sub with --live or --file");

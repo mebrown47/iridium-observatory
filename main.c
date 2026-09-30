@@ -14,6 +14,7 @@
 
 #define _GNU_SOURCE
 #include <err.h>
+#include <inttypes.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -163,6 +164,8 @@ int use_gardner = 1;
  * while removing ~73% of false positives. 0 disables the filter. */
 float uw_reject_threshold = 0.70f;
 int parsed_mode = 0;
+char *replay_raw_path = NULL;   /* --replay-raw: RAW lines in, output stage only */
+static uint64_t replay_t0_ns = 0;
 int use_chase = 0;
 int position_enabled = 0;
 double position_height = 0;
@@ -536,6 +539,143 @@ typedef struct {
     ida_burst_t burst;
 } output_item_t;
 
+/* A demodulated frame: IDA decode, the stdout line, and the hand-off to the
+ * output thread (web map, positioning, ACARS, GSMTAP, archive). Takes
+ * ownership of demod, its bits and llr. Shared by the live pipeline and
+ * --replay-raw, so both run the same output stage. */
+static void handle_demod_frame(demod_frame_t *demod)
+{
+    atomic_fetch_add(&stat_n_ok_bursts, 1);
+    atomic_fetch_add(&stat_n_ok_sub, 1);
+
+    /* Try IDA decode if parsed output or GSMTAP is active */
+    int ida_ok = 0;
+    ida_burst_t burst;
+    if (parsed_mode || gsmtap_enabled || acars_enabled || web_enabled ||
+        archive_enabled)
+        ida_ok = ida_decode(demod, &burst);
+
+    /* Output: parsed IDA line if available, otherwise RAW */
+    if (parsed_mode && ida_ok)
+        frame_output_print_ida(&burst);
+    else
+        frame_output_print(demod);
+
+    /* Hand off to output thread for slow work (web map, ACARS, GSMTAP) */
+    if (web_enabled || position_enabled || gsmtap_enabled ||
+        acars_enabled || archive_enabled) {
+        output_item_t *item = malloc(sizeof(output_item_t));
+        if (item) {
+            item->demod = *demod;   /* shallow copy */
+            item->ida_ok = ida_ok;
+            item->burst = burst;
+            /* Transfer bits/llr ownership to output thread */
+            if (blocking_queue_add(&output_queue, item) == BQ_FULL) {
+                free(demod->bits);
+                free(demod->llr);
+                free(item);
+                atomic_fetch_add(&stat_n_output_drops, 1);
+            }
+        } else {
+            free(demod->bits);
+            free(demod->llr);
+        }
+    } else {
+        free(demod->bits);
+        free(demod->llr);
+    }
+    free(demod);
+}
+
+/* ---- --replay-raw: RAW lines in, the output stage only ---- */
+
+/* The toolkit's access codes (bitsparser.py): the first 24 bits of a frame
+ * say its direction. */
+static ir_direction_t raw_direction(const char *bits)
+{
+    static const char dl[] = "001100000011000011110011";
+    static const char ul[] = "110011000011110011111100";
+    int ddl = 0, dul = 0;
+    for (int i = 0; i < 24 && bits[i]; i++) {
+        ddl += bits[i] != dl[i];
+        dul += bits[i] != ul[i];
+    }
+    return ddl <= dul ? DIR_DOWNLINK : DIR_UPLINK;
+}
+
+/* Read RAW: lines (frame_output_print's format) and run each frame through
+ * handle_demod_frame, as if the demodulator had produced it: the file tag
+ * and times of the input are kept. A RAW line has no soft values, so llr is
+ * NULL (the IDA Chase rescue is skipped) - the same hard bits
+ * iridium-toolkit works from. Returns the number of frames, or -1. */
+static long replay_raw(const char *path)
+{
+    FILE *f = strcmp(path, "-") == 0 ? stdin : fopen(path, "r");
+    if (!f) {
+        warn("--replay-raw: %s", path);
+        return -1;
+    }
+    size_t cap = 0;
+    char *line = NULL;
+    long n = 0, bad = 0;
+    int origin_set = 0;
+    while (getline(&line, &cap, f) > 0) {
+        if (strncmp(line, "RAW: ", 5) != 0) continue;
+        char tag[64];
+        double ts_ms;
+        int freq, conf, syms, used = 0;
+        float mag, noise, level;
+        uint64_t id;
+        if (sscanf(line, "RAW: %63s %lf %d N:%f%f I:%" SCNu64 " %d%% %f %d %n",
+                   tag, &ts_ms, &freq, &mag, &noise, &id, &conf, &level, &syms,
+                   &used) < 9 || used == 0) {
+            bad++;
+            continue;
+        }
+        const char *bits = line + used;
+        int nb = 0;
+        while (bits[nb] == '0' || bits[nb] == '1') nb++;
+
+        if (!origin_set) {
+            /* the tag is "<letter>-<t0 in s>-<suffix>" */
+            const char *d = strchr(tag, '-');
+            uint64_t t0s = d ? strtoull(d + 1, NULL, 10) : 0;
+            frame_output_set_origin(tag, t0s * 1000000000ULL);
+            replay_t0_ns = t0s * 1000000000ULL;
+            origin_set = 1;
+        }
+
+        demod_frame_t *demod = calloc(1, sizeof(*demod));
+        uint8_t *b = malloc(nb > 0 ? nb : 1);
+        if (!demod || !b) errx(1, "--replay-raw: out of memory");
+        for (int i = 0; i < nb; i++) b[i] = (uint8_t)(bits[i] - '0');
+        demod->id = id;
+        demod->timestamp = replay_t0_ns + (uint64_t)llround(ts_ms * 1e6);
+        demod->center_frequency = freq;
+        demod->direction = raw_direction(bits);
+        demod->magnitude = mag;
+        demod->noise = noise;
+        demod->confidence = conf;
+        demod->level = level;
+        demod->n_payload_symbols = syms;
+        demod->n_symbols = syms + IR_UW_LENGTH;
+        demod->bits = b;
+        demod->llr = NULL;
+        demod->n_bits = nb;
+
+        /* the live path may drop when the output thread lags; a replay waits */
+        while (output_queue.queue_size >= OUTPUT_QUEUE_SIZE - 1)
+            usleep(1000);
+        handle_demod_frame(demod);
+        n++;
+    }
+    free(line);
+    if (f != stdin) fclose(f);
+    if (bad)
+        warnx("--replay-raw: %ld RAW lines could not be read", bad);
+    return n;
+}
+
 /* ---- Frame consumer: QPSK demod + IDA decode + stdout (fast path) ---- */
 
 static void *frame_consumer_thread(void *arg) {
@@ -550,46 +690,7 @@ static void *frame_consumer_thread(void *arg) {
         demod_frame_t *demod = NULL;
         int demod_rc = qpsk_demod(frame, &demod);
         if (demod_rc == QPSK_DEMOD_OK) {
-            atomic_fetch_add(&stat_n_ok_bursts, 1);
-            atomic_fetch_add(&stat_n_ok_sub, 1);
-
-            /* Try IDA decode if parsed output or GSMTAP is active */
-            int ida_ok = 0;
-            ida_burst_t burst;
-            if (parsed_mode || gsmtap_enabled || acars_enabled || web_enabled ||
-                archive_enabled)
-                ida_ok = ida_decode(demod, &burst);
-
-            /* Output: parsed IDA line if available, otherwise RAW */
-            if (parsed_mode && ida_ok)
-                frame_output_print_ida(&burst);
-            else
-                frame_output_print(demod);
-
-            /* Hand off to output thread for slow work (web map, ACARS, GSMTAP) */
-            if (web_enabled || position_enabled || gsmtap_enabled ||
-                acars_enabled || archive_enabled) {
-                output_item_t *item = malloc(sizeof(output_item_t));
-                if (item) {
-                    item->demod = *demod;   /* shallow copy */
-                    item->ida_ok = ida_ok;
-                    item->burst = burst;
-                    /* Transfer bits/llr ownership to output thread */
-                    if (blocking_queue_add(&output_queue, item) == BQ_FULL) {
-                        free(demod->bits);
-                        free(demod->llr);
-                        free(item);
-                        atomic_fetch_add(&stat_n_output_drops, 1);
-                    }
-                } else {
-                    free(demod->bits);
-                    free(demod->llr);
-                }
-            } else {
-                free(demod->bits);
-                free(demod->llr);
-            }
-            free(demod);
+            handle_demod_frame(demod);
         } else if (demod_rc == QPSK_DEMOD_REJECT) {
             /* Weak-sync burst: matched-filter score below uw_reject_threshold,
              * i.e. no unique word present. Almost certainly a burst-detector
@@ -931,6 +1032,61 @@ static void sig_handler(int signo) {
 
 /* ---- Main ---- */
 
+/* After the output thread has finished: the final position solve, and the
+ * shutdown of every output (shared by the live pipeline and --replay-raw). */
+static void shutdown_outputs(void)
+{
+    /* One last solve over every measurement received. The periodic solves run
+     * every 10 s of wall time and warm-start from the previous one, so when a
+     * file is decoded faster than real time their results depend on timing;
+     * this one starts fresh and depends only on the input. */
+    if (position_enabled) {
+        doppler_solution_t sol;
+        doppler_pos_reset_solution();
+        if (doppler_pos_solve(&sol))
+            fprintf(stderr, "POSITION FINAL: %.6f, %.6f (HDOP=%.1f, %d sats, %d meas)\n",
+                    sol.lat, sol.lon, sol.hdop, sol.n_satellites, sol.n_measurements);
+        else
+            fprintf(stderr, "POSITION FINAL: no solution (%d sats, %d meas)\n",
+                    sol.n_satellites, sol.n_measurements);
+    }
+
+    if (web_enabled)
+        web_map_shutdown();
+
+    if (archive_enabled)
+        archive_shutdown();
+
+    if (basestation_enabled) {
+        basestation_destroy();
+        aircraft_db_destroy();
+    }
+
+    waypoint_db_destroy();
+
+    if (gsmtap_enabled) {
+        fprintf(stderr, "iridium-sniffer: sent %lu GSMTAP packets\n",
+                atomic_load(&gsmtap_sent_count));
+        gsmtap_shutdown();
+    }
+
+    if (acars_enabled) {
+        acars_print_stats();
+        acars_shutdown();
+    }
+
+#ifdef HAVE_ZMQ
+    if (zmq_enabled)
+        frame_output_zmq_shutdown();
+#endif
+
+    if (in_file != NULL)
+        fclose(in_file);
+
+    fftw_save_wisdom();
+    free(file_info);
+}
+
 int main(int argc, char **argv) {
     pthread_t detector, spewer, stats;
 #ifdef HAVE_HACKRF
@@ -1111,6 +1267,21 @@ int main(int argc, char **argv) {
             if (center_freq <= 0)
                 errx(1, "VITA 49: no context received and no -c specified");
         }
+    }
+
+    if (replay_raw_path) {
+        /* No radio, detector or demodulator: RAW lines straight into the
+         * output stage, with the output thread for the slow consumers. */
+        pthread_t replay_output_worker;
+        pthread_create(&replay_output_worker, NULL, output_thread_fn, NULL);
+        long n = replay_raw(replay_raw_path);
+        while (output_queue.queue_size > 0)
+            usleep(10000);
+        blocking_queue_close(&output_queue);
+        pthread_join(replay_output_worker, NULL);
+        shutdown_outputs();
+        fprintf(stderr, "iridium-sniffer: replayed %ld frames\n", n);
+        return n < 0 ? 1 : 0;
     }
 
     /* Create burst detector and all downmix workers here in the main thread,
@@ -1327,55 +1498,7 @@ int main(int argc, char **argv) {
     pthread_join(output_worker, NULL);
     pthread_join(stats, NULL);
 
-    /* One last solve over every measurement received. The periodic solves run
-     * every 10 s of wall time and warm-start from the previous one, so when a
-     * file is decoded faster than real time their results depend on timing;
-     * this one starts fresh and depends only on the input. */
-    if (position_enabled) {
-        doppler_solution_t sol;
-        doppler_pos_reset_solution();
-        if (doppler_pos_solve(&sol))
-            fprintf(stderr, "POSITION FINAL: %.6f, %.6f (HDOP=%.1f, %d sats, %d meas)\n",
-                    sol.lat, sol.lon, sol.hdop, sol.n_satellites, sol.n_measurements);
-        else
-            fprintf(stderr, "POSITION FINAL: no solution (%d sats, %d meas)\n",
-                    sol.n_satellites, sol.n_measurements);
-    }
-
-    if (web_enabled)
-        web_map_shutdown();
-
-    if (archive_enabled)
-        archive_shutdown();
-
-    if (basestation_enabled) {
-        basestation_destroy();
-        aircraft_db_destroy();
-    }
-
-    waypoint_db_destroy();
-
-    if (gsmtap_enabled) {
-        fprintf(stderr, "iridium-sniffer: sent %lu GSMTAP packets\n",
-                atomic_load(&gsmtap_sent_count));
-        gsmtap_shutdown();
-    }
-
-    if (acars_enabled) {
-        acars_print_stats();
-        acars_shutdown();
-    }
-
-#ifdef HAVE_ZMQ
-    if (zmq_enabled)
-        frame_output_zmq_shutdown();
-#endif
-
-    if (in_file != NULL)
-        fclose(in_file);
-
-    fftw_save_wisdom();
-    free(file_info);
+    shutdown_outputs();
     fprintf(stderr, "iridium-sniffer: shutdown complete\n");
     return 0;
 }

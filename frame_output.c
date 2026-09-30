@@ -103,6 +103,15 @@ void frame_output_init(const char *fi)
     out_file_info = fi;
 }
 
+void frame_output_set_origin(const char *fi, uint64_t t0_ns)
+{
+    static char info[64];
+    snprintf(info, sizeof(info), "%s", fi);
+    out_file_info = info;
+    t0 = t0_ns;
+    initialized = 1;
+}
+
 #ifdef HAVE_ZMQ
 int frame_output_zmq_init(const char *endpoint)
 {

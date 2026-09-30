@@ -20,6 +20,11 @@
  * If NULL, auto-generates from first timestamp. */
 void frame_output_init(const char *file_info);
 
+/* Fix the origin of the RAW time column: file tag and t0 (ns), instead of
+ * taking them from the first frame. --replay-raw uses it so replayed lines
+ * keep the tag and times of the input. */
+void frame_output_set_origin(const char *file_info, uint64_t t0_ns);
+
 /* Print one demodulated frame in iridium-toolkit RAW format to stdout. */
 void frame_output_print(demod_frame_t *frame);
 

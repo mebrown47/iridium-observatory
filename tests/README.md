@@ -48,3 +48,16 @@ parser go in `tests/.build/` (git-ignored).
 the C demod output and the parser's post-reverse stream share one convention.
 The 24-bit access code and 32-bit messaging header are symbol-reverse-invariant
 (all `00`/`11` pairs), so `enc_msg.py` swaps only the payload pairs.
+
+## Parser equivalence (native parser plan)
+
+`parser_equiv.sh` compares the sniffer's parsed output with iridium-toolkit's,
+line for line, on a corpus of `RAW:` lines replayed with `--replay-raw`
+(no RF, GPU or timing involved):
+
+    tests/parser_equiv.sh -p "--parsed" /media/mike/data/webspy-captures/parser-corpus
+
+Each `NAME.raw` in the corpus directory needs `NAME.expected.txt`, the
+toolkit's `iridium-parser.py` output for it at the pinned commit (8888124).
+The report gives, per frame type, how many lines match and the first
+differing pair. See `docs/NATIVE_PARSER_PLAN.md`.
