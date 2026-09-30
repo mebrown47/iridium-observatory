@@ -143,7 +143,7 @@ Speed: 34,263 frames parse in 0.22 s (about 150,000 frames/s) against
 - [x] 5. `IDA` (LCW-ECC).
 - [x] 6. `ITL`, `IAQ`, `NXT`.
 - [ ] 7. Parser options beyond the defaults: `--harder`, `--uw-ec`, confidence filters, `--filter`. Not needed by the analyzer or the feeders; `--harder` / `--uw-ec` code paths are marked in bits_parser.c.
-- [ ] The Iridium analyzer on `--parsed=full` (Live and decode-on-Freeze, its decode_check / live_check / corpus_check unchanged).
+- [x] The Iridium analyzer on `--parsed=full` (iridium-analyzer 10be317, branch feat/native-parser): decode-on-Freeze via `--replay-raw --parsed=full`, Live via `--zmq-sub ... --parsed=full` with no Python process. corpus_check ALL PASSED native and Python, reports identical; live_check 167/167.
 - [ ] `frame_decode.c` / `ida_decode.c` re-based on bits_parser.c (one parser, not two) — separate change; they feed the web map, positioning and ACARS today and are not touched by this phase.
 
 Not handled (the toolkit fails there too, with an exception rather than a
