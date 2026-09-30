@@ -13,6 +13,7 @@
  */
 #include "bits_parser.h"
 #include "tk_rs.h"
+#include "itl_tables.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -22,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---------------------------------------------------------------- arena */
 
@@ -364,6 +366,7 @@ static int bch_repair1(arena_t *a, int poly, const char *bits, char **data, char
 
 typedef enum {
     C_MESSAGE, C_IRIDIUM, C_LCW, C_SY, C_LCW3, C_VO, C_IP,
+    C_STL, C_AQ, C_NXT, C_ECC, C_LCWECC, C_DA, C_BC, C_RA, C_MS, C_MSBODY, C_MSASCII, C_MSBCD,
 } cls_t;
 
 static const char *cls_name(cls_t c)
@@ -376,6 +379,18 @@ static const char *cls_name(cls_t c)
     case C_LCW3:    return "IridiumLCW3Message";
     case C_VO:      return "IridiumVOMessage";
     case C_IP:      return "IridiumIPMessage";
+    case C_STL:     return "IridiumSTLMessage";
+    case C_AQ:      return "IridiumAQMessage";
+    case C_NXT:     return "IridiumNXTMessage";
+    case C_ECC:     return "IridiumECCMessage";
+    case C_LCWECC:  return "IridiumLCWECCMessage";
+    case C_DA:      return "IridiumDAMessage";
+    case C_BC:      return "IridiumBCMessage";
+    case C_RA:      return "IridiumRAMessage";
+    case C_MS:      return "IridiumMSMessage";
+    case C_MSBODY:  return "IridiumMSMessageBody";
+    case C_MSASCII: return "IridiumMessagingAscii";
+    case C_MSBCD:   return "IridiumMessagingBCD";
     }
     return "?";
 }
@@ -441,6 +456,55 @@ typedef struct {
     unsigned ip_cksum;
     int flags, counter;
     int idata[64], nidata;
+
+    /* IridiumECCMessage / IridiumLCWECCMessage */
+    int poly;
+    const char *bitstream_bch;
+    int fill, ecc_cut;
+    const char *trailer;                      /* NULL = not set */
+    /* IridiumDAMessage */
+    int da_len, the_crc, crc_ok;
+    int da_ta[64], nda_ta;
+    /* IridiumBCMessage */
+    int bc_blocks0;                           /* the first block was parsed */
+    int sv_id, beam_id, slot, sv_blocking, acqu_subband, acqu_channels;
+    const char *unknown01, *acqu_classes, *unknown02;
+    int has_type, type;
+    const char *unknown11, *unknown21, *unknown31, *type_data;
+    int max_uplink_pwr;
+    char iri_time_str[48], tmsi_expiry_str[48];
+    struct { int type, empty, random_id, timeslot, ul_sb, dl_sb, access, dtoa, dfoa; const char *unknown4, *unknown; } asg[16];
+    int nasg;
+    /* IridiumRAMessage */
+    int ra_sat, ra_cell, ra_pos_x, ra_pos_y, ra_pos_z, ra_int, ra_ts, ra_eip, ra_bc_sb;
+    double ra_lat, ra_lon, ra_alt;
+    char *page_str[16];
+    int npaging;
+    const char *ra_extra;                     /* NULL = not set */
+    /* IridiumMSMessage and subclasses */
+    int block, frame, bch_blocks, group_is_a, group, secondary, msg_trailer;
+    const char *unknown1;
+    const char *ablocks[4]; int nablocks;
+    const char *bch_extra;
+    const char *msblocks[64]; int nmsblocks;
+    int msg_ric, msg_format, has_msg_seq, msg_seq;
+    const char *pkt_cs1, *msg_data;           /* msg_data NULL = not set */
+    int pkt_csum_ok, pkt_csum, msg_ctr, msg_ctr_max, msg_checksum;
+    const char *msg_msgdata, *msg_rest;
+    char *msg_ascii;
+    const char *msg_unknown2;
+    char *bcd;
+
+    /* IridiumSTLMessage */
+    int has_iq;                               /* "i" in __dict__ */
+    const char *itl_i[8]; int nitl_i;
+    const char *itl_q[8]; int nitl_q;
+    int itl_version, plane;
+    int msg_int[8]; const char *msg_str[8]; int nmsg;   /* ints, or a hex string */
+    const char *sat, *mt;
+
+    /* IridiumAQMessage */
+    char aq_sym[128]; int rid, ridcrc, aq_crcval;
 } msg_t;
 
 /* Message._new_error */
@@ -675,7 +739,13 @@ static void pretty_iridium(msg_t *m, sb_t *b)
     pretty_header_iridium(m, b);
     sb_printf(b, " %2s", m->msgtype);
     const char *d = descr_joined(m);
-    if (*d) {
+    if (strcmp(m->msgtype, "TL") == 0 && m->has_iq) {
+        sb_puts(b, " <");
+        for (int k = 0; k < m->nitl_i; k++) { if (k) sb_puts(b, " "); sb_puts(b, m->itl_i[k]); }
+        sb_puts(b, "> <");
+        for (int k = 0; k < m->nitl_q; k++) { if (k) sb_puts(b, " "); sb_puts(b, m->itl_q[k]); }
+        sb_puts(b, ">");
+    } else if (*d) {
         sb_puts(b, " [");
         size_t len = strlen(d);
         for (size_t x = 0; x < len; x += 8) {
@@ -1323,6 +1393,644 @@ static void pretty_vo(msg_t *m, sb_t *b)
     pretty_trailer_iridium(m, b);
 }
 
+
+/* ------------------------------------------------------------ ECC family */
+
+static const char *errs_ch(int e) { return e == 0 ? "0" : e == 1 ? "1" : e == 2 ? "2" : "-"; }
+
+static int count1(const char *s) { int n = 0; for (; *s; s++) n += *s == '1'; return n; }
+
+/* crcmod.predefined "crc-ccitt-false" */
+static unsigned crc_ccitt_false(const unsigned char *d, int n)
+{
+    unsigned crc = 0xffff;
+    for (int i = 0; i < n; i++) {
+        crc ^= (unsigned)d[i] << 8;
+        for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+    }
+    return crc;
+}
+
+/* util.fmt_iritime -> the string */
+static void fmt_iritime(unsigned long iritime, char *out, size_t n)
+{
+    double uxtime = (double)iritime * 90 / 1000 + 1739556857;
+    /* datetime.fromtimestamp: seconds, with microseconds rounded half-even */
+    double t = floor(uxtime), frac = uxtime - t;
+    double us = nearbyint(frac * 1e6);        /* default rounding mode: half-even */
+    if (us >= 1000000) t += 1;
+    time_t tt = (time_t)t;
+    struct tm tm;
+    gmtime_r(&tt, &tm);
+    char hund[16];
+    snprintf(hund, sizeof(hund), "%02.0f", fmod(uxtime, 1.0) * 100);
+    snprintf(out, n, "%04d-%02d-%02dT%02d:%02d:%02d.%sZ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, hund);
+}
+
+/* bitsparser.IridiumECCMessage.__init__; returns 1 with *pe for ParserError */
+static int ecc_init(msg_t *m, perr_t *pe)
+{
+    arena_t *a = m->a;
+    m->cls = C_ECC;
+    if (strcmp(m->msgtype, "MS") == 0) m->poly = messaging_bch_poly;
+    else m->poly = ringalert_bch_poly;        /* RA, BC */
+    m->bitstream_bch = "";
+    m->has_fixederrs = 1; m->fixederrs = 0;
+    m->fill = 0; m->ecc_cut = 0;
+    if (m->ndescr == 0) { pe->msg = "No data to ECC"; pe->cls = C_ECC; return 1; }
+    if (strcmp(m->msgtype, "MS") == 0 || strcmp(m->msgtype, "RA") == 0) {
+        while (m->ndescr >= 2) {
+            const char *first = m->descrambled[m->ndescr - 2], *second = m->descrambled[m->ndescr - 1];
+            if (strcmp(cat(a, first, second), "1010001001110011101111110110110101010100010001011100001011100110") == 0 ||
+                (bitdiff(first, "10100010011100111011111101101101") <= 2 &&
+                 bitdiff(second, "01010100010001011100001011100110") <= 2)) {
+                m->fill++;
+                m->ndescr -= 2;
+            } else break;
+        }
+        if (m->fill > 0) m->descramble_extra = "";
+    }
+    sb_t bch = { 0 };
+    for (int i = 0; i < m->ndescr; i++) {
+        const char *blk = m->descrambled[i];
+        const char *parity = sub(a, blk, 31, strlen(blk));
+        char *data, *bb;
+        int errs = bch_repair(a, m->poly, sub(a, blk, 0, 31), &data, &bb);
+        if (errs < 0) { m->ecc_cut = 1; m->fill = 0; m->descramble_extra = ""; break; }
+        if ((count1(data) + count1(bb) + count1(parity)) % 2 == 1) {
+            if (errs > 0) {
+                new_error(m, "Parity error", NULL);
+                m->ecc_cut = 1; m->fill = 0; m->descramble_extra = "";
+                break;
+            }
+        }
+        if (errs > 0) m->fixederrs++;
+        sb_puts(&bch, data);
+    }
+    m->bitstream_bch = ar_strdup(a, bch.s ? bch.s : "");
+    free(bch.s);
+    if (!*m->bitstream_bch) new_error(m, "BCH decode failed", NULL);
+    return 0;
+}
+
+/* bitsparser.IridiumECCMessage.pretty (IME) */
+static void pretty_ecc(msg_t *m, sb_t *b)
+{
+    arena_t *a = m->a;
+    sb_puts(b, "IME: ");
+    pretty_header_iridium(m, b);
+    sb_printf(b, " %s ", m->msgtype);
+    for (int i = 0; i < m->ndescr; i++) {
+        const char *bk = m->descrambled[i];
+        const char *b31 = sub(a, bk, 0, 31);
+        char *foo;
+        int errs = nrepair(a, m->poly, b31, &foo);
+        uint64_t res = ndivide((uint64_t)m->poly, b31);
+        const char *p31 = sub(a, bk, 31, 32);
+        int parity = (count1(foo) + count1(p31)) % 2;
+        sb_printf(b, "{%s %s %s/%04d E%s P%d}", sub(a, bk, 0, 21), sub(a, bk, 21, 31), p31, (int)res, errs_ch(errs), parity);
+    }
+    if (m->fill > 0) sb_printf(b, " FILL=%02d", m->fill);
+    pretty_trailer_iridium(m, b);
+}
+
+/* bitsparser.IridiumLCWECCMessage.__init__ */
+static void lcwecc_init(msg_t *m)
+{
+    arena_t *a = m->a;
+    m->cls = C_LCWECC;
+    m->poly = acch_bch_poly;
+    m->has_fixederrs = 1; m->fixederrs = 0;
+    sb_t bch = { 0 };
+    for (int i = 0; i < m->ndescr; i++) {
+        char *data, *bb;
+        int errs = bch_repair(a, m->poly, m->descrambled[i], &data, &bb);
+        if (errs < 0) { m->descramble_extra = ""; break; }
+        if (errs > 0) m->fixederrs++;
+        sb_puts(&bch, data);
+    }
+    m->bitstream_bch = ar_strdup(a, bch.s ? bch.s : "");
+    free(bch.s);
+    if (!*m->bitstream_bch) new_error(m, "BCH decode failed", NULL);
+}
+
+/* bitsparser.IridiumLCWECCMessage.pretty (IME for DA) */
+static void pretty_lcwecc(msg_t *m, sb_t *b)
+{
+    arena_t *a = m->a;
+    sb_puts(b, "IME: ");
+    pretty_header_iridium(m, b);
+    sb_printf(b, " %s ", m->msgtype);
+    for (int i = 0; i < m->ndescr; i++) {
+        const char *bk = m->descrambled[i];
+        char *foo;
+        int errs = nrepair(a, m->poly, bk, &foo);
+        uint64_t res = ndivide((uint64_t)m->poly, bk);
+        int parity = count1(foo) % 2;
+        sb_printf(b, "{%s %s/%04d E%s P%d}", sub(a, bk, 0, 21), sub(a, bk, 21, 31), (int)res, errs_ch(errs), parity);
+    }
+    pretty_trailer_iridium(m, b);
+}
+
+/* ints of slice(bits, 8) (a short last piece counts too) */
+static int bytes_list(const char *d, int *out, int max) { return bytes_of(d, out, NULL, max); }
+
+/* bitsparser.IridiumDAMessage.__init__; returns 1 with *pe for ParserError */
+static int da_init(msg_t *m, perr_t *pe)
+{
+    arena_t *a = m->a;
+    m->cls = C_DA;
+    const char *bs = m->bitstream_bch;
+    size_t n = strlen(bs);
+    m->da_len = bin_int(bs, 11, 16);
+    if (bin_int(bs, 17, 20) != 0) new_error(m, "zero1 not 0", NULL);
+    if (n < 9 * 20 + 16) { pe->msg = "Not enough data in data packet"; pe->cls = C_DA; return 1; }
+    if (m->da_len > 0) {
+        m->nda_ta = bytes_list(sub(a, bs, 20, 9 * 20), m->da_ta, 64);
+        const char *crcstream = cat(a, cat(a, sub(a, bs, 0, 20), "000000000000"), sub(a, bs, 20, n >= 4 ? n - 4 : 0));
+        int by[64];
+        int nb = bytes_list(crcstream, by, 64);
+        unsigned char ub[64];
+        for (int i = 0; i < nb; i++) ub[i] = (unsigned char)by[i];
+        m->the_crc = (int)crc_ccitt_false(ub, nb);
+        m->crc_ok = m->the_crc == 0;
+    } else {
+        m->crc_ok = 0;
+        m->nda_ta = bytes_list(sub(a, bs, 20, 11 * 20), m->da_ta, 64);
+    }
+    if (bin_int(bs, 9 * 20 + 16, n) != 0) new_error(m, "zero2 not 0", NULL);
+    return 0;
+}
+
+/* bitsparser.IridiumDAMessage.pretty */
+static void pretty_da(msg_t *m, sb_t *b)
+{
+    arena_t *a = m->a;
+    const char *bs = m->bitstream_bch;
+    size_t n = strlen(bs);
+    sb_puts(b, "IDA: ");
+    pretty_header_iridium(m, b);
+    sb_printf(b, " %s cont=%s %s ctr=%s %s len=%02d 0:%s [", sub(a, bs, 0, 3), sub(a, bs, 3, 4), sub(a, bs, 4, 5),
+              sub(a, bs, 5, 8), sub(a, bs, 8, 11), m->da_len, sub(a, bs, 16, 20));
+    sb_t ms = { 0 };
+    if (m->da_len > 0) {
+        int allz = 1;
+        for (int i = m->da_len + 1; i < m->nda_ta; i++) if (m->da_ta[i]) allz = 0;
+        if (allz) put_hex(&ms, m->da_ta, m->da_len < m->nda_ta ? m->da_len : m->nda_ta, ".");
+        else {
+            put_hex(&ms, m->da_ta, m->nda_ta, ".");
+            if (m->da_len > 0 && m->da_len < 20) {
+                const char *s0 = ms.s ? ms.s : "";
+                size_t L = strlen(s0), cut = (size_t)(3 * m->da_len - 1), from = (size_t)(3 * m->da_len);
+                sb_t t = { 0 };
+                sb_puts(&t, sub(a, s0, 0, cut < L ? cut : L));
+                sb_puts(&t, "!");
+                sb_puts(&t, sub(a, s0, from < L ? from : L, L));
+                free(ms.s);
+                ms = t;
+            }
+        }
+    } else put_hex(&ms, m->da_ta, m->nda_ta, ".");
+    sb_puts(&ms, "]");
+    sb_printf(b, "%-60s", ms.s);
+    free(ms.s);
+    if (m->da_len > 0) {
+        sb_printf(b, " %04x/%04x", bin_int(bs, 9 * 20, 9 * 20 + 16), m->the_crc);
+        sb_puts(b, m->crc_ok ? " CRC:OK" : " CRC:no");
+        sb_printf(b, " %s", sub(a, bs, 9 * 20 + 16, n));
+        sb_puts(b, " SBD: ");
+        int sbd[64];
+        int k = bytes_list(sub(a, bs, 20, 9 * 20), sbd, 64);
+        put_ascii_dot(b, sbd, k);
+    } else {
+        sb_puts(b, "  ---   ");
+        sb_printf(b, " %s", sub(a, bs, 9 * 20 + 16, n));
+    }
+    pretty_trailer_iridium(m, b);
+}
+
+/* bitsparser.IridiumBCMessage.__init__ */
+static void bc_init(msg_t *m)
+{
+    arena_t *a = m->a;
+    m->cls = C_BC;
+    char **blocks, *extra;
+    int nb = slice_extra(a, m->bitstream_bch, 42, &blocks, &extra);
+    if (nb > 4) { nb = 4; m->trailer = "{LONG}"; }
+    else if (nb < 4) m->trailer = "{SHORT}";
+    m->descramble_extra = "";
+    int k = 0;
+    if (k < nb && m->bc_type == 0) {
+        const char *d = blocks[k++];
+        m->bc_blocks0 = 1;
+        m->sv_id = bin_int(d, 0, 7); m->beam_id = bin_int(d, 7, 13);
+        m->unknown01 = sub(a, d, 13, 14);
+        m->slot = bin_int(d, 14, 15); m->sv_blocking = bin_int(d, 15, 16);
+        m->acqu_classes = sub(a, d, 16, 32);
+        m->acqu_subband = bin_int(d, 32, 37); m->acqu_channels = bin_int(d, 37, 40);
+        m->unknown02 = sub(a, d, 40, 42);
+    }
+    if (k < nb && m->bc_type == 0) {
+        const char *d = blocks[k++];
+        m->has_type = 1;
+        m->type = bin_int(d, 0, 6);
+        if (m->type == 0) { m->unknown11 = sub(a, d, 6, 36); m->max_uplink_pwr = bin_int(d, 36, 42); }
+        else if (m->type == 1) { m->unknown21 = sub(a, d, 6, 10); fmt_iritime(bits_to_int(sub(a, d, 10, 42)), m->iri_time_str, sizeof(m->iri_time_str)); }
+        else if (m->type == 2) { m->unknown31 = sub(a, d, 6, 10); fmt_iritime(bits_to_int(sub(a, d, 10, 42)), m->tmsi_expiry_str, sizeof(m->tmsi_expiry_str)); }
+        else m->type_data = d;
+    }
+    m->nasg = 0;
+    for (; k < nb && m->nasg < 16; k++) {
+        const char *d = blocks[k];
+        typeof(m->asg[0]) *as = &m->asg[m->nasg++];
+        memset(as, 0, sizeof(*as));
+        as->type = bin_int(d, 0, 3);
+        if (as->type == 0) {
+            as->random_id = bin_int(d, 3, 11); as->timeslot = 1 + bin_int(d, 11, 13);
+            as->ul_sb = bin_int(d, 13, 18); as->dl_sb = bin_int(d, 18, 23);
+            as->access = 1 + bin_int(d, 23, 26); as->dtoa = bin_int(d, 26, 34);
+            as->dfoa = bin_int(d, 34, 40); as->unknown4 = sub(a, d, 40, 42);
+            if (as->dtoa > 128) as->dtoa -= 256;
+        } else if (strcmp(d, "111000000000000000000000000000000000000000") == 0) as->empty = 1;
+        else as->unknown = sub(a, d, 3, 42);
+    }
+}
+
+/* bitsparser.IridiumBCMessage.pretty */
+static void pretty_bc(msg_t *m, sb_t *b)
+{
+    sb_t s = { 0 };
+    sb_puts(&s, "IBC: ");
+    pretty_header_iridium(m, &s);
+    sb_printf(&s, " bc:%d", m->bc_type);
+    if (m->bc_type == 0) {
+        sb_printf(&s, " sat:%03d cell:%02d %s slot:%d sv_blkn:%d aq_cl:%s aq_sb:%02d aq_ch:%d %s", m->sv_id, m->beam_id,
+                  m->unknown01, m->slot, m->sv_blocking, m->acqu_classes, m->acqu_subband, m->acqu_channels, m->unknown02);
+        if (m->has_type) {
+            if (m->type == 0) sb_printf(&s, " %s max_uplink_pwr:%02d", m->unknown11, m->max_uplink_pwr);
+            else if (m->type == 1) sb_printf(&s, " %s time:%s", m->unknown21, m->iri_time_str);
+            else if (m->type == 2) sb_printf(&s, " %s tmsi_expiry:%s", m->unknown31, m->tmsi_expiry_str);
+            else if (m->type == 4) {
+                sb_printf(&s, " st:%02d ", m->type);
+                sb_puts(&s, strcmp(m->type_data, "000100000000100001110000110000110011110000") == 0 ? "DFLT" : m->type_data);
+            } else { sb_printf(&s, " st:%02d ", m->type); sb_puts(&s, m->type_data); }
+        }
+    }
+    sb_printf(b, "%-214s", s.s);
+    free(s.s);
+    for (int i = 0; i < m->nasg; i++) {
+        typeof(m->asg[0]) *as = &m->asg[i];
+        if (as->empty) sb_puts(b, " []");
+        else if (as->type == 0)
+            sb_printf(b, " [%d Rid:%03d ts:%d ul_sb:%02d dl_sb:%02d access:%d dtoa:%+04d dfoa:%02d %s]", as->type, as->random_id,
+                      as->timeslot, as->ul_sb, as->dl_sb, as->access, as->dtoa, as->dfoa, as->unknown4);
+        else sb_printf(b, " [%d %s]                     ", as->type, as->unknown);
+    }
+    if (m->trailer) { sb_puts(b, " "); sb_puts(b, m->trailer); }
+    pretty_trailer_iridium(m, b);
+}
+
+/* bitsparser.IridiumRAMessage.__init__; returns 1 with *pe for ParserError */
+static int ra_init(msg_t *m, perr_t *pe)
+{
+    arena_t *a = m->a;
+    m->cls = C_RA;
+    const char *bs = m->bitstream_bch;
+    if (strlen(bs) < 63) { pe->msg = "RA content too short"; pe->cls = C_RA; return 1; }
+    m->ra_sat = bin_int(bs, 0, 7);
+    m->ra_cell = bin_int(bs, 7, 13);
+    m->ra_pos_x = bin_int(bs, 14, 25) - bin_int(bs, 13, 14) * (1 << 11);
+    m->ra_pos_y = bin_int(bs, 26, 37) - bin_int(bs, 25, 26) * (1 << 11);
+    m->ra_pos_z = bin_int(bs, 38, 49) - bin_int(bs, 37, 38) * (1 << 11);
+    m->ra_int = bin_int(bs, 49, 56);
+    m->ra_ts = bin_int(bs, 56, 57);
+    m->ra_eip = bin_int(bs, 57, 58);
+    m->ra_bc_sb = bin_int(bs, 58, 63);
+    double x = m->ra_pos_x, y = m->ra_pos_y, z = m->ra_pos_z;
+    m->ra_lat = atan2(z, sqrt(x * x + y * y)) * 180 / M_PI;
+    m->ra_lon = atan2(y, x) * 180 / M_PI;
+    m->ra_alt = sqrt(x * x + y * y + z * z) * 4;
+    const char *ra_msg = sub(a, bs, 63, strlen(bs));
+    size_t rl = strlen(ra_msg);
+    m->npaging = 0;
+    int page_cnt = (int)(rl / 42);
+    if (page_cnt == 0) { m->trailer = "{TRUNCATED}"; return 0; }
+    if (rl % 42 > 0) page_cnt++;
+    char **blocks, *extra;
+    int nb = slice_extra(a, ra_msg, 42, &blocks, &extra);
+    int ended = 0;
+    for (int i = 0; i < nb && m->npaging < 16; i++) {
+        const char *pg = blocks[i];
+        unsigned long tmsi = (unsigned long)bits_to_int(sub(a, pg, 0, 32));
+        int zero1 = bin_int(pg, 32, 34), msc_id = bin_int(pg, 34, 39), zero2 = bin_int(pg, 39, 42);
+        char str[96];
+        int k = snprintf(str, sizeof(str), "tmsi:%08lx", tmsi);
+        if (zero1) k += snprintf(str + k, sizeof(str) - (size_t)k, " 0:%d", zero1);
+        k += snprintf(str + k, sizeof(str) - (size_t)k, " msc_id:%02d", msc_id);
+        if (zero2) snprintf(str + k, sizeof(str) - (size_t)k, " 0:%d", zero2);
+        int all1 = strlen(pg) == 42;
+        for (const char *c = pg; *c; c++) if (*c != '1') all1 = 0;
+        m->page_str[m->npaging++] = ar_strdup(a, all1 ? "END" : str);
+        if (all1) { ended = 1; break; }
+    }
+    if (m->npaging > 0 && ended) {
+        if (m->npaging < page_cnt) {
+            const char *ex = sub(a, ra_msg, (size_t)(42 * m->npaging), rl);
+            if (startswith(ex, "101000100111001110111")) m->trailer = "{OK:UNCLEAN}";
+            else { m->ra_extra = ex; m->trailer = "{EXTRA_BITS}"; }
+        } else {
+            if (m->descramble_extra && startswith(m->descramble_extra, "011010110")) m->descramble_extra = "";
+            m->trailer = "{OK}";
+        }
+        m->npaging--;
+    } else if (m->npaging < 12) m->trailer = "{TRUNCATED}";
+    else m->trailer = "{OK}";
+    return 0;
+}
+
+/* bitsparser.IridiumRAMessage.pretty */
+static void pretty_ra(msg_t *m, sb_t *b)
+{
+    sb_puts(b, "IRA: ");
+    pretty_header_iridium(m, b);
+    sb_printf(b, " sat:%03d beam:%02d xyz=(%+05d,%+05d,%+05d) pos=(%+06.2f/%+07.2f) alt=%03ld RAI:%02d ?%d%d bc_sb:%02d",
+              m->ra_sat, m->ra_cell, m->ra_pos_x, m->ra_pos_y, m->ra_pos_z, m->ra_lat, m->ra_lon,
+              (long)(m->ra_alt - 6378 + 23), m->ra_int, m->ra_ts, m->ra_eip, m->ra_bc_sb);
+    sb_printf(b, " P%02d:", m->npaging);
+    for (int i = 0; i < m->npaging; i++) sb_printf(b, " PAGE(%s)", m->page_str[i]);
+    if (m->trailer) { sb_puts(b, " "); sb_puts(b, m->trailer); }
+    if (m->fill > 0) sb_printf(b, " FILL=%d", m->fill);
+    if (m->ra_extra) { sb_puts(b, " +"); put_sliced(b, m->ra_extra, 42); }
+    pretty_trailer_iridium(m, b);
+}
+
+/* bitsparser.IridiumMSMessage.__init__; returns 1 with *pe for ParserError */
+static int ms_init(msg_t *m, perr_t *pe)
+{
+    arena_t *a = m->a;
+    m->cls = C_MS;
+    const char *bs = m->bitstream_bch;
+    size_t n = strlen(bs);
+    const char *blocks[64];
+    int nb = 0;
+    for (size_t x = 0; x < n && nb < 64; x += 21) blocks[nb++] = sub(a, bs, x, x + 21);
+    const char *b0 = blocks[0];
+    int ms_type = bin_int(b0, 0, 1);
+    const char *zero1 = sub(a, b0, 1, 5);
+    m->block = bin_int(b0, 5, 9);
+    m->frame = bin_int(b0, 9, 15);
+    m->bch_blocks = bin_int(b0, 15, 19);
+    if (ms_type == 1) {
+        m->group_is_a = 1;
+        m->unknown1 = sub(a, b0, 19, 20);
+        m->secondary = bin_int(b0, 20, 21);
+    } else m->group = bin_int(b0, 19, 21);
+    if (strcmp(zero1, "0000") != 0) new_error(m, "zero1 not 0000", NULL);
+    if (m->bch_blocks < 2) { pe->msg = "length field in header too small"; pe->cls = C_MS; return 1; }
+    m->bch_extra = "";
+    if (m->bch_blocks * 2 > nb) {
+        new_error(m, "Not enough data received", NULL);
+        char t[64];
+        snprintf(t, sizeof(t), "Need %d, got %d", m->bch_blocks * 2, nb);
+        new_error(m, ar_strdup(a, t), NULL);
+    } else if (m->bch_blocks * 2 < nb) {
+        m->trailer = "{EXTRA}";
+        m->bch_extra = sub(a, bs, (size_t)(m->bch_blocks * 42), n);
+        nb = 2 * m->bch_blocks;
+    }
+    /* blocks.pop(0) */
+    int k = 1;
+    if (m->group_is_a) {
+        if (nb - k < 2) { pe->msg = "not enough data in acquisition group message"; pe->cls = C_MS; return 1; }
+        m->nablocks = nb - k >= 4 ? 4 : 2;
+        for (int i = 0; i < m->nablocks; i++) m->ablocks[i] = blocks[k++];
+    }
+    m->msg_trailer = 0;
+    const char *all1 = "111111111111111111111";
+    if (nb > k && blocks[nb - 1][0] == '1') {
+        const char *t = blocks[--nb];
+        if (strcmp(t, all1) != 0) new_error(m, "trailer exists, but not all-1", NULL);
+        m->msg_trailer++;
+        if (nb > k && blocks[nb - 1][0] == '1') {
+            t = blocks[--nb];
+            if (strcmp(t, all1) != 0) new_error(m, "second trailer exists, but not all-1", NULL);
+            m->msg_trailer++;
+        }
+    }
+    m->nmsblocks = 0;
+    for (int i = k; i < nb; i++) m->msblocks[m->nmsblocks++] = blocks[i];
+    return 0;
+}
+
+/* bitsparser.IridiumMSMessage._pretty_header */
+static void pretty_header_ms(msg_t *m, sb_t *b)
+{
+    pretty_header_iridium(m, b);
+    if (m->group_is_a) sb_printf(b, " %1d:A:%02d", m->block, m->frame);
+    else sb_printf(b, " %1d:%d:%02d", m->block, m->group, m->frame);
+    sb_printf(b, " len:%02d/T%d/F%02d", m->bch_blocks, m->msg_trailer, m->fill);
+    if (m->group_is_a) {
+        sb_t j = { 0 };
+        for (int i = 0; i < m->nablocks; i++) { if (i) sb_puts(&j, " "); sb_puts(&j, m->ablocks[i]); }
+        sb_printf(b, " %s %d %-87s", m->unknown1, m->secondary, j.s ? j.s : "");
+        free(j.s);
+    } else sb_printf(b, " %s %s %-87s", " ", " ", " ");
+}
+
+static void pretty_trailer_ms(msg_t *m, sb_t *b)
+{
+    pretty_trailer_iridium(m, b);
+    if (m->bch_extra && *m->bch_extra) { sb_puts(b, " bch_extra:"); sb_puts(b, m->bch_extra); }
+}
+
+static void pretty_ms(msg_t *m, sb_t *b)
+{
+    sb_puts(b, "IMS: ");
+    pretty_header_ms(m, b);
+    pretty_trailer_ms(m, b);
+}
+
+/* bitsparser.IridiumMSMessageBody.__init__; returns 1 with *pe for ParserError */
+static int msbody_init(msg_t *m, perr_t *pe)
+{
+    arena_t *a = m->a;
+    m->cls = C_MSBODY;
+    sb_t r = { 0 };
+    for (int i = 0; i < m->nmsblocks; i++) sb_puts(&r, m->msblocks[i] + (m->msblocks[i][0] ? 1 : 0));
+    const char *rest = ar_strdup(a, r.s ? r.s : "");
+    free(r.s);
+    size_t n = strlen(rest);
+    if (n <= 27) { pe->msg = "message too short(body)"; pe->cls = C_MSBODY; return 1; }
+    int ric = 0;
+    for (int i = 21; i >= 0; i--) ric = (ric << 1) | (rest[i] == '1');     /* int(rest[0:22][::-1], 2) */
+    m->msg_ric = ric;
+    m->msg_format = bin_int(rest, 22, 27);
+    rest = rest + 27; n -= 27;
+    if (n <= 16) { new_error(m, "incomplete MSG body", NULL); return 0; }
+    m->has_msg_seq = 1;
+    m->msg_seq = bin_int(rest, 0, 6);
+    if (bin_int(rest, 6, 10) != 0) new_error(m, "zero1 is not all-zero", NULL);
+    m->pkt_cs1 = sub(a, rest, 10, 16);
+    m->msg_data = sub(a, rest, 16, n);
+    return 0;
+}
+
+static void pretty_header_msbody(msg_t *m, sb_t *b)
+{
+    pretty_header_ms(m, b);
+    sb_printf(b, " ric:%07d fmt:%02d", m->msg_ric, m->msg_format);
+    if (m->has_msg_seq) sb_printf(b, " seq:%02d", m->msg_seq);
+}
+
+static void pretty_msbody(msg_t *m, sb_t *b)
+{
+    sb_puts(b, "MSG: ");
+    pretty_header_msbody(m, b);
+    if (m->msg_data) { sb_puts(b, " "); put_group(b, m->msg_data, 20); }
+    pretty_trailer_ms(m, b);
+}
+
+/* bitsparser.msg_checksum(blocks) */
+static void msg_checksum(msg_t *m, const char **blocks, int n, int *ok, int *val)
+{
+    arena_t *a = m->a;
+    const char *c0 = blocks[0], *c1 = n > 1 ? blocks[1] : "";
+    size_t l0 = strlen(c0);
+    const char *s = cat(a, sub(a, c0, l0 >= 3 ? l0 - 3 : 0, l0), sub(a, c1, 1, 8));
+    int v = 0;
+    for (size_t i = strlen(s); i-- > 0;) v = (v << 1) | (s[i] == '1');
+    long csum = 0;
+    for (int idx = 0; idx < n; idx++) {
+        const char *c = blocks[idx];
+        if (idx != 1) csum += bin_int(c, 0, 8);
+        csum += bin_int(c, 8, 16);
+        if (idx != 0) csum += bin_int(c, 16, strlen(c));
+    }
+    *ok = (v + csum) % 1024 == 1023;
+    *val = v;
+}
+
+/* bitsparser.IridiumMessagingAscii.__init__; returns 1 with *pe for ParserError */
+static int msascii_init(msg_t *m, perr_t *pe)
+{
+    arena_t *a = m->a;
+    m->cls = C_MSASCII;
+    const char *rest = m->msg_data;
+    if (m->nmsblocks >= 2) msg_checksum(m, m->msblocks + 1, m->nmsblocks - 1, &m->pkt_csum_ok, &m->pkt_csum);
+    const char *len_bit = sub(a, rest, 4, 5);
+    rest = sub(a, rest, 5, strlen(rest));
+    if (strcmp(len_bit, "1") == 0) {
+        int lfl = bin_int(rest, 0, 4);
+        if (lfl == 0) { pe->msg = "len_field_len unexpectedly 0"; pe->cls = C_MSASCII; return 1; }
+        m->msg_ctr = bin_int(rest, 4, (size_t)(4 + lfl));
+        if (strlen(sub(a, rest, (size_t)(4 + lfl), (size_t)(4 + lfl * 2))) == 0) { pe->msg = "message too short(lfl)"; pe->cls = C_MSASCII; return 1; }
+        m->msg_ctr_max = bin_int(rest, (size_t)(4 + lfl), (size_t)(4 + lfl * 2));
+        rest = sub(a, rest, (size_t)(4 + lfl * 2), strlen(rest));
+        if (lfl < 1 || lfl > 2) new_error(m, "len_field_len not 1 or 2", NULL);
+    } else { m->msg_ctr = 0; m->msg_ctr_max = 0; }
+    if (strlen(rest) < 8) { pe->msg = "message too short(ascii)"; pe->cls = C_MSASCII; return 1; }
+    if (rest[0] != '0') new_error(m, "zero2 is not zero", NULL);
+    m->msg_checksum = bin_int(rest, 1, 8);
+    m->msg_msgdata = sub(a, rest, 8, strlen(rest));
+    char **chars, *mrest;
+    int nc = slice_extra(a, m->msg_msgdata, 7, &chars, &mrest);
+    m->msg_rest = mrest;
+    sb_t asc = { 0 };
+    int end = 0;
+    for (int i = 0; i < nc; i++) {
+        int c = (int)bits_to_int(chars[i]);
+        if (c == 3) end = 1;
+        else if (end == 1) new_error(m, "ETX inside ascii", NULL);
+        if (c < 32 || c == 127) sb_printf(&asc, "[%d]", c);
+        else { char t[2] = { (char)c, 0 }; sb_puts(&asc, t); }
+    }
+    m->msg_ascii = ar_strdup(a, asc.s ? asc.s : "");
+    free(asc.s);
+    return 0;
+}
+
+static void pretty_msascii(msg_t *m, sb_t *b)
+{
+    arena_t *a = m->a;
+    sb_puts(b, "MSG: ");
+    pretty_header_msbody(m, b);
+    sb_printf(b, " %s/%04d", m->pkt_csum_ok ? "C:OK" : "C:no", m->pkt_csum);
+    sb_printf(b, " %1d/%1d", m->msg_ctr, m->msg_ctr_max);
+    char **full, *rest;
+    int nf = slice_extra(a, m->msg_msgdata, 8, &full, &rest);
+    sb_printf(b, " csum:%02x msg:", m->msg_checksum);
+    for (int i = 0; i < nf; i++) sb_printf(b, "%02x", (int)bits_to_int(full[i]));
+    sb_printf(b, ".%s", rest);
+    sb_printf(b, " TXT: %-65s +%-6s", m->msg_ascii, m->msg_rest);
+    pretty_trailer_ms(m, b);
+}
+
+/* bitsparser.IridiumMessagingBCD.__init__ */
+static void msbcd_init(msg_t *m)
+{
+    arena_t *a = m->a;
+    m->cls = C_MSBCD;
+    m->msg_unknown2 = sub(a, m->msg_data, 0, 1);
+    m->msg_msgdata = sub(a, m->msg_data, 1, strlen(m->msg_data));
+    size_t n = strlen(m->msg_msgdata);
+    char *bcd = ar_alloc(a, n / 4 + 2);
+    size_t k = 0;
+    for (size_t x = 0; x < n; x += 4) { char t[4]; snprintf(t, sizeof(t), "%01x", bin_int(m->msg_msgdata, x, x + 4)); bcd[k++] = t[0]; }
+    bcd[k] = 0;
+    m->bcd = bcd;
+}
+
+static void pretty_msbcd(msg_t *m, sb_t *b)
+{
+    sb_puts(b, "MS3: ");
+    pretty_header_msbody(m, b);
+    sb_printf(b, " %6s %s", m->pkt_cs1, m->msg_unknown2);
+    sb_printf(b, " BCD: %-65s", m->bcd);
+    pretty_trailer_ms(m, b);
+}
+
+/* IridiumMSMessage.upgrade -> Body -> Ascii / BCD */
+static void ms_upgrade(msg_t *m)
+{
+    if (m->nmsblocks <= 0) return;
+    perr_t pe;
+    if (msbody_init(m, &pe)) { m->cls = C_MS; new_error(m, pe.msg, cls_name(pe.cls)); return; }
+    /* IridiumMSMessageBody.upgrade */
+    if (m->msg_data && strlen(m->msg_data) >= 5) {
+        if (m->msg_format == 5) {
+            if (msascii_init(m, &pe)) { m->cls = C_MSBODY; new_error(m, pe.msg, cls_name(pe.cls)); }
+            return;
+        } else if (m->msg_format == 3) { msbcd_init(m); return; }
+        new_error(m, "unknown msg_format", NULL);
+    }
+}
+
+/* IridiumMessage.upgrade for MS/RA/BC: IridiumECCMessage(self).upgrade() */
+static void ecc_family(msg_t *m)
+{
+    perr_t pe;
+    if (ecc_init(m, &pe)) { m->cls = C_IRIDIUM; new_error(m, pe.msg, cls_name(pe.cls)); return; }
+    if (m->error) return;
+    if (strcmp(m->msgtype, "MS") == 0) {
+        if (ms_init(m, &pe)) { m->cls = C_ECC; new_error(m, pe.msg, cls_name(pe.cls)); return; }
+        ms_upgrade(m);
+    } else if (strcmp(m->msgtype, "RA") == 0) {
+        if (ra_init(m, &pe)) { m->cls = C_ECC; new_error(m, pe.msg, cls_name(pe.cls)); return; }
+    } else {
+        bc_init(m);
+    }
+}
+
+/* IridiumLCWMessage.upgrade for DA: IridiumLCWECCMessage(self).upgrade() */
+static void da_family(msg_t *m)
+{
+    lcwecc_init(m);
+    if (m->error) return;
+    perr_t pe;
+    if (da_init(m, &pe)) { m->cls = C_LCWECC; new_error(m, pe.msg, cls_name(pe.cls)); }
+}
+
 /* bitsparser.IridiumLCWMessage.upgrade (DA is the ECC path: not yet) */
 static void lcw_upgrade(msg_t *m)
 {
@@ -1331,8 +2039,241 @@ static void lcw_upgrade(msg_t *m)
     else if (strcmp(m->msgtype, "IP") == 0) ip_init(m);
     else if (strcmp(m->msgtype, "SY") == 0) sy_upgrade(m);
     else if (strcmp(m->msgtype, "U3") == 0) lcw3_init(m);
-    else if (strcmp(m->msgtype, "DA") == 0) new_error(m, "not ported (DA)", "native");
+    else if (strcmp(m->msgtype, "DA") == 0) da_family(m);
     /* other U*: stays an LCW message */
+}
+
+
+/* ------------------------------------------------------------------- ITL */
+
+/* bitsparser.de_dqpsk */
+static int de_dqpsk(const char *bits, int *sym, int max)
+{
+    static const int imap[4] = { 0, 1, 3, 2 };
+    size_t n = strlen(bits);
+    int k = 0;
+    for (size_t x = 0; x + 1 < n && k < max; x += 2) sym[k++] = imap[(bits[x] == '1') * 2 + (bits[x + 1] == '1')];
+    for (int c = 1; c < k; c++) sym[c] = (sym[c - 1] + sym[c]) % 4;
+    return k;
+}
+
+static const itl_entry_t *itl_find(const itl_entry_t *t, int n, const char *key)
+{
+    for (int i = 0; i < n; i++) if (strcmp(t[i].key, key) == 0) return &t[i];
+    return NULL;
+}
+
+/* itl.map_sat; returns -1 for ValueError */
+static int itl_map_sat(arena_t *a, int num, int version, const char **sat, const char **mt)
+{
+    char s1[16], s2[16];
+    if (version == 2) {
+        if (num == 77) { strcpy(s1, "---"); strcpy(s2, "M08"); }
+        else if (num < 66) { snprintf(s1, sizeof(s1), "S%02d", num % 11 + 1); snprintf(s2, sizeof(s2), "M%02d", num / 11 + 1); }
+        else if (num >= 82 && num <= 84) { snprintf(s1, sizeof(s1), "R%02d", ((num - 82) % 3) + 1); strcpy(s2, "N01"); }
+        else if (num >= 85 && num <= 95) { snprintf(s1, sizeof(s1), "S%02d", num - 84); strcpy(s2, "N02"); }
+        else if (num >= 96 && num <= 107) { snprintf(s1, sizeof(s1), "R%02d", ((num - 96) % 3) + 1); snprintf(s2, sizeof(s2), "N%02d", ((num - 96) / 3) + 3); }
+        else if (num == 108) { strcpy(s1, "---"); strcpy(s2, "SSS"); }
+        else if (num == 111) { strcpy(s1, "---"); strcpy(s2, "N08"); }
+        else { strcpy(s1, "---"); snprintf(s2, sizeof(s2), "%03d", num); }
+    } else {
+        if (num >= 88) return -1;
+        snprintf(s1, sizeof(s1), "S%02d", num % 11 + 1); snprintf(s2, sizeof(s2), "M%02d", num / 11 + 1);
+    }
+    *sat = ar_strdup(a, s1); *mt = ar_strdup(a, s2);
+    return 0;
+}
+
+/* bitsparser.IridiumSTLMessage.__init__ (default options); 1 = ParserError */
+static int stl_init(msg_t *m, perr_t *pe)
+{
+    arena_t *a = m->a;
+    m->cls = C_STL;
+    pe->cls = C_STL;
+    m->header = "<11>";
+    m->has_fixederrs = 1; m->fixederrs = 0;
+    const char *d = descr_joined(m);
+    if (strlen(d) < 8 * 8 * 12) { pe->msg = "ITL content too short"; return 1; }
+    static __thread int sym[1024];
+    int ns = de_dqpsk(d, sym, 1024);
+    /* split_qpsk -> i, q bit strings */
+    char *ib = ar_alloc(a, (size_t)ns + 1), *qb = ar_alloc(a, (size_t)ns + 1);
+    for (int k = 0; k < ns; k++) {
+        int v = sym[k];
+        ib[k] = (v == 1 || v == 2) ? '1' : '0';
+        qb[k] = (v == 2 || v == 3) ? '1' : '0';
+    }
+    ib[ns] = 0; qb[ns] = 0;
+    /* ["%02x" % int(x,2) for x in slice(bits, 8)] */
+    int nbi = (ns + 7) / 8;
+    char *ih = ar_alloc(a, (size_t)nbi * 2 + 1), *qh = ar_alloc(a, (size_t)nbi * 2 + 1);
+    for (int k = 0; k < nbi; k++) {
+        snprintf(ih + 2 * k, 3, "%02x", bin_int(ib, (size_t)k * 8, (size_t)k * 8 + 8));
+        snprintf(qh + 2 * k, 3, "%02x", bin_int(qb, (size_t)k * 8, (size_t)k * 8 + 8));
+    }
+    size_t lih = strlen(ih), lqh = strlen(qh);
+    m->has_iq = 1;
+    m->nitl_i = 2;
+    m->itl_i[0] = sub(a, ih, 0, 32);
+    m->itl_i[1] = sub(a, ih, 32, lih);
+    m->nitl_q = 0;
+    for (size_t x = 0; x < lqh && m->nitl_q < 8; x += 24) m->itl_q[m->nitl_q++] = sub(a, qh, x, x + 24);
+
+    m->itl_version = -1;
+    for (int k = 0; k < ITL_N_PRS_HDR; k++) if (strcmp(ITL_PRS_HDR[k], m->itl_i[0]) == 0) { m->itl_version = k; break; }
+    if (m->itl_version < 0) { pe->msg = "ITL PRS I#0 (version) unknown"; return 1; }
+    char h[8];
+    snprintf(h, sizeof(h), "V%d", m->itl_version);
+    m->header = ar_strdup(a, h);
+    m->nmsg = 0;
+    static __thread char em[64];
+    if (m->itl_version == 0) {
+        m->nitl_i = 0;
+        for (size_t x = 0; x < lih && m->nitl_i < 8; x += 32) m->itl_i[m->nitl_i++] = sub(a, ih, x, x + 32);
+        m->nitl_q = 0;
+        for (size_t x = 0; x < lqh && m->nitl_q < 8; x += 32) m->itl_q[m->nitl_q++] = sub(a, qh, x, x + 32);
+        return 0;
+    } else if (m->itl_version == 1) {
+        const itl_entry_t *e = itl_find(ITL_MAP_PLANE_V1, ITL_MAP_PLANE_V1_N, m->itl_i[1]);
+        if (!e) { pe->msg = "ITL V1 PRS I#1 (plane) unknown"; return 1; }
+        m->plane = e->val;
+        for (int k = 0; k < m->nitl_q; k++) {
+            const itl_entry_t *q = itl_find(ITL_MAP_PRS_V1, ITL_MAP_PRS_V1_N, m->itl_q[k]);
+            if (q) { m->msg_int[m->nmsg] = q->val; m->msg_str[m->nmsg++] = NULL; }
+            else {
+                if (k == 0 || m->msg_int[0] < 77) { snprintf(em, sizeof(em), "ITL V1 PRS Q#%d unknown", k); pe->msg = ar_strdup(a, em); return 1; }
+                m->msg_str[m->nmsg++] = m->itl_q[k];
+            }
+        }
+    } else {
+        const itl_entry_t *e = itl_find(ITL_MAP_PLANE, ITL_MAP_PLANE_N, m->itl_i[1]);
+        if (!e) { pe->msg = "ITL V2 PRS I#1 (plane) unknown"; return 1; }
+        m->plane = e->val;
+        for (int k = 0; k < m->nitl_q; k++) {
+            const itl_entry_t *q = itl_find(ITL_MAP_PRS, ITL_MAP_PRS_N, m->itl_q[k]);
+            if (q) { m->msg_int[m->nmsg] = q->val; m->msg_str[m->nmsg++] = NULL; }
+            else {
+                if (k == 0 || m->msg_int[0] != 108) { snprintf(em, sizeof(em), "ITL V2 PRS Q#%d unknown", k); pe->msg = ar_strdup(a, em); return 1; }
+                m->msg_str[m->nmsg++] = m->itl_q[k];
+            }
+        }
+        if (m->msg_int[0] != 108) {
+            char san[16]; int ks = 0;
+            for (int k = 0; k < m->nitl_q && ks < 15; k++) {
+                const itl_entry_t *q = itl_find(ITL_MAP_PRS, ITL_MAP_PRS_N, m->itl_q[k]);
+                san[ks++] = (char)('0' + (q ? q->type : 0));
+            }
+            san[ks] = 0;
+            int ok = (m->plane % 2 == 0) ? (strcmp(san, "0123") == 0 || strcmp(san, "1032") == 0)
+                                         : (strcmp(san, "2301") == 0 || strcmp(san, "3210") == 0);
+            if (!ok) { pe->msg = "ITL V2 PRS from unexpected set"; return 1; }
+        }
+    }
+    if (itl_map_sat(a, m->msg_int[0], m->itl_version, &m->sat, &m->mt) < 0) { pe->msg = "ITL invalid sat ID"; return 1; }
+    /* self.msg = self.msg[1:] */
+    for (int k = 1; k < m->nmsg; k++) { m->msg_int[k - 1] = m->msg_int[k]; m->msg_str[k - 1] = m->msg_str[k]; }
+    m->nmsg--;
+    return 0;
+}
+
+/* bitsparser.IridiumSTLMessage.pretty */
+static void pretty_stl(msg_t *m, sb_t *b)
+{
+    sb_puts(b, "ITL: ");
+    pretty_header_iridium(m, b);
+    if (m->itl_version == 0) {
+        sb_puts(b, " - <");
+        for (int k = 0; k < m->nitl_i; k++) { if (k) sb_puts(b, " "); sb_puts(b, m->itl_i[k]); }
+        sb_puts(b, "> <");
+        for (int k = 0; k < m->nitl_q; k++) { if (k) sb_puts(b, " "); sb_puts(b, m->itl_q[k]); }
+        sb_puts(b, ">");
+    } else {
+        sb_printf(b, " OK P%d %s %s", m->plane, m->sat, m->mt);
+        for (int k = 0; k < m->nmsg; k++) {
+            if (m->msg_str[k]) { sb_puts(b, " "); sb_puts(b, m->msg_str[k]); }
+            else {
+                char t[40]; int v = m->msg_int[k], n = 0;
+                for (int i = 31; i >= 0; i--) if ((v >> i) & 1) { n = i + 1; break; }
+                if (n < 7) n = 7;
+                for (int i = 0; i < n; i++) t[i] = (char)('0' + ((v >> (n - 1 - i)) & 1));
+                t[n] = 0;
+                sb_puts(b, " "); sb_puts(b, t);
+            }
+        }
+    }
+    pretty_trailer_iridium(m, b);
+}
+
+
+/* ------------------------------------------------------------- IAQ, NXT */
+
+/* bitsparser.iaq_crc16: crcmod.mkCrcFun(poly=0x15101, initCrc=0, rev=False) */
+static unsigned iaq_crc16(const unsigned char *d, int n)
+{
+    unsigned crc = 0;
+    for (int i = 0; i < n; i++) {
+        crc ^= (unsigned)d[i] << 8;
+        for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x5101) & 0xffff : (crc << 1) & 0xffff;
+    }
+    return crc;
+}
+
+/* bitsparser.IridiumAQMessage.__init__; 1 = ParserError */
+static int aq_init(msg_t *m, perr_t *pe)
+{
+    m->cls = C_AQ;
+    m->has_fixederrs = 1; m->fixederrs = 0;
+    const char *bits = descr_joined(m);
+    size_t n = strlen(bits);
+    int k = 0;
+    static const char imap[4] = { '0', 'e', 'e', '1' };
+    for (size_t x = 0; x + 1 < n && k < 127; x += 2) m->aq_sym[k++] = imap[(bits[x] == '1') * 2 + (bits[x + 1] == '1')];
+    m->aq_sym[k] = 0;
+    if (strchr(m->aq_sym, 'e')) { pe->msg = "IAQ content not BPSK"; pe->cls = C_AQ; return 1; }
+    const char *sy = m->aq_sym;
+    int rid = 0;
+    static const int order[8] = { 4, 6, 8, 10, 5, 7, 9, 11 };
+    for (int i = 0; i < 8; i++) rid = (rid << 1) | (sy[order[i]] == '1');
+    m->rid = rid;
+    unsigned char val[2];
+    val[0] = (unsigned char)bin_int(sy, 0, 4);
+    val[1] = (unsigned char)bin_int(sy, 4, 12);
+    m->ridcrc = bin_int(sy, 12, (size_t)k);
+    m->aq_crcval = (int)(iaq_crc16(val, 2) >> 2);
+    return 0;
+}
+
+static void pretty_aq(msg_t *m, sb_t *b)
+{
+    sb_puts(b, "IAQ: ");
+    pretty_header_iridium(m, b);
+    sb_printf(b, " %.4s Rid:%03d", m->aq_sym, m->rid);
+    if (m->ridcrc == m->aq_crcval) sb_puts(b, " CRC:OK");
+    else sb_printf(b, " CRC:no[%04x]", m->ridcrc);
+    pretty_trailer_iridium(m, b);
+}
+
+/* bitsparser.IridiumNXTMessage.__init__ */
+static void nxt_init(msg_t *m)
+{
+    m->cls = C_NXT;
+    m->has_fixederrs = 1; m->fixederrs = 0;
+    const char *d = descr_joined(m);
+    if (strlen(d) < 233) new_error(m, "next frame too short", NULL);
+    const char *ones = sub(m->a, d, 176, 206);
+    if (strchr(ones, '0')) m->fixederrs += 1;
+}
+
+static void pretty_nxt(msg_t *m, sb_t *b)
+{
+    arena_t *a = m->a;
+    const char *d = descr_joined(m);
+    sb_puts(b, "NXT: ");
+    pretty_header_iridium(m, b);
+    sb_puts(b, " "); put_group(b, sub(a, d, 0, 32), 8);
+    sb_puts(b, " | "); put_group(b, sub(a, d, 32, 36), 2);
+    sb_puts(b, " > "); put_group(b, sub(a, d, 36, strlen(d)), 10);
+    pretty_trailer_iridium(m, b);
 }
 
 /* bitsparser.Message.upgrade (default options) */
@@ -1360,6 +2301,21 @@ static void message_upgrade(msg_t *m)
     if (strcmp(m->msgtype, "LW") == 0) {
         lcw_init(m);
         lcw_upgrade(m);
+        return;
+    }
+    if (strcmp(m->msgtype, "MS") == 0 || strcmp(m->msgtype, "RA") == 0 || strcmp(m->msgtype, "BC") == 0) {
+        ecc_family(m);
+        return;
+    }
+    if (strcmp(m->msgtype, "AQ") == 0) {
+        perr_t ape;
+        if (aq_init(m, &ape)) { m->cls = C_IRIDIUM; new_error(m, ape.msg, cls_name(ape.cls)); }
+        return;
+    }
+    if (strcmp(m->msgtype, "NX") == 0) { nxt_init(m); return; }
+    if (strcmp(m->msgtype, "TL") == 0) {
+        perr_t tpe;
+        if (stl_init(m, &tpe)) { m->cls = C_IRIDIUM; new_error(m, tpe.msg, cls_name(tpe.cls)); }
         return;
     }
     /* other families: not ported yet - say so, so the comparison counts it */
@@ -1390,6 +2346,18 @@ int bp_parse_line(const char *raw_line, char *out, size_t outsz)
     case C_LCW3:    pretty_lcw3(m, &b); break;
     case C_VO:      if (strcmp(m->vtype, "VDA") == 0) pretty_ip(m, &b); else pretty_vo(m, &b); break;
     case C_IP:      pretty_ip(m, &b); break;
+    case C_STL:     pretty_stl(m, &b); break;
+    case C_AQ:      pretty_aq(m, &b); break;
+    case C_NXT:     pretty_nxt(m, &b); break;
+    case C_ECC:     pretty_ecc(m, &b); break;
+    case C_LCWECC:  pretty_lcwecc(m, &b); break;
+    case C_DA:      pretty_da(m, &b); break;
+    case C_BC:      pretty_bc(m, &b); break;
+    case C_RA:      pretty_ra(m, &b); break;
+    case C_MS:      pretty_ms(m, &b); break;
+    case C_MSBODY:  pretty_msbody(m, &b); break;
+    case C_MSASCII: pretty_msascii(m, &b); break;
+    case C_MSBCD:   pretty_msbcd(m, &b); break;
     }
 
     if (m->error) {

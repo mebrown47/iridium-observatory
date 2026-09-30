@@ -112,24 +112,44 @@ differences already show for phase 1:
 
 ## Phase 1 — parser, all frame types
 
-New `bits_parser.c/.h` mirroring `bitsparser.py`, and `--parsed=full` printing
-its lines. `frame_decode.c` / `ida_decode.c` are then re-based on it (one
-parser, not two) once it matches.
+`bits_parser.c` ports `bitsparser.py` (and `iridium-parser.py`'s line
+output) function by function, each naming the Python it follows; bit
+strings stay strings of '0'/'1' as in the toolkit. `tk_rs.c` ports the
+Reed-Solomon decoder the toolkit bundles (`reedsolo.py`, public domain;
+the 8-bit field of `rs.py` and the 6-bit one of `rs6.py`), the IIP CRC-24
+and `checksum_16`. `itl_tables.h` is generated from `itl.py`.
+`--parsed=full` formats each frame's RAW: line in memory and parses that,
+so the native parser sees the same rounded values (level, SNR, time) the
+toolkit does.
 
-Order, by what the corpus can check and by value:
+Status (2026-09-29): **every line matches.**
 
-1. [ ] Common header and `IRI`: the fields every line starts with (id, time, frequency, confidence, level, symbols, direction), unique word and access-code checks, frame-type classification (the frequency classes too; `--disable-freqclass` stays default-on).
-2. [ ] `RAW` fallthrough: exactly the cases where the toolkit gives up.
-3. [ ] LCW family: `ISY`; `IU3`/`I36`/`I38`; `VOC`/`VOD`/`VO6`/`VOZ` (parsed, no audio); `IIP`/`IIQ`/`IIR`/`IIU`/`VDA`.
-4. [ ] ECC family: `IME`, `IBC`, `IRA`, `IMS`, `MSG` (ASCII) and `MS3` (BCD).
-5. [ ] `IDA` (LCW-ECC).
-6. [ ] `ITL`, `IAQ`, `NXT`.
-7. [ ] Parser options the analyzer and feeders use: defaults first; then `--harder`, `--uw-ec`, confidence filters (`-g`, `--confidence`, `-p`, `-e`), `--filter`. JSON/SigMF/ZMQ outputs are out of scope unless needed.
+| Set | Lines | Matching | Types |
+| --- | --- | --- | --- |
+| Recordings (raw10m, chan1626, fc10m, q6) | 51,170 | 51,170 | ISY, IDA, I36, IIP, IBC, VOC, VO6, VOZ, IRI, IU3, IIU, ITL, IRA, IME, IMS, I38, IIQ, RAW |
+| Synthetic (`tests/parser_fuzz.py`, seed 7) | 29,500 | 29,500 | IAQ, NXT, MSG, MS3, VOD, VDA, IIR, plus IRI/IME/IMS/RAW error paths |
 
-Done when every corpus line matches, or each remaining difference is written
-down here with its reason; and the Iridium analyzer runs Live and
-decode-on-Freeze on `--parsed=full` with its own tests (decode_check,
-live_check, corpus_check) unchanged in result.
+The Reed-Solomon, CRC-24 and checksum ports were also checked alone against
+the toolkit's Python on 12,000 vectors (codewords with 0-11 symbol errors,
+random data): identical results, correcting and failing alike.
+
+Speed: 34,263 frames parse in 0.22 s (about 150,000 frames/s) against
+3.46 s for iridium-parser.py.
+
+- [x] 1. Common header and `IRI`.
+- [x] 2. `RAW` fall-through.
+- [x] 3. LCW family: `ISY`; `IU3`/`I36`/`I38`; `VOC`/`VOD`/`VO6`/`VOZ`; `IIP`/`IIQ`/`IIR`/`IIU`/`VDA`.
+- [x] 4. ECC family: `IME`, `IBC`, `IRA`, `IMS`, `MSG`, `MS3`.
+- [x] 5. `IDA` (LCW-ECC).
+- [x] 6. `ITL`, `IAQ`, `NXT`.
+- [ ] 7. Parser options beyond the defaults: `--harder`, `--uw-ec`, confidence filters, `--filter`. Not needed by the analyzer or the feeders; `--harder` / `--uw-ec` code paths are marked in bits_parser.c.
+- [ ] The Iridium analyzer on `--parsed=full` (Live and decode-on-Freeze, its decode_check / live_check / corpus_check unchanged).
+- [ ] `frame_decode.c` / `ida_decode.c` re-based on bits_parser.c (one parser, not two) — separate change; they feed the web map, positioning and ACARS today and are not touched by this phase.
+
+Not handled (the toolkit fails there too, with an exception rather than a
+line): malformed input that makes the Python raise IndexError/ValueError
+(e.g. an odd number of bits into de_interleave). The native parser prints
+something instead; no corpus line hits these.
 
 ## Phase 2 — ACARS and SBD
 

@@ -55,9 +55,15 @@ The 24-bit access code and 32-bit messaging header are symbol-reverse-invariant
 line for line, on a corpus of `RAW:` lines replayed with `--replay-raw`
 (no RF, GPU or timing involved):
 
-    tests/parser_equiv.sh -p "--parsed" /media/mike/data/webspy-captures/parser-corpus
+    tests/parser_equiv.sh /media/mike/data/webspy-captures/parser-corpus
+    tests/parser_equiv.sh /media/mike/data/webspy-captures/parser-corpus/synthetic
 
 Each `NAME.raw` in the corpus directory needs `NAME.expected.txt`, the
 toolkit's `iridium-parser.py` output for it at the pinned commit (8888124).
 The report gives, per frame type, how many lines match and the first
 differing pair. See `docs/NATIVE_PARSER_PLAN.md`.
+
+`parser_fuzz.py TOOLKIT CORPUS OUT [SEED]` generates synthetic RAW: lines for
+the frame types recordings rarely hold (IAQ, NXT, MSG, MS3, VOD, VDA, IIR,
+random frames at the frequency-class limits) and their expected output, for
+`parser_equiv.sh OUT`.
