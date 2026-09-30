@@ -104,6 +104,7 @@ extern float uw_reject_threshold;
 extern int parsed_mode;
 extern char *replay_raw_path;
 extern int reassemble_mode;
+extern int parse_harder;
 extern int position_enabled;
 extern double position_height;
 extern int acars_enabled;
@@ -218,6 +219,9 @@ static void usage(int exitcode) {
 "                           reassembler.py -m MODE -a ARG,... does (MODE: ida,\n"
 "                           sbd, acars; ARG: json, showerrs, nopings, perfect)\n"
 "                           and print that instead of frames (native port)\n"
+"    --parse-harder         for --parsed=full and --reassemble: parse as\n"
+"                           iridium-parser.py --harder does (recovers frames\n"
+"                           with bit errors in their headers)\n"
 "    --replay-raw=FILE      read RAW: lines (this program's output) instead of\n"
 "                           samples and run only the output stage on them\n"
 "                           (tests; hard bits only, as iridium-toolkit gets)\n"
@@ -313,6 +317,7 @@ void parse_options(int argc, char **argv) {
         OPT_PARSED,
         OPT_REPLAY_RAW,
         OPT_REASSEMBLE,
+        OPT_PARSE_HARDER,
         OPT_POSITION,
         OPT_ACARS,
         OPT_ACARS_JSON,
@@ -369,6 +374,7 @@ void parse_options(int argc, char **argv) {
         { "parsed",         optional_argument, NULL, OPT_PARSED },
         { "replay-raw",     required_argument, NULL, OPT_REPLAY_RAW },
         { "reassemble",     required_argument, NULL, OPT_REASSEMBLE },
+        { "parse-harder",   no_argument,       NULL, OPT_PARSE_HARDER },
         { "position",       optional_argument, NULL, OPT_POSITION },
         { "acars",          no_argument,       NULL, OPT_ACARS },
         { "acars-json",     no_argument,       NULL, OPT_ACARS_JSON },
@@ -580,6 +586,10 @@ void parse_options(int argc, char **argv) {
                 uw_reject_threshold = (float)atof(optarg);
                 if (uw_reject_threshold < 0.0f) uw_reject_threshold = 0.0f;
                 if (uw_reject_threshold > 1.0f) uw_reject_threshold = 1.0f;
+                break;
+
+            case OPT_PARSE_HARDER:
+                parse_harder = 1;
                 break;
 
             case OPT_REASSEMBLE: {

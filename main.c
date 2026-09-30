@@ -49,6 +49,7 @@
 #include "qpsk_demod.h"
 #include "frame_output.h"
 #include "tk_reassembler.h"
+#include "bits_parser.h"
 #include "frame_decode.h"
 #include "web_map.h"
 #include "archive.h"
@@ -165,7 +166,8 @@ int use_gardner = 1;
  * while removing ~73% of false positives. 0 disables the filter. */
 float uw_reject_threshold = 0.70f;
 int parsed_mode = 0;
-int reassemble_mode = 0;         /* --reassemble: tkr_mode_t, 0 = off */
+int reassemble_mode = 0;
+int parse_harder = 0;           /* --parse-harder: iridium-parser.py --harder */         /* --reassemble: tkr_mode_t, 0 = off */
 char *replay_raw_path = NULL;   /* --replay-raw: RAW lines in, output stage only */
 static uint64_t replay_t0_ns = 0;
 int use_chase = 0;
@@ -1144,6 +1146,7 @@ int main(int argc, char **argv) {
     fftw_lock_init();
     fftw_load_wisdom();
     frame_output_init(file_info);
+    bp_set_harder(parse_harder);
     if (reassemble_mode)
         tkr_init((tkr_mode_t)reassemble_mode, stdout);
 

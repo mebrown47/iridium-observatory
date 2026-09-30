@@ -213,6 +213,8 @@ static int bitdiff(const char *x, const char *y)
     return d;
 }
 
+static int count_ones(const char *s) { int n = 0; for (; *s; s++) n += *s == '1'; return n; }
+
 /* util.slice_extra(string, n) -> blocks, extra */
 static int slice_extra(arena_t *a, const char *s, size_t n, char ***blocks, char **extra)
 {
@@ -361,6 +363,10 @@ static int bch_repair1(arena_t *a, int poly, const char *bits, char **data, char
     bch_split(a, poly, rep, data, bch);
     return e;
 }
+
+/* iridium-parser.py --harder */
+static int opt_harder;
+void bp_set_harder(int on) { opt_harder = on; }
 
 /* ------------------------------------------------------------- message */
 
@@ -823,7 +829,67 @@ static int iridium_init(msg_t *m, perr_t *pe)
     if (!m->msgtype[0] && (!freqclass || fr < f_duplex()) && m->uplink)
         if (dlen >= 2 * 26 && dlen < 2 * 50) strcpy(m->msgtype, "AQ");
 
-    /* (--harder detection not ported) */
+    if (!m->msgtype[0] && opt_harder) {
+        /* try IBC */
+        if (dlen >= 70 && !(freqclass && m->uplink)) {
+            int hdrlen = 6, blocklen = 64;
+            char *bc1, *bc2, *d2, *b2, *d3, *b3;
+            int e1 = bch_repair1(a, hdr_poly, sub(a, data, 0, (size_t)hdrlen), NULL, NULL);
+            de_interleave(a, sub(a, data, (size_t)hdrlen, (size_t)(hdrlen + blocklen)), &bc1, &bc2);
+            int e2 = bch_repair(a, ringalert_bch_poly, sub(a, bc1, 0, 31), &d2, &b2);
+            int e3 = bch_repair(a, ringalert_bch_poly, sub(a, bc2, 0, 31), &d3, &b3);
+            if (e1 >= 0 && e2 >= 0 && e3 >= 0 &&
+                (count_ones(d2) + count_ones(b2) + count_ones(sub(a, bc1, 31, 32))) % 2 == 0 &&
+                (count_ones(d3) + count_ones(b3) + count_ones(sub(a, bc2, 31, 32))) % 2 == 0) {
+                strcpy(m->msgtype, "BC");
+                m->has_ec_lcw = 1; m->ec_lcw = e1;
+            }
+        }
+        /* try for LCW */
+        if (!m->msgtype[0] && dlen >= 64) {
+            char *l1, *l2, *l3, *x;
+            de_interleave_lcw(a, sub(a, data, 0, 46), &l1, &l2, &l3);
+            int e1 = bch_repair(a, 29, l1, &x, NULL);
+            int e2a = bch_repair(a, 465, cat(a, l2, "0"), &x, NULL);
+            int e2b = bch_repair(a, 465, cat(a, l2, "1"), &x, NULL);
+            int e3 = bch_repair(a, 41, l3, &x, NULL);
+            int e2 = e2a;
+            if ((e2b >= 0 && e2b < e2a) || e2a < 0) e2 = e2b;
+            if (e1 >= 0 && e2 >= 0 && e3 >= 0) {
+                strcpy(m->msgtype, "LW");
+                m->has_ec_lcw = 1; m->ec_lcw = e1 + e2 + e3;
+            }
+        }
+        /* try for IRA */
+        size_t firstlen = 3 * 32;
+        if (!m->msgtype[0] && dlen >= firstlen && !(freqclass && m->uplink)) {
+            char *r1, *r2, *r3, *d1, *b1, *d2, *b2, *d3, *b3;
+            de_interleave3(a, sub(a, data, 0, firstlen), &r1, &r2, &r3);
+            int e1 = bch_repair(a, ringalert_bch_poly, sub(a, r1, 0, 31), &d1, &b1);
+            int e2 = bch_repair(a, ringalert_bch_poly, sub(a, r2, 0, 31), &d2, &b2);
+            int e3 = bch_repair(a, ringalert_bch_poly, sub(a, r3, 0, 31), &d3, &b3);
+            if (e1 >= 0 && e2 >= 0 && e3 >= 0 &&
+                (count_ones(d1) + count_ones(b1) + count_ones(sub(a, r1, 31, 32))) % 2 == 0 &&
+                (count_ones(d2) + count_ones(b2) + count_ones(sub(a, r2, 31, 32))) % 2 == 0 &&
+                (count_ones(d3) + count_ones(b3) + count_ones(sub(a, r3, 31, 32))) % 2 == 0)
+                strcpy(m->msgtype, "RA");
+        }
+        /* try ITL */
+        if (!m->msgtype[0] && dlen >= 96 + (8 * 8 * 12) && !(freqclass && m->uplink)) {
+            static const char *tl = NULL;
+            if (!tl) {
+                static char h[97];
+                h[0] = h[1] = '1';
+                for (int i = 2; i < 96; i++) h[i] = '0';
+                h[96] = 0;
+                tl = h;
+            }
+            if (bitdiff(sub(a, data, 0, 96), tl) < 4) { m->has_ec_lcw = 1; m->ec_lcw = 1; strcpy(m->msgtype, "TL"); }
+        }
+        /* try IMS */
+        if (!m->msgtype[0] && dlen >= 32 && !(freqclass && m->uplink))
+            if (bitdiff(sub(a, data, 0, 32), header_messaging) < 2) { m->has_ec_lcw = 1; m->ec_lcw = 1; strcpy(m->msgtype, "MS"); }
+    }
 
     if (!m->msgtype[0] && dlen < 64) { pe->msg = "Iridium message too short"; pe->cls = C_IRIDIUM; return 1; }
     if (!m->msgtype[0]) { pe->msg = "unknown Iridium message type"; pe->cls = C_IRIDIUM; return 1; }
@@ -1459,7 +1525,8 @@ static int ecc_init(msg_t *m, perr_t *pe)
         int errs = bch_repair(a, m->poly, sub(a, blk, 0, 31), &data, &bb);
         if (errs < 0) { m->ecc_cut = 1; m->fill = 0; m->descramble_extra = ""; break; }
         if ((count1(data) + count1(bb) + count1(parity)) % 2 == 1) {
-            if (errs > 0) {
+            if (opt_harder) errs += 1;
+            else if (errs > 0) {
                 new_error(m, "Parity error", NULL);
                 m->ecc_cut = 1; m->fill = 0; m->descramble_extra = "";
                 break;
@@ -1937,16 +2004,20 @@ static int msascii_init(msg_t *m, perr_t *pe)
     int nc = slice_extra(a, m->msg_msgdata, 7, &chars, &mrest);
     m->msg_rest = mrest;
     sb_t asc = { 0 };
-    int end = 0;
+    int end = 0, etx_errs = 0;
     for (int i = 0; i < nc; i++) {
         int c = (int)bits_to_int(chars[i]);
         if (c == 3) end = 1;
-        else if (end == 1) new_error(m, "ETX inside ascii", NULL);
+        else if (end == 1) {
+            if (opt_harder) etx_errs++;
+            else new_error(m, "ETX inside ascii", NULL);
+        }
         if (c < 32 || c == 127) sb_printf(&asc, "[%d]", c);
         else { char t[2] = { (char)c, 0 }; sb_puts(&asc, t); }
     }
     m->msg_ascii = ar_strdup(a, asc.s ? asc.s : "");
     free(asc.s);
+    if (etx_errs > 0) m->fixederrs += 1;
     return 0;
 }
 
@@ -2063,6 +2134,19 @@ static const itl_entry_t *itl_find(const itl_entry_t *t, int n, const char *key)
     return NULL;
 }
 
+/* util.hex2bin: "{0:0%db}".format(int(h, 16)) with 4 bits per digit */
+static const char *hex2bin(arena_t *a, const char *h)
+{
+    size_t n = strlen(h);
+    char *o = ar_alloc(a, n * 4 + 1);
+    for (size_t i = 0; i < n; i++) {
+        int v = isdigit((unsigned char)h[i]) ? h[i] - '0' : (tolower((unsigned char)h[i]) - 'a' + 10);
+        for (int k = 0; k < 4; k++) o[i * 4 + (size_t)k] = (char)('0' + ((v >> (3 - k)) & 1));
+    }
+    o[n * 4] = 0;
+    return o;
+}
+
 /* itl.map_sat; returns -1 for ValueError */
 static int itl_map_sat(arena_t *a, int num, int version, const char **sat, const char **mt)
 {
@@ -2119,9 +2203,15 @@ static int stl_init(msg_t *m, perr_t *pe)
     m->nitl_q = 0;
     for (size_t x = 0; x < lqh && m->nitl_q < 8; x += 24) m->itl_q[m->nitl_q++] = sub(a, qh, x, x + 24);
 
+    const int MAX_DIFF = 10;
     m->itl_version = -1;
     for (int k = 0; k < ITL_N_PRS_HDR; k++) if (strcmp(ITL_PRS_HDR[k], m->itl_i[0]) == 0) { m->itl_version = k; break; }
-    if (m->itl_version < 0) { pe->msg = "ITL PRS I#0 (version) unknown"; return 1; }
+    if (m->itl_version < 0) {
+        if (opt_harder && bitdiff(hex2bin(a, m->itl_i[0]), hex2bin(a, ITL_PRS_HDR[2])) < MAX_DIFF) {
+            m->fixederrs += 1;
+            m->itl_version = 2;
+        } else { pe->msg = "ITL PRS I#0 (version) unknown"; return 1; }
+    }
     char h[8];
     snprintf(h, sizeof(h), "V%d", m->itl_version);
     m->header = ar_strdup(a, h);
@@ -2143,6 +2233,55 @@ static int stl_init(msg_t *m, perr_t *pe)
             else {
                 if (k == 0 || m->msg_int[0] < 77) { snprintf(em, sizeof(em), "ITL V1 PRS Q#%d unknown", k); pe->msg = ar_strdup(a, em); return 1; }
                 m->msg_str[m->nmsg++] = m->itl_q[k];
+            }
+        }
+    } else if (opt_harder) {
+        /* IridiumSTLMessage.__init__, itl_version == 2 and args.harder */
+        m->plane = -1;
+        const itl_entry_t *e = itl_find(ITL_MAP_PLANE, ITL_MAP_PLANE_N, m->itl_i[1]);
+        if (e) m->plane = e->val;
+        else {
+            const char *ib1 = hex2bin(a, m->itl_i[1]);
+            for (int k = 0; k < ITL_MAP_PLANE_N; k++)
+                if (bitdiff(ib1, hex2bin(a, ITL_MAP_PLANE[k].key)) < MAX_DIFF * 2) { m->plane = k + 1; m->fixederrs += 1; break; }
+            if (m->plane < 0) { pe->msg = "ITL V2 PRS I#1 (plane) unknown"; return 1; }
+        }
+        int have[8] = { 0 };
+        int cat = -1;                        /* None */
+        m->nmsg = m->nitl_q;
+        for (int k = 0; k < m->nitl_q; k++) { m->msg_str[k] = NULL; m->msg_int[k] = 0; }
+        for (int qidx = 0; qidx < m->nitl_q; qidx++) {
+            int mindist = 999;
+            if (qidx > 0 && have[0] && !m->msg_str[0] && m->msg_int[0] == 108) {
+                m->msg_str[qidx] = m->itl_q[qidx];   /* (then falls through: `next` is a no-op) */
+                have[qidx] = 1;
+            }
+            const itl_entry_t *q = itl_find(ITL_MAP_PRS, ITL_MAP_PRS_N, m->itl_q[qidx]);
+            if (q) { m->msg_int[qidx] = q->val; m->msg_str[qidx] = NULL; have[qidx] = 1; cat = q->type; }
+            else {
+                const char *qb = hex2bin(a, m->itl_q[qidx]);
+                int st, en;
+                if (qidx == 0) { if (m->plane % 2 == 0) { st = 0; en = 256; } else { st = 256; en = 512; } }
+                else if (qidx == 1 || qidx == 3) { if (cat < 0) { pe->msg = "ITL category error"; return 1; } cat ^= 1; st = 128 * cat; en = 128 * (cat + 1); }
+                else if (qidx == 2) { if (cat < 0) { pe->msg = "ITL category error"; return 1; } cat ^= 3; st = 128 * cat; en = 128 * (cat + 1); }
+                else { pe->msg = "ITL category error"; return 1; }
+                for (int i = 0; st + i < en && st + i < ITL_MAP_PRS_N; i++) {
+                    int dist = bitdiff(qb, hex2bin(a, ITL_MAP_PRS[st + i].key));
+                    if (dist < mindist) mindist = dist;
+                    if (dist < MAX_DIFF) {
+                        m->msg_int[qidx] = i % 128; m->msg_str[qidx] = NULL; have[qidx] = 1;
+                        if (cat < 0) cat = (i + st) / 128;
+                        m->fixederrs += 1;
+                        break;
+                    }
+                }
+            }
+            if (!have[qidx]) {
+                snprintf(em, sizeof(em), "ITL V2 PRS Q#%d unknown", qidx);
+                new_error(m, ar_strdup(a, em), NULL);
+                snprintf(em, sizeof(em), "ITL PRS dist=%d", mindist);
+                pe->msg = ar_strdup(a, em);
+                return 1;
             }
         }
     } else {

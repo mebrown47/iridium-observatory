@@ -145,7 +145,8 @@ Speed: 34,263 frames parse in 0.22 s (about 150,000 frames/s) against
 - [x] 4. ECC family: `IME`, `IBC`, `IRA`, `IMS`, `MSG`, `MS3`.
 - [x] 5. `IDA` (LCW-ECC).
 - [x] 6. `ITL`, `IAQ`, `NXT`.
-- [ ] 7. Parser options beyond the defaults: `--harder`, `--uw-ec`, confidence filters, `--filter`. Not needed by the analyzer or the feeders; `--harder` / `--uw-ec` code paths are marked in bits_parser.c.
+- [x] 7a. `--harder` as `--parse-harder` (for `--parsed=full` and `--reassemble`): classification through correctable header errors (IBC, LCW, IRA, ITL, messaging), the ITL PRS distance search, ECC parity and ETX slips as fixed errors. Identical to `iridium-parser.py --harder` on 126,316 lines (all recordings, the live set, the synthetic sets with even bit counts: an odd count makes the toolkit's --harder IBC attempt raise IndexError, and real frames always have an even count). On 10 min of live R2 it gives 2,385 IDA frames with CRC:OK against 2,137, and 121 reassembled IDA messages against 110; reassembly on top matches reassembler.py (ida, sbd, acars).
+- [ ] 7b. `--uw-ec`, confidence filters, `--filter`.
 - [x] The Iridium analyzer on `--parsed=full` (iridium-analyzer 10be317, branch feat/native-parser): decode-on-Freeze via `--replay-raw --parsed=full`, Live via `--zmq-sub ... --parsed=full` with no Python process. corpus_check ALL PASSED native and Python, reports identical; live_check 167/167.
 - [ ] `frame_decode.c` / `ida_decode.c` re-based on bits_parser.c (one parser, not two) — separate change; they feed the web map, positioning and ACARS today and are not touched by this phase.
 

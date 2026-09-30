@@ -21,4 +21,9 @@
  * Returns the full length (as snprintf). Thread-safe. */
 int bp_parse_line(const char *raw_line, char *out, size_t outsz);
 
+/* iridium-parser.py --harder: classify frames through correctable bit
+ * errors (LCW, IBC, IRA, ITL and messaging headers), count parity and ETX
+ * slips as fixed errors. Set before parsing. */
+void bp_set_harder(int on);
+
 #endif
