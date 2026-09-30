@@ -363,40 +363,23 @@ static int stat_bs_sent = 0;        /* positions sent via basestation */
 
 /* ---- Timestamp handling ---- */
 
-static struct timespec wall_t0;
-static uint64_t first_ts_ns = 0;
-static pthread_once_t ts_once = PTHREAD_ONCE_INIT;
-
-/* Called exactly once via pthread_once -- captures wall clock baseline.
- * first_ts_ns must be set before calling pthread_once. */
-static void ts_do_init(void)
-{
-    clock_gettime(CLOCK_REALTIME, &wall_t0);
-}
-
-static void ts_ensure_init(uint64_t ts_ns)
-{
-    if (first_ts_ns == 0)
-        first_ts_ns = ts_ns;
-    pthread_once(&ts_once, ts_do_init);
-}
-
+/* Frame timestamps are Unix time in ns already: the burst detector starts
+ * its sample clock from the radio's timestamp, --file-start, or the wall
+ * clock at the start of the stream. (These used to be re-anchored to the
+ * wall clock at the first ACARS message, which put every message of a
+ * file or --replay-raw at "now" - 37 min off in one test.) The acarshub
+ * feed keeps the wall clock on purpose, see hub_emit_acars. */
 static void format_timestamp(uint64_t ts_ns, char *buf, int bufsz)
 {
-    ts_ensure_init(ts_ns);
-    double elapsed = (double)(ts_ns - first_ts_ns) / 1e9;
-    time_t wall_sec = wall_t0.tv_sec + (time_t)elapsed;
+    time_t sec = (time_t)(ts_ns / 1000000000ULL);
     struct tm tm;
-    gmtime_r(&wall_sec, &tm);
+    gmtime_r(&sec, &tm);
     strftime(buf, bufsz, "%Y-%m-%dT%H:%M:%SZ", &tm);
 }
 
 static double ts_to_unix(uint64_t ts_ns)
 {
-    ts_ensure_init(ts_ns);
-    return (double)wall_t0.tv_sec +
-           (double)wall_t0.tv_nsec / 1e9 +
-           (double)(ts_ns - first_ts_ns) / 1e9;
+    return (double)ts_ns / 1e9;
 }
 
 /* ---- CRC-16/Kermit (reflected, poly=0x8408, init=0) ---- */
