@@ -146,7 +146,8 @@ Speed: 34,263 frames parse in 0.22 s (about 150,000 frames/s) against
 - [x] 5. `IDA` (LCW-ECC).
 - [x] 6. `ITL`, `IAQ`, `NXT`.
 - [x] 7a. `--harder` as `--parse-harder` (for `--parsed=full` and `--reassemble`): classification through correctable header errors (IBC, LCW, IRA, ITL, messaging), the ITL PRS distance search, ECC parity and ETX slips as fixed errors. Identical to `iridium-parser.py --harder` on 126,316 lines (all recordings, the live set, the synthetic sets with even bit counts: an odd count makes the toolkit's --harder IBC attempt raise IndexError, and real frames always have an even count). On 10 min of live R2 it gives 2,385 IDA frames with CRC:OK against 2,137, and 121 reassembled IDA messages against 110; reassembly on top matches reassembler.py (ida, sbd, acars).
-- [ ] 7b. `--uw-ec`, confidence filters, `--filter`.
+- [x] 7b. `--uw-ec` as `--parse-uw-ec` (2026-09-30): an access code within 3 DQPSK symbols of a unique word is accepted, the count shown in the `-eUxx` flag. Identical to `iridium-parser.py --uw-ec` (alone and with `--harder`) on the 10- and 60-minute live sets (50,605 and 395,365 lines).
+- [ ] 7c. Confidence filters, `--filter`.
 - [x] The Iridium analyzer on `--parsed=full` (iridium-analyzer 10be317, branch feat/native-parser): decode-on-Freeze via `--replay-raw --parsed=full`, Live via `--zmq-sub ... --parsed=full` with no Python process. corpus_check ALL PASSED native and Python, reports identical; live_check 167/167.
 - [ ] `frame_decode.c` / `ida_decode.c` re-based on bits_parser.c (one parser, not two) — separate change; they feed the web map, positioning and ACARS today and are not touched by this phase.
 
@@ -186,6 +187,13 @@ the port prints/skips there, and the generator avoids them.
 - [x] `libacars` mode, plain text (with `showerrs`, `nopings`), when built with libacars-2: the same libacars calls as the toolkit's libacars.py wrapper, including its quirk of always passing 0 µs to the reassembly. Identical on the live set, q6, fc10m and a synthetic set (14,874 / 17,138 / 11,267 lines plain / showerrs / nopings).
 - [x] `libacars` `json`: the toolkit re-serializes libacars' JSON through Python's json module (`json.loads(...)['acars']` into `json.dumps`); tk_reassembler.c does the same round trip (numbers as Python keeps them, strings re-escaped ASCII-only, dict key order). Identical on the live set, q6, fc10m and synthetic ACARS (1,846 / 2,978 / 1,393 lines json / +showerrs / +nopings). Not exercised: ARINC-622 payloads (ADS-C, CPDLC), where libacars prints floats - none in the corpus yet.
 - [ ] Reconcile with `sbd_acars.c` (the web map / UDP / archive path) — compare its reassembly with this one on the corpus, then share one.
+  Traced 2026-09-30: the two CRC-valid ACARS messages `sbd_acars.c` found that
+  the toolkit's rules missed (N8965Q, N818QS in 10 min of live R2) had a first
+  fragment whose access code has bit errors; `sbd_acars.c` doesn't check it,
+  the toolkit parser drops the frame unless `--uw-ec`. With `--parse-uw-ec` the
+  native path gives the same 23 ACARS messages as `sbd_acars.c` (none missing
+  either way). 60-min live set: 121 ACARS, 138 with --parse-harder, 141 with
+  --parse-harder --parse-uw-ec.
 
 Done when the corpus' ACARS and SBD output matches the toolkit's line for line.
 

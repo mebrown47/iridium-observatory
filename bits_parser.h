@@ -25,5 +25,7 @@ int bp_parse_line(const char *raw_line, char *out, size_t outsz);
  * errors (LCW, IBC, IRA, ITL and messaging headers), count parity and ETX
  * slips as fixed errors. Set before parsing. */
 void bp_set_harder(int on);
+/* iridium-parser.py --uw-ec: accept an access code with up to 3 symbol errors */
+void bp_set_uwec(int on);
 
 #endif

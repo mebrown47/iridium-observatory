@@ -168,6 +168,7 @@ float uw_reject_threshold = 0.70f;
 int parsed_mode = 0;
 int reassemble_mode = 0;
 int parse_harder = 0;
+int parse_uwec = 0;               /* --parse-uw-ec: iridium-parser.py --uw-ec */
 char *messages_spec[4];           /* --messages=MODE[,ARG...] */
 int n_messages_spec = 0;
 static tkr_t *messages_tkr[4];
@@ -1173,6 +1174,7 @@ int main(int argc, char **argv) {
     fftw_load_wisdom();
     frame_output_init(file_info);
     bp_set_harder(parse_harder);
+    bp_set_uwec(parse_uwec);
     if (reassemble_mode)
         tkr_init((tkr_mode_t)reassemble_mode, stdout);
     for (int i = 0; i < n_messages_spec; i++) {

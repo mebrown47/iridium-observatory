@@ -367,6 +367,30 @@ static int bch_repair1(arena_t *a, int poly, const char *bits, char **data, char
 /* iridium-parser.py --harder */
 static int opt_harder;
 void bp_set_harder(int on) { opt_harder = on; }
+/* iridium-parser.py --uw-ec */
+static int opt_uwec;
+void bp_set_uwec(int on) { opt_uwec = on; }
+
+/* bitsparser.UW_* : the unique words as DQPSK symbols */
+static const int UW_DOWNLINK[12]     = { 0,2,2,2,2,0,0,0,2,0,0,2 };
+static const int UW_UPLINK[12]       = { 2,2,0,0,0,2,0,0,2,0,2,2 };
+static const int NXT_UW_DOWNLINK[12] = { 2,2,0,2,2,0,2,0,2,0,2,2 };
+static const int NXT_UW_UPLINK[12]   = { 0,2,0,0,0,0,0,0,2,0,2,0 };
+
+/* bitsparser.de_dqpsk of the first 24 bits -> 12 symbols */
+static void de_dqpsk24(const char *bits, int sym[12])
+{
+    static const int imap[4] = { 0, 1, 3, 2 };
+    for (int x = 0; x < 12; x++) sym[x] = imap[(bits[2 * x] - '0') * 2 + (bits[2 * x + 1] - '0')];
+    for (int c = 1; c < 12; c++) sym[c] = (sym[c - 1] + sym[c]) % 4;
+}
+
+static int symdiff12(const int *a, const int *b)
+{
+    int d = 0;
+    for (int i = 0; i < 12; i++) d += a[i] != b[i];
+    return d;
+}
 
 /* ------------------------------------------------------------- message */
 
@@ -2425,9 +2449,27 @@ static void message_upgrade(msg_t *m)
     else if (startswith(bs, next_access_dl)) { m->has_uplink = 1; m->uplink = 0; m->next = 1; }
     else if (startswith(bs, next_access_ul)) { m->has_uplink = 1; m->uplink = 1; m->next = 1; }
     else {
-        /* (--uw-ec not ported) */
-        new_error(m, "Access code missing", NULL);
-        return;
+        if (opt_uwec && strlen(bs) >= strlen(iridium_access)) {
+            /* --uw-ec: an access code within 3 symbols of a unique word */
+            int s[12];
+            de_dqpsk24(bs, s);
+            int ddl = symdiff12(s, UW_DOWNLINK), dul = symdiff12(s, UW_UPLINK);
+            if (!m->next && ddl < 4) { m->has_uplink = 1; m->uplink = 0; m->has_ec_uw = 1; m->ec_uw = ddl; }
+            else if (!m->next && dul < 4) { m->has_uplink = 1; m->uplink = 1; m->has_ec_uw = 1; m->ec_uw = dul; }
+            else if (m->next && symdiff12(s, NXT_UW_DOWNLINK) < 4) {
+                m->has_uplink = 1; m->uplink = 0; m->has_ec_uw = 1; m->ec_uw = symdiff12(s, NXT_UW_DOWNLINK);
+            } else if (m->next && symdiff12(s, NXT_UW_UPLINK) < 4) {
+                m->has_uplink = 1; m->uplink = 1; m->has_ec_uw = 1; m->ec_uw = symdiff12(s, NXT_UW_UPLINK);
+            } else {
+                char e[64];
+                snprintf(e, sizeof(e), "Access code distance too big: %d/%d ", ddl, dul);
+                new_error(m, e, NULL);
+            }
+        }
+        if (!m->has_uplink) {
+            new_error(m, "Access code missing", NULL);
+            return;
+        }
     }
     perr_t pe;
     if (iridium_init(m, &pe)) {

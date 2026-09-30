@@ -105,6 +105,7 @@ extern int parsed_mode;
 extern char *replay_raw_path;
 extern int reassemble_mode;
 extern int parse_harder;
+extern int parse_uwec;
 extern char *messages_spec[4];
 extern int n_messages_spec;
 extern int position_enabled;
@@ -228,6 +229,8 @@ static void usage(int exitcode) {
 "    --parse-harder         for --parsed=full and --reassemble: parse as\n"
 "                           iridium-parser.py --harder does (recovers frames\n"
 "                           with bit errors in their headers)\n"
+"    --parse-uw-ec          likewise iridium-parser.py --uw-ec (accepts an\n"
+"                           access code with up to 3 symbol errors)\n"
 "    --replay-raw=FILE      read RAW: lines (this program's output) instead of\n"
 "                           samples and run only the output stage on them\n"
 "                           (tests; hard bits only, as iridium-toolkit gets)\n"
@@ -324,6 +327,7 @@ void parse_options(int argc, char **argv) {
         OPT_REPLAY_RAW,
         OPT_REASSEMBLE,
         OPT_PARSE_HARDER,
+        OPT_PARSE_UWEC,
         OPT_MESSAGES,
         OPT_POSITION,
         OPT_ACARS,
@@ -382,6 +386,7 @@ void parse_options(int argc, char **argv) {
         { "replay-raw",     required_argument, NULL, OPT_REPLAY_RAW },
         { "reassemble",     required_argument, NULL, OPT_REASSEMBLE },
         { "parse-harder",   no_argument,       NULL, OPT_PARSE_HARDER },
+        { "parse-uw-ec",    no_argument,       NULL, OPT_PARSE_UWEC },
         { "messages",       required_argument, NULL, OPT_MESSAGES },
         { "position",       optional_argument, NULL, OPT_POSITION },
         { "acars",          no_argument,       NULL, OPT_ACARS },
@@ -619,6 +624,10 @@ void parse_options(int argc, char **argv) {
 
             case OPT_PARSE_HARDER:
                 parse_harder = 1;
+                break;
+
+            case OPT_PARSE_UWEC:
+                parse_uwec = 1;
                 break;
 
             case OPT_REASSEMBLE: {
