@@ -27,6 +27,7 @@
 #include <libacars/acars.h>
 #include <libacars/reassembly.h>
 #include <libacars/vstring.h>
+#include <libacars/version.h>
 #endif
 
 /* ------------------------------------------------------------ bytes, text */
@@ -248,10 +249,7 @@ tkr_mode_t tkr_mode_from_name(const char *name)
 void tkr_init(tkr_mode_t m, FILE *o)
 {
     mode = m; out = o;
-    if (mode == TKR_LIBACARS && arg_json) {
-        fprintf(stderr, "--reassemble=libacars,json is not ported (plain libacars text only)\n");
-        exit(1);
-    }
+
     /* ida.py filter regex (one " cont=" per IDA line, so leftmost-longest
      * POSIX matching picks the same groups as Python's) */
     if (regcomp(&re_ida, "^.* cont=([0-9]) ([0-9]) ctr=([0-9]+) [0-9]+ len=([0-9]+) 0:.000 "
@@ -421,8 +419,205 @@ static void sbd_consume_l2(sbdobj_t *q)
 }
 
 #ifdef HAVE_LIBACARS
+/* ---- json.loads / json.dumps (Python's defaults) for libacars' JSON ---- */
+
+typedef struct jv jv_t;
+struct jv {
+    enum { J_NULL, J_TRUE, J_FALSE, J_INT, J_FLOAT, J_STR, J_ARR, J_OBJ } t;
+    char *num;                 /* J_INT: the digits as read (Python int) */
+    double f;                  /* J_FLOAT */
+    unsigned *cp; size_t ncp;  /* J_STR: code points */
+    jv_t **items; char ***keys; size_t *kn; size_t n;   /* J_ARR / J_OBJ */
+    unsigned **kcp;            /* J_OBJ: keys as code points */
+    size_t *kcpn;
+};
+
+static void jv_free(jv_t *v)
+{
+    if (!v) return;
+    free(v->num); free(v->cp);
+    for (size_t i = 0; i < v->n; i++) { jv_free(v->items[i]); if (v->kcp) free(v->kcp[i]); }
+    free(v->items); free(v->kcp); free(v->kcpn); free(v);
+}
+
+static void js_ws(const char **p) { while (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r') (*p)++; }
+
+static int js_hex4(const char *p, unsigned *v)
+{
+    *v = 0;
+    for (int i = 0; i < 4; i++) {
+        char c = p[i]; unsigned d;
+        if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
+        else return -1;
+        *v = *v * 16 + d;
+    }
+    return 0;
+}
+
+/* a JSON string -> code points (UTF-8 decoded, escapes resolved) */
+static int js_str(const char **p, unsigned **cp, size_t *ncp)
+{
+    if (**p != '"') return -1;
+    (*p)++;
+    size_t cap = 16, n = 0;
+    unsigned *o = malloc(cap * sizeof(unsigned));
+    while (**p && **p != '"') {
+        unsigned c;
+        if (**p == '\\') {
+            (*p)++;
+            char e = **p; (*p)++;
+            if (e == 'n') c = '\n'; else if (e == 'r') c = '\r'; else if (e == 't') c = '\t';
+            else if (e == 'b') c = '\b'; else if (e == 'f') c = '\f';
+            else if (e == 'u') {
+                if (js_hex4(*p, &c)) { free(o); return -1; }
+                *p += 4;
+                if (c >= 0xd800 && c < 0xdc00 && (*p)[0] == '\\' && (*p)[1] == 'u') {
+                    unsigned lo;
+                    if (!js_hex4(*p + 2, &lo) && lo >= 0xdc00 && lo < 0xe000) { c = 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00); *p += 6; }
+                }
+            } else c = (unsigned char)e;          /* " \ / */
+        } else {
+            unsigned char b = (unsigned char)**p;
+            int extra = b < 0x80 ? 0 : b >= 0xf0 ? 3 : b >= 0xe0 ? 2 : 1;
+            c = extra == 0 ? b : extra == 1 ? (b & 0x1f) : extra == 2 ? (b & 0x0f) : (b & 0x07);
+            (*p)++;
+            for (int i = 0; i < extra && **p; i++, (*p)++) c = (c << 6) | ((unsigned char)**p & 0x3f);
+        }
+        if (n == cap) { cap *= 2; o = realloc(o, cap * sizeof(unsigned)); }
+        o[n++] = c;
+    }
+    if (**p != '"') { free(o); return -1; }
+    (*p)++;
+    *cp = o; *ncp = n;
+    return 0;
+}
+
+static int cp_eq(const unsigned *a, size_t na, const unsigned *b, size_t nb)
+{
+    return na == nb && (na == 0 || memcmp(a, b, na * sizeof(unsigned)) == 0);
+}
+
+static jv_t *js_value(const char **p)
+{
+    js_ws(p);
+    jv_t *v = calloc(1, sizeof(*v));
+    if (**p == '{' || **p == '[') {
+        int obj = **p == '{';
+        v->t = obj ? J_OBJ : J_ARR;
+        (*p)++;
+        size_t cap = 0;
+        js_ws(p);
+        if (**p == (obj ? '}' : ']')) { (*p)++; return v; }
+        for (;;) {
+            unsigned *kc = NULL; size_t kn = 0;
+            if (obj) {
+                js_ws(p);
+                if (js_str(p, &kc, &kn)) { jv_free(v); return NULL; }
+                js_ws(p);
+                if (**p != ':') { free(kc); jv_free(v); return NULL; }
+                (*p)++;
+            }
+            jv_t *item = js_value(p);
+            if (!item) { free(kc); jv_free(v); return NULL; }
+            size_t at = v->n;
+            if (obj)                                    /* dict: a repeated key keeps its place */
+                for (size_t i = 0; i < v->n; i++)
+                    if (cp_eq(v->kcp[i], v->kcpn[i], kc, kn)) { at = i; break; }
+            if (at < v->n) { jv_free(v->items[at]); v->items[at] = item; free(kc); }
+            else {
+                if (v->n == cap) {
+                    cap = cap ? cap * 2 : 8;
+                    v->items = realloc(v->items, cap * sizeof(jv_t *));
+                    if (obj) { v->kcp = realloc(v->kcp, cap * sizeof(unsigned *)); v->kcpn = realloc(v->kcpn, cap * sizeof(size_t)); }
+                }
+                v->items[v->n] = item;
+                if (obj) { v->kcp[v->n] = kc; v->kcpn[v->n] = kn; }
+                v->n++;
+            }
+            js_ws(p);
+            if (**p == ',') { (*p)++; continue; }
+            if (**p == (obj ? '}' : ']')) { (*p)++; return v; }
+            jv_free(v); return NULL;
+        }
+    }
+    if (**p == '"') { v->t = J_STR; if (js_str(p, &v->cp, &v->ncp)) { jv_free(v); return NULL; } return v; }
+    if (!strncmp(*p, "true", 4)) { v->t = J_TRUE; *p += 4; return v; }
+    if (!strncmp(*p, "false", 5)) { v->t = J_FALSE; *p += 5; return v; }
+    if (!strncmp(*p, "null", 4)) { v->t = J_NULL; *p += 4; return v; }
+    const char *q = *p;
+    if (*q == '-') q++;
+    while (*q >= '0' && *q <= '9') q++;
+    int isf = 0;
+    if (*q == '.') { isf = 1; q++; while (*q >= '0' && *q <= '9') q++; }
+    if (*q == 'e' || *q == 'E') { isf = 1; q++; if (*q == '+' || *q == '-') q++; while (*q >= '0' && *q <= '9') q++; }
+    if (q == *p) { jv_free(v); return NULL; }
+    char *t = strndup(*p, (size_t)(q - *p));
+    if (isf) { v->t = J_FLOAT; v->f = strtod(t, NULL); free(t); }
+    else {
+        /* Python int(): "-0" is 0; leading zeros are not valid JSON anyway */
+        v->t = J_INT;
+        if (!strcmp(t, "-0")) { free(t); t = strdup("0"); }
+        v->num = t;
+    }
+    *p = q;
+    return v;
+}
+
+/* json.dumps(str) with ensure_ascii */
+static void put_json_cp(sb_t *o, const unsigned *cp, size_t n)
+{
+    sb_puts(o, "\"");
+    for (size_t i = 0; i < n; i++) {
+        unsigned c = cp[i];
+        if (c == '"') sb_puts(o, "\\\"");
+        else if (c == '\\') sb_puts(o, "\\\\");
+        else if (c == '\n') sb_puts(o, "\\n");
+        else if (c == '\r') sb_puts(o, "\\r");
+        else if (c == '\t') sb_puts(o, "\\t");
+        else if (c == '\b') sb_puts(o, "\\b");
+        else if (c == '\f') sb_puts(o, "\\f");
+        else if (c < 0x20 || (c >= 0x7f && c < 0x10000)) sb_printf(o, "\\u%04x", c);
+        else if (c >= 0x10000) {
+            unsigned v = c - 0x10000;
+            sb_printf(o, "\\u%04x\\u%04x", 0xd800 + (v >> 10), 0xdc00 + (v & 0x3ff));
+        } else { char t[2] = { (char)c, 0 }; sb_puts(o, t); }
+    }
+    sb_puts(o, "\"");
+}
+
+static void put_json_float(sb_t *o, double v);
+
+static void jv_dump(sb_t *o, const jv_t *v)
+{
+    switch (v->t) {
+    case J_NULL: sb_puts(o, "null"); break;
+    case J_TRUE: sb_puts(o, "true"); break;
+    case J_FALSE: sb_puts(o, "false"); break;
+    case J_INT: sb_puts(o, v->num); break;
+    case J_FLOAT: put_json_float(o, v->f); break;
+    case J_STR: put_json_cp(o, v->cp, v->ncp); break;
+    case J_ARR:
+        sb_puts(o, "[");
+        for (size_t i = 0; i < v->n; i++) { if (i) sb_puts(o, ", "); jv_dump(o, v->items[i]); }
+        sb_puts(o, "]");
+        break;
+    case J_OBJ:
+        sb_puts(o, "{");
+        for (size_t i = 0; i < v->n; i++) {
+            if (i) sb_puts(o, ", ");
+            put_json_cp(o, v->kcp[i], v->kcpn[i]);
+            sb_puts(o, ": ");
+            jv_dump(o, v->items[i]);
+        }
+        sb_puts(o, "}");
+        break;
+    }
+}
+
 /* sbd.ReassembleIDASBDlibACARS.consume_l2 with the toolkit's libacars.py
- * wrapper (plain text; json not ported) */
+ * wrapper */
 static la_reasm_ctx *la_ctx;
 static void libacars_consume_l2(sbdobj_t *q)
 {
@@ -446,6 +641,33 @@ static void libacars_consume_l2(sbdobj_t *q)
     if ((is_err && !arg_showerrs) || (is_ping && arg_nopings)) { la_proto_tree_destroy(p); return; }
     char ts[40];
     iso_utc_seconds(q->time, ts, sizeof(ts));
+    if (arg_json) {
+        /* {app, source, timestamp, link_direction,
+         *  acars: json.loads(o.json())['acars']} through json.dumps */
+        la_vstring *v = la_proto_tree_format_json(NULL, p);
+        const char *jp = v && v->str ? v->str : "";
+        jv_t *root = js_value(&jp);
+        const jv_t *acars = NULL;
+        if (root && root->t == J_OBJ) {
+            static const unsigned k[] = { 'a', 'c', 'a', 'r', 's' };
+            for (size_t i = 0; i < root->n; i++) if (cp_eq(root->kcp[i], root->kcpn[i], k, 5)) acars = root->items[i];
+        }
+        if (acars) {                     /* (no "acars" key: KeyError in Python) */
+            sb_t o = { 0 };
+            sb_puts(&o, "{\"app\": {\"name\": \"iridium-toolkit\", \"version\": \"0.0.2\"}, "
+                        "\"source\": {\"transport\": \"iridium\", \"parser\": \"libacars\", \"version\": ");
+            put_json_str(&o, (const unsigned char *)LA_VERSION, strlen(LA_VERSION));
+            sb_printf(&o, "}, \"timestamp\": \"%s\", \"link_direction\": \"%s\", \"acars\": ", ts, q->ul ? "uplink" : "downlink");
+            jv_dump(&o, acars);
+            sb_puts(&o, "}");
+            sb_writeln(&o, out);
+            free(o.s);
+        }
+        jv_free(root);
+        if (v) la_vstring_destroy(v, true);
+        la_proto_tree_destroy(p);
+        return;
+    }
     fprintf(out, "%s %s ", ts, q->ul ? "UL" : "DL");
     if (q->data.d[1] == 0x3) {
         sb_t h = { 0 };
