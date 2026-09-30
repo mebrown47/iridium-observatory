@@ -128,10 +128,13 @@ Status (2026-09-29): **every line matches.**
 | --- | --- | --- | --- |
 | Recordings (raw10m, chan1626, fc10m, q6) | 51,170 | 51,170 | ISY, IDA, I36, IIP, IBC, VOC, VO6, VOZ, IRI, IU3, IIU, ITL, IRA, IME, IMS, I38, IIQ, RAW |
 | Synthetic (`tests/parser_fuzz.py`, seed 7) | 29,500 | 29,500 | IAQ, NXT, MSG, MS3, VOD, VDA, IIR, plus IRI/IME/IMS/RAW error paths |
+| Live, Airspy R2 + L-band patch via SoapySDR, 10 min (2026-09-29) | 50,605 | 50,605 | 18 types incl. real MSG (15) and VDA (1,413); 0 samples dropped |
 
 The Reed-Solomon, CRC-24 and checksum ports were also checked alone against
 the toolkit's Python on 12,000 vectors (codewords with 0-11 symbol errors,
 random data): identical results, correcting and failing alike.
+
+A 60 s live run with `--parsed=full` directly from the R2: 7,485 lines, 0 dropped.
 
 Speed: 34,263 frames parse in 0.22 s (about 150,000 frames/s) against
 3.46 s for iridium-parser.py.
