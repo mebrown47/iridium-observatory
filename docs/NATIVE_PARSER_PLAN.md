@@ -189,6 +189,12 @@ the port prints/skips there, and the generator avoids them.
 
 Done when the corpus' ACARS and SBD output matches the toolkit's line for line.
 
+60 min of live R2 reception (2026-09-29, 395,365 frames, parser-corpus/live-r2/r2live60):
+identical to the toolkit in every mode - the parser (default and --harder, all
+395,365 lines), ida, sbd, acars (plain, json, showerrs, nopings) and libacars
+(plain, json), each with and without --parse-harder. 121 ACARS messages in the
+hour, 138 with --harder.
+
 ## Later, if wanted
 
 `msg`/`page` (pager messages), `ida`/`idapp`/`lap`/`gsmtap` (Wireshark),
