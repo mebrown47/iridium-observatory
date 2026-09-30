@@ -48,6 +48,7 @@
 #include "burst_downmix.h"
 #include "qpsk_demod.h"
 #include "frame_output.h"
+#include "tk_reassembler.h"
 #include "frame_decode.h"
 #include "web_map.h"
 #include "archive.h"
@@ -164,6 +165,7 @@ int use_gardner = 1;
  * while removing ~73% of false positives. 0 disables the filter. */
 float uw_reject_threshold = 0.70f;
 int parsed_mode = 0;
+int reassemble_mode = 0;         /* --reassemble: tkr_mode_t, 0 = off */
 char *replay_raw_path = NULL;   /* --replay-raw: RAW lines in, output stage only */
 static uint64_t replay_t0_ns = 0;
 int use_chase = 0;
@@ -557,7 +559,12 @@ static void handle_demod_frame(demod_frame_t *demod)
 
     /* Output: --parsed=full: every frame as iridium-parser.py prints it;
      * --parsed: the IDA line when there is one, otherwise RAW */
-    if (parsed_mode == 2)
+    if (reassemble_mode) {
+        /* --reassemble: the parsed line goes to the reassembler, not stdout */
+        static char pl[16384];
+        frame_output_format_parsed(demod, pl, sizeof(pl));
+        tkr_line(pl);
+    } else if (parsed_mode == 2)
         frame_output_print_parsed(demod);
     else if (parsed_mode && ida_ok)
         frame_output_print_ida(&burst);
@@ -1039,6 +1046,9 @@ static void sig_handler(int signo) {
  * shutdown of every output (shared by the live pipeline and --replay-raw). */
 static void shutdown_outputs(void)
 {
+    if (reassemble_mode)
+        tkr_end();
+
     /* One last solve over every measurement received. The periodic solves run
      * every 10 s of wall time and warm-start from the previous one, so when a
      * file is decoded faster than real time their results depend on timing;
@@ -1134,6 +1144,8 @@ int main(int argc, char **argv) {
     fftw_lock_init();
     fftw_load_wisdom();
     frame_output_init(file_info);
+    if (reassemble_mode)
+        tkr_init((tkr_mode_t)reassemble_mode, stdout);
 
 #ifdef HAVE_ZMQ
     if (zmq_enabled) {

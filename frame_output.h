@@ -32,6 +32,9 @@ void frame_output_print(demod_frame_t *frame);
  * line (bits_parser.c) instead of the RAW: line. */
 void frame_output_print_parsed(demod_frame_t *frame);
 
+/* The same line into out (no newline); returns its full length. */
+int frame_output_format_parsed(demod_frame_t *frame, char *out, size_t n);
+
 #include "ida_decode.h"
 
 /* Print one decoded IDA burst in iridium-parser.py parsed format to stdout. */

@@ -156,11 +156,34 @@ something instead; no corpus line hits these.
 
 ## Phase 2 — ACARS and SBD
 
-- [ ] IDA reassembly equivalent to `iridiumtk/reassembler/ida.py` (multi-burst IDA messages) — the base for both.
-- [ ] `sbd` mode: same lines as `reassembler.py -m sbd`.
-- [ ] `acars` mode: same lines as `reassembler.py -m acars`; `libacars` mode where libacars-2 is available.
-- [ ] Reconcile with `sbd_acars.c`: compare its reassembly against the reference on the corpus first. Keep it where it matches, fix it where it doesn't, and give the web map / UDP / archive paths the same reassembled messages as the text output.
-- [ ] Output switch: `--reassemble=acars|sbd` (text on stdout, like the toolkit), alongside the existing live consumers.
+`tk_reassembler.c` ports `reassembler.py` with `iridiumtk/reassembler/`
+`base.py`, `ida.py` and `sbd.py`. `--reassemble=ida|sbd|acars` feeds each
+frame's parsed line (phase 1) to it and prints what
+`iridium-parser.py | reassembler.py -m MODE` prints, summary lines included;
+it works live and with `--replay-raw`. `tests/reasm_check.c` runs it on
+parser lines; `tests/reasm_fuzz.py` makes synthetic IDA lines.
+
+Status (2026-09-29):
+
+| Input | ida | sbd | acars |
+| --- | --- | --- | --- |
+| Corpus (fc10m, q6, raw10m, chan1626) | 2,747 / 2,747 | 63 / 63 | 34 / 34 |
+| Live R2, 10 min | 1,775 / 1,775 | 62 / 62 | 28 / 28 (21 ACARS messages) |
+| Synthetic, seeds 3-5 | 23,545 / 23,545 | 15,621 / 15,621 | 5,090 / 5,090 |
+
+(lines identical / lines). The recordings hold no multi-packet SBD and no
+uplink ACARS; the synthetic set does (980 multi-packet messages per seed;
+UL with SEQ/FNO, NAK, ETB, header blocks, bad parity/CRC/ETX, duplicates,
+orphans, expiry). Two inputs make reassembler.py raise instead of printing -
+an SBD packet with msgno 1 and no count, and an uplink ACARS without STX;
+the port prints/skips there, and the generator avoids them.
+
+- [x] IDA reassembly (`ida` mode) — the base for both.
+- [x] `sbd` mode.
+- [x] `acars` mode, plain text.
+- [ ] `acars` `-a json` (and `showerrs`, `nopings`, `perfect` options).
+- [ ] `libacars` mode (libacars-2, already linked optionally for sbd_acars.c).
+- [ ] Reconcile with `sbd_acars.c` (the web map / UDP / archive path) — compare its reassembly with this one on the corpus, then share one.
 
 Done when the corpus' ACARS and SBD output matches the toolkit's line for line.
 

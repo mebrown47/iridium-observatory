@@ -213,6 +213,12 @@ void frame_output_print(demod_frame_t *frame)
     buf_flush(!suppress_stdout);
 }
 
+int frame_output_format_parsed(demod_frame_t *frame, char *out, size_t n)
+{
+    format_raw_line(frame);
+    return bp_parse_line(line_buf, out, n);
+}
+
 /* --parsed=full: the line iridium-parser.py would print for the frame's
  * RAW: line (bits_parser.c), in its place. */
 void frame_output_print_parsed(demod_frame_t *frame)
@@ -221,9 +227,8 @@ void frame_output_print_parsed(demod_frame_t *frame)
     if (suppress_stdout && !ZMQ_ACTIVE)
         return;
 
-    format_raw_line(frame);
     static char parsed[LINE_BUF_SIZE * 2];
-    int n = bp_parse_line(line_buf, parsed, sizeof(parsed));
+    int n = frame_output_format_parsed(frame, parsed, sizeof(parsed));
     buf_start();
     buf_printf("%s", parsed);
     if (n >= (int)sizeof(parsed))
