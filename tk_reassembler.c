@@ -21,6 +21,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef HAVE_LIBACARS
+#include <sys/time.h>
+#include <libacars/libacars.h>
+#include <libacars/acars.h>
+#include <libacars/reassembly.h>
+#include <libacars/vstring.h>
+#endif
 
 /* ------------------------------------------------------------ bytes, text */
 
@@ -232,12 +239,19 @@ tkr_mode_t tkr_mode_from_name(const char *name)
     if (!strcmp(name, "ida")) return TKR_IDA;
     if (!strcmp(name, "sbd")) return TKR_SBD;
     if (!strcmp(name, "acars")) return TKR_ACARS;
+#ifdef HAVE_LIBACARS
+    if (!strcmp(name, "libacars")) return TKR_LIBACARS;
+#endif
     return TKR_OFF;
 }
 
 void tkr_init(tkr_mode_t m, FILE *o)
 {
     mode = m; out = o;
+    if (mode == TKR_LIBACARS && arg_json) {
+        fprintf(stderr, "--reassemble=libacars,json is not ported (plain libacars text only)\n");
+        exit(1);
+    }
     /* ida.py filter regex (one " cont=" per IDA line, so leftmost-longest
      * POSIX matching picks the same groups as Python's) */
     if (regcomp(&re_ida, "^.* cont=([0-9]) ([0-9]) ctr=([0-9]+) [0-9]+ len=([0-9]+) 0:.000 "
@@ -406,8 +420,53 @@ static void sbd_consume_l2(sbdobj_t *q)
     free(hdr.s);
 }
 
+#ifdef HAVE_LIBACARS
+/* sbd.ReassembleIDASBDlibACARS.consume_l2 with the toolkit's libacars.py
+ * wrapper (plain text; json not ported) */
+static la_reasm_ctx *la_ctx;
+static void libacars_consume_l2(sbdobj_t *q)
+{
+    if (q->data.n <= 2) return;
+    if (q->data.d[0] != 1) return;
+    la_msg_dir d = q->ul ? LA_MSG_DIR_AIR2GND : LA_MSG_DIR_GND2AIR;
+    bytes_t x = b_slice(q->data, 1, (long)q->data.n);
+    if (x.n && x.d[0] == 3) { bytes_t y = b_slice(x, 8, (long)x.n); b_free(&x); x = y; }
+    if (!la_ctx) la_ctx = la_reasm_ctx_new();
+    /* libacars.py: timeval(int(time), int(time-int(time))*1000000) - the
+     * microseconds are always 0 (int() of the fraction first) */
+    struct timeval tv = { (time_t)(long)q->time, 0 };
+    la_proto_node *p = la_acars_parse_and_reassemble(x.d, (int)x.n, d, la_ctx, tv);
+    b_free(&x);
+    if (!p) return;                     /* Python: NULL pointer access (raises) */
+    int is_acars = p->td && p->td->json_key && !strcmp(p->td->json_key, "acars");
+    la_acars_msg *am = is_acars ? (la_acars_msg *)p->data : NULL;
+    int is_err = am ? am->err : 0;
+    int is_ping = am && !am->err && (!strcmp(am->label, "_d") || !strcmp(am->label, "Q0"));
+    int interesting = !is_acars || p->next != NULL;
+    if ((is_err && !arg_showerrs) || (is_ping && arg_nopings)) { la_proto_tree_destroy(p); return; }
+    char ts[40];
+    iso_utc_seconds(q->time, ts, sizeof(ts));
+    fprintf(out, "%s %s ", ts, q->ul ? "UL" : "DL");
+    if (q->data.d[1] == 0x3) {
+        sb_t h = { 0 };
+        bytes_t hh = b_slice(q->data, 1, 9);
+        put_hex(&h, hh, NULL);
+        fprintf(out, "[hdr: %s] ", sb_str(&h));
+        free(h.s); b_free(&hh);
+    }
+    if (interesting) fputs("INTERESTING ", out);
+    la_vstring *v = la_proto_tree_format_text(NULL, p);
+    fprintf(out, "%s\n", v && v->str ? v->str : "");
+    if (v) la_vstring_destroy(v, true);
+    la_proto_tree_destroy(p);
+}
+#endif
+
 static void consume_l2(sbdobj_t *p)
 {
+#ifdef HAVE_LIBACARS
+    if (mode == TKR_LIBACARS) { libacars_consume_l2(p); return; }
+#endif
     if (mode == TKR_ACARS) acars_consume_l2(p);
     else sbd_consume_l2(p);
 }
@@ -681,7 +740,7 @@ void tkr_end(void)
     fprintf(out, "%ld/%ld (%3.1f%%) broken fragments.\n", stat_broken, stat_fragments,
             100.0 * stat_broken / (stat_fragments ? stat_fragments : 1));
     fprintf(out, "%ld dupes removed.\n", stat_dupes);
-    if (mode == TKR_SBD || mode == TKR_ACARS) {
+    if (mode == TKR_SBD || mode == TKR_ACARS || mode == TKR_LIBACARS) {
         fprintf(out, "SBD: %ld short & %ld single messages. (%1.1f%%).\n", sbd_short, sbd_single,
                 100 * (double)(sbd_short + sbd_single) / (sbd_cnt ? sbd_cnt : 1));
         fprintf(out, "SBD: %ld successful multi-pkt messages.\n", sbd_multi);

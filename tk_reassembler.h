@@ -14,9 +14,10 @@
 
 #include <stdio.h>
 
-typedef enum { TKR_OFF = 0, TKR_IDA, TKR_SBD, TKR_ACARS } tkr_mode_t;
+typedef enum { TKR_OFF = 0, TKR_IDA, TKR_SBD, TKR_ACARS, TKR_LIBACARS } tkr_mode_t;
 
-/* "ida", "sbd" or "acars" -> mode; TKR_OFF if unknown */
+/* "ida", "sbd", "acars" or (built with libacars-2) "libacars" -> mode;
+ * TKR_OFF if unknown */
 tkr_mode_t tkr_mode_from_name(const char *name);
 
 /* reassembler.py -a options: json, showerrs, nopings, perfect (accepted,

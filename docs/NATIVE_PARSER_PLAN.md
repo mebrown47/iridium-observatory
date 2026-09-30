@@ -182,7 +182,8 @@ the port prints/skips there, and the generator avoids them.
 - [x] `sbd` mode.
 - [x] `acars` mode, plain text.
 - [x] `acars` options, as `--reassemble=acars,json,showerrs,...` (`-a json,showerrs,...`): `json`, `showerrs`, `nopings`, `perfect` (accepted; no effect in these modes). Seeds 6-8: all 6 option combinations identical (≈13,000 acars lines per seed), live set too. Fixed on the way: ACARS fields are written byte for byte (Python prints NULs in `REG:` etc.).
-- [ ] `libacars` mode (libacars-2, already linked optionally for sbd_acars.c).
+- [x] `libacars` mode, plain text (with `showerrs`, `nopings`), when built with libacars-2: the same libacars calls as the toolkit's libacars.py wrapper, including its quirk of always passing 0 µs to the reassembly. Identical on the live set, q6, fc10m and a synthetic set (14,874 / 17,138 / 11,267 lines plain / showerrs / nopings).
+- [ ] `libacars` `json` (the toolkit re-serializes libacars' JSON with Python's json module; refused for now).
 - [ ] Reconcile with `sbd_acars.c` (the web map / UDP / archive path) — compare its reassembly with this one on the corpus, then share one.
 
 Done when the corpus' ACARS and SBD output matches the toolkit's line for line.

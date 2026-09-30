@@ -588,7 +588,7 @@ void parse_options(int argc, char **argv) {
                 char *tok = strtok_r(spec, ",", &save);
                 reassemble_mode = tok ? (int)tkr_mode_from_name(tok) : 0;
                 if (!reassemble_mode)
-                    errx(1, "--reassemble: ida, sbd or acars[,json|showerrs|nopings|perfect] (got '%s')", optarg);
+                    errx(1, "--reassemble: ida, sbd, acars or libacars[,json|showerrs|nopings|perfect] (got '%s')", optarg);
                 while ((tok = strtok_r(NULL, ",", &save)))
                     if (tkr_set_arg(tok) != 0)
                         errx(1, "--reassemble: unknown option '%s' (json, showerrs, nopings, perfect)", tok);
