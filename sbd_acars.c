@@ -412,6 +412,21 @@ static uint16_t crc16_kermit(const uint8_t *data, int len)
 }
 #endif
 
+/* H1 sublabel T2 is an encrypted or compressed payload (seen on business
+ * jets): it passes CRC, but its text is armored binary that reads as noise
+ * in the web tabs. Show a marker there instead; the archive and the
+ * aggregator feeds keep the raw text. Returns txt or buf. */
+static const char *web_text(const char *label, const char *sublabel,
+                            const char *txt, char *buf, size_t n)
+{
+    if (label[0] == 'H' && label[1] == '1' && sublabel &&
+        sublabel[0] == 'T' && sublabel[1] == '2') {
+        snprintf(buf, n, "[encoded payload, %zu chars]", strlen(txt));
+        return buf;
+    }
+    return txt;
+}
+
 /* ---- SBD multi-packet reassembly ---- */
 
 #define SBD_MAX_MULTI    8
@@ -923,8 +938,11 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
         if (!is_heartbeat) {
             const char *tail = msg->reg;
             while (*tail == '.') tail++;
-            web_map_add_acars_message(tail, msg->flight_id,
-                                       msg->label, msg->txt, ul, timestamp);
+            char wbuf[48];
+            web_map_add_acars_message(tail, msg->flight_id, msg->label,
+                                       web_text(msg->label, msg->sublabel,
+                                                msg->txt, wbuf, sizeof(wbuf)),
+                                       ul, timestamp);
         }
     }
     /* TEST/EVAL tab — readable structured flight messages only.
@@ -958,8 +976,11 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
         if (is_premium) {
             const char *tail = msg->reg;
             while (*tail == '.') tail++;
-            web_map_add_premium_msg(tail, msg->flight_id,
-                                     msg->label, msg->txt, ul, timestamp);
+            char wbuf[48];
+            web_map_add_premium_msg(tail, msg->flight_id, msg->label,
+                                     web_text(msg->label, msg->sublabel,
+                                              msg->txt, wbuf, sizeof(wbuf)),
+                                     ul, timestamp);
         }
     }
 
@@ -1468,6 +1489,17 @@ static void acars_output_text(const uint8_t *data, int len, int ul,
     fflush(stdout);
 }
 
+/* Without libacars the H1 sublabel is still at the head of the text:
+ * "- #XX" from the ground, "#XXB" from the aircraft. */
+static const char *fallback_sublabel(const char *txt, int ul)
+{
+    if (!ul && strncmp(txt, "- #", 3) == 0 && txt[3] && txt[4])
+        return txt + 3;
+    if (ul && txt[0] == '#' && txt[1] && txt[2] && txt[3] == 'B')
+        return txt + 1;
+    return NULL;
+}
+
 static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                                   uint64_t timestamp, double frequency,
                                   float magnitude)
@@ -1613,7 +1645,10 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                            txt_len : (int)sizeof(txt_z) - 1;
                 memcpy(txt_z, txt, zlen);
                 txt_z[zlen] = '\0';
-                web_map_add_acars_message(reg, flight, label, txt_z,
+                char wbuf[48];
+                web_map_add_acars_message(reg, flight, label,
+                                           web_text(label, fallback_sublabel(txt_z, ul),
+                                                    txt_z, wbuf, sizeof(wbuf)),
                                            ul, timestamp);
             }
         /* ADS-C decode via libacars for TEST/EVAL tab (AT1 position reports) */
@@ -1768,9 +1803,13 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                 else if (ptxt[0]>='0' && ptxt[0]<='9') is_premium = 1;
                 else if (ptxt[0]=='D' || ptxt[0]=='M') is_premium = 1;
             }
-            if (is_premium)
-                web_map_add_premium_msg(reg, flight, label, txt_z2,
+            if (is_premium) {
+                char wbuf[48];
+                web_map_add_premium_msg(reg, flight, label,
+                                         web_text(label, fallback_sublabel(txt_z2, ul),
+                                                  txt_z2, wbuf, sizeof(wbuf)),
                                          ul, timestamp);
+            }
         }
     }
 
