@@ -307,9 +307,22 @@ else
     SNIFFER_ARGS="$SDR --acars"
     yes_no "Power an LNA through the SDR's bias tee" n && SNIFFER_ARGS+=" -B"
     yes_no "Estimate this receiver's position from Doppler" y && SNIFFER_ARGS+=" --position"
+    nfeed=0
     if yes_no "Feed ACARS to airframes.io" n; then
-      SNIFFER_ARGS+=" --feed"
-      st="$(ask "Station ID for airframes.io (blank for none)" "")"
+      SNIFFER_ARGS+=" --feed"; nfeed=1
+    fi
+    # Any other aggregator or a local acarshub: HOST:PORT means UDP; a
+    # tcp:// or udp:// prefix is passed through. The sniffer takes 4 at most.
+    for f in $(ask "Other ACARS feeds, HOST:PORT or tcp://HOST:PORT, space-separated (blank for none)" ""); do
+      case "$f" in udp://*|tcp://*) ;; *) f="udp://$f";; esac
+      if ! [[ "$f" =~ ^(udp|tcp)://[^:/[:space:]]+:[0-9]+$ ]]; then
+        warn "skipping '$f' — expected HOST:PORT"; continue
+      fi
+      if [ "$nfeed" -ge 4 ]; then warn "skipping '$f' — at most 4 feeds"; continue; fi
+      SNIFFER_ARGS+=" --feed=$f"; nfeed=$((nfeed+1))
+    done
+    if [ "$nfeed" -gt 0 ]; then
+      st="$(ask "Station ID for your ACARS feeds (blank for none)" "")"
       [ -n "$st" ] && SNIFFER_ARGS+=" --station=$st"
     fi
     if yes_no "Feed aircraft positions (SBS/BaseStation) to an aggregator" n; then
