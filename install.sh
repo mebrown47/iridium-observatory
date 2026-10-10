@@ -312,6 +312,11 @@ else
       st="$(ask "Station ID for airframes.io (blank for none)" "")"
       [ -n "$st" ] && SNIFFER_ARGS+=" --station=$st"
     fi
+    if yes_no "Feed aircraft positions (SBS/BaseStation) to an aggregator" n; then
+      bs="$(ask "Aggregator HOST:PORT" "thebaldgeek.net:2226")"
+      SNIFFER_ARGS+=" --basestation=$bs"
+      yes_no "Include beam-estimated positions in that feed" y && SNIFFER_ARGS+=" --basestation-beam"
+    fi
   fi
   SNIFFER_ARGS="$(echo "$SNIFFER_ARGS" | sed 's/^ *//; s/  */ /g')"
   root_write "$CONF" 0644 <<EOF
@@ -359,6 +364,22 @@ ok "version $(cat "$STAGE/VERSION")"
 as_root mkdir -p "$ARCHIVE_DIR"
 as_root chown -R "$RUN_USER:" "$DATA_DIR"
 ok "data in $DATA_DIR"
+
+# --basestation can't place an aircraft without the registration database;
+# without it the feed connects and then sends nothing. tar1090-db updates
+# about monthly, so refetch when the copy is older than that.
+if grep -qE '(^| )--basestation([ =]|$)' <<<" $SNIFFER_ARGS"; then
+  ACDB="$HOME/.iridium-sniffer/aircraft.csv"
+  if [ -n "$(find "$ACDB" -mtime -30 2>/dev/null)" ]; then
+    ok "aircraft database is current ($ACDB)"
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    printf '  %s[dry-run]%s %s\n' "$Y" "$Z" "$PREFIX/bin/iridium-sniffer --update-db"
+  elif "$PREFIX/bin/iridium-sniffer" --update-db; then
+    ok "aircraft database downloaded ($ACDB)"
+  else
+    warn "aircraft database download failed — the SBS feed will be empty until: iridium-sniffer --update-db"
+  fi
+fi
 
 # ---- sniffer service --------------------------------------------------------
 info "Sniffer service"
