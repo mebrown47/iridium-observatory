@@ -1006,7 +1006,11 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
         la_proto_node *an = la_proto_tree_find_adsc(tree);
         if (an && an->data) {
             la_adsc_msg_t *am = (la_adsc_msg_t *)an->data;
-            if (!am->err && am->tag_list) {
+            /* Reports only travel air-to-ground (ul). Uplink tags reuse the
+             * same numbers for contract requests -- tag 7 is a periodic
+             * contract, not a basic report -- so reading an uplink's tag
+             * data as a report places the aircraft at garbage, often 0,0. */
+            if (ul && !am->err && am->tag_list) {
                 for (la_list *l = am->tag_list; l; l = l->next) {
                     la_adsc_tag_t *t = (la_adsc_tag_t *)l->data;
                     if (!t || !t->data) continue;
@@ -1625,7 +1629,8 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                 la_proto_node *an = la_proto_tree_find_adsc(atree);
                 if (an && an->data) {
                     la_adsc_msg_t *am = (la_adsc_msg_t *)an->data;
-                    if (!am->err && am->tag_list) {
+                    /* Air-to-ground only; see acars_parse_libacars. */
+                    if (ul && !am->err && am->tag_list) {
                         double apos_lat = 0.0, apos_lon = 0.0;
                         int aadsc_alt = -99999, aadsc_pos = 0;
                         char aadsc_flt[10] = {0};
