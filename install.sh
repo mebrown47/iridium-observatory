@@ -303,6 +303,14 @@ else
       n="$(ask "Which one" 1)"
       [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#IFACES[@]}" ] || n=1
       SDR="$(sdr_args "${IFACES[$((n-1))]}")"
+      # Written out even at the default so the setting is visible in $CONF.
+      if [[ "$SDR" == "-i airspy-"* ]]; then
+        g="$(ask "Airspy gain, sensitivity preset 0-21 (higher = more gain)" 12)"
+        if ! [[ "$g" =~ ^[0-9]+$ ]] || [ "$g" -gt 21 ]; then
+          warn "'$g' is not 0-21 — using 12"; g=12
+        fi
+        SDR+=" --airspy-sensitivity=$g"
+      fi
     fi
     SNIFFER_ARGS="$SDR --acars"
     yes_no "Power an LNA through the SDR's bias tee" n && SNIFFER_ARGS+=" -B"
