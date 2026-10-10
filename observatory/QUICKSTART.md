@@ -4,6 +4,10 @@ The Observatory is a read-only dashboard (Trends · Aviation · Doppler) that re
 the `iridium-sniffer --archive` logs. It never touches the RF engine. Stdlib
 Python 3 only — **no pip, no packages to install.**
 
+> **Installed with `./install.sh` at the repo root? Then the Observatory is
+> already set up** (dashboard on :8890, reading `/var/lib/iridium-observatory`).
+> This page is for adding it to a sniffer you installed by hand.
+
 ## Prerequisites
 
 1. **A working `iridium-sniffer` checkout** on the receiver box (the same repo

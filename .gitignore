@@ -14,3 +14,5 @@ aircraft.csv
 # Local archive output + release bundles
 archive/
 *.zip
+build-install/
+build-install.log

@@ -45,6 +45,35 @@ See [docs/NEW_FEATURES.md](docs/NEW_FEATURES.md), [docs/HOW_IT_WORKS.md](docs/HO
 
 ## Installation
 
+### Quick install (recommended)
+
+On Debian, Ubuntu, Raspberry Pi OS or DragonOS, with your SDR plugged in:
+
+```bash
+git clone https://github.com/mebrown47/iridium-observatory.git
+cd iridium-observatory
+./install.sh
+```
+
+Run it as your normal user; it uses `sudo` when it needs to. It installs the packages for the SDR it finds on USB (building libacars from source where the distro has no package), builds, runs the tests, asks a few questions (which SDR, bias tee, Doppler positioning, airframes.io feed), and sets up the receiver and the Observatory as services that start at boot. It ends by printing the two URLs: the live map on port 8888 and the Observatory on 8890.
+
+| Path | What |
+|---|---|
+| `/etc/iridium-observatory.conf` | your settings: edit this, then `sudo systemctl restart iridium-sniffer` |
+| `/var/lib/iridium-observatory/` | `archive/` (daily JSONL) and `observatory.db` |
+| `/opt/iridium-observatory/` | the installed program; `iridium-sniffer` is linked into `/usr/local/bin` |
+
+```bash
+./install.sh --update        # git pull, rebuild, test, reinstall, restart
+./install.sh --reconfigure   # answer the questions again (new SDR, feeds)
+./install.sh --dry-run       # show what it would do as root, change nothing
+./install.sh --uninstall     # remove services and program (keeps settings and data)
+```
+
+If you already run `iridium-sniffer` from a hand-written systemd unit, the installer offers to keep that unit's flags and to copy its archive history, and saves a copy of the old unit in `/var/lib/iridium-observatory/`.
+
+The sections below are for building by hand.
+
 ### DragonOS Noble
 
 DragonOS Noble ships with HackRF, BladeRF, USRP (UHD), SoapySDR, and OpenCL drivers pre-installed. Just clone and build:
@@ -75,8 +104,9 @@ sudo apt install libuhd-dev         # USRP (B2x0, N2x0, X3x0, etc.)
 sudo apt install libsoapysdr-dev    # RTL-SDR, Airspy, LimeSDR, etc. via SoapySDR
 # SDRplay native API: install from https://www.sdrplay.com/api/
 
-# Optional: ACARS ARINC-622/ADS-C/CPDLC decoding
-sudo apt install libacars-dev        # libacars-2
+# Optional: ACARS ARINC-622/ADS-C/CPDLC decoding (libacars-2)
+sudo apt install libacars-dev        # where packaged; Ubuntu 24.04 has none, so build
+                                     # https://github.com/szpajder/libacars v2.2.1 from source
 
 # Optional: ZMQ multi-consumer output (replaces stdout piping)
 sudo apt install libzmq3-dev         # --zmq flag
