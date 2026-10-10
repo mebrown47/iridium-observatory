@@ -66,15 +66,15 @@ extern int bladerf_num;
 #ifdef HAVE_UHD
 extern char *usrp_serial;
 #endif
-#ifdef HAVE_SOAPYSDR
-extern int soapy_num;
-extern char *soapy_args;
 #ifdef HAVE_AIRSPY
 extern char *airspy_serial;
 extern int airspy_selected;
 extern int airspy_lna_gain, airspy_mixer_gain, airspy_vga_gain;
 extern int airspy_linearity_gain, airspy_sensitivity_gain, airspy_packing;
 #endif
+#ifdef HAVE_SOAPYSDR
+extern int soapy_num;
+extern char *soapy_args;
 #define SOAPY_SETTINGS_MAX 8
 extern char *soapy_setting_keys[SOAPY_SETTINGS_MAX];
 extern char *soapy_setting_vals[SOAPY_SETTINGS_MAX];
