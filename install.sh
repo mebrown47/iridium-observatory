@@ -227,7 +227,8 @@ cmake -S "$REPO_ROOT" -B "$BUILD_DIR" "${CMAKE_FLAGS[@]}" > "$BUILD_DIR.log" 2>&
   || { tail -20 "$BUILD_DIR.log"; die "build failed — full log: $BUILD_DIR.log"; }
 BIN="$BUILD_DIR/iridium-sniffer"
 ok "built $BIN"
-if ldd "$BIN" | grep -q libacars; then ok "libacars linked (ACARS/CPDLC/ADS-C decode on)"
+# Ask CMake, not ldd: a static libacars never shows up in ldd output.
+if grep -q 'libacars: enabled' "$BUILD_DIR.log"; then ok "libacars enabled (ACARS/CPDLC/ADS-C decode on)"
 else warn "built WITHOUT libacars — ARINC-622 (CPDLC/ADS-C) decode will be off"; fi
 
 info "Testing"
