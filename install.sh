@@ -236,6 +236,56 @@ SKIP_ORACLE=1 "$REPO_ROOT/tests/run_tests.sh" > "$BUILD_DIR/tests.log" 2>&1 \
   || { tail -20 "$BUILD_DIR/tests.log"; die "tests failed — not installing. Log: $BUILD_DIR/tests.log"; }
 ok "$(grep '^RESULT' "$BUILD_DIR/tests.log")"
 
+# ---- device access ----------------------------------------------------------
+# The service runs headless as $RUN_USER with SupplementaryGroups=plugdev, so
+# every SDR's USB node must be group-writable by plugdev. The HackRF and
+# RTL-SDR packages' rules do that, and so does libairspy0's on Ubuntu 24.04
+# (group plugdev, default mode 664). On 22.04 it only grants an ACL to whoever
+# is logged in at the screen: the Airspy works while someone is logged in and
+# fails after a reboot. The rule below covers both (and distros like DragonOS).
+info "Device access"
+SDR_RULE=/etc/udev/rules.d/52-iridium-observatory-sdr.rules
+LIST_AS=()
+if getent group plugdev >/dev/null 2>&1; then
+  root_write "$SDR_RULE" 0644 <<'RULE'
+# Written by iridium-observatory install.sh: let the plugdev group (the
+# iridium-sniffer service's) open these SDRs, logged in at the screen or not.
+# Airspy R2 / Mini
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="60a1", MODE="0660", GROUP="plugdev"
+RULE
+  as_root udevadm control --reload-rules
+  as_root udevadm trigger --subsystem-match=usb --attr-match=idVendor=1d50 --attr-match=idProduct=60a1
+  as_root udevadm settle --timeout=10 || true
+  ok "udev rule: plugdev can open an Airspy ($SDR_RULE)"
+  if [[ " $(id -nG "$RUN_USER") " != *" plugdev "* ]]; then
+    as_root usermod -aG plugdev "$RUN_USER"
+    warn "added $RUN_USER to plugdev: log out and back in to use the SDR from your own shell"
+  fi
+  # This shell may predate that membership, and an SSH login has no console
+  # ACL: list devices with plugdev so the config step can see them.
+  if [ "$DRY_RUN" -eq 0 ] && [[ " $(id -nG) " != *" plugdev "* ]]; then
+    LIST_AS=(sudo -u "$RUN_USER" -g plugdev)
+  fi
+else
+  warn "no plugdev group on this system: the service may not be able to open the SDR"
+fi
+# Every SDR on USB now: group plugdev and group-writable, or world-writable?
+for d in /sys/bus/usb/devices/*; do
+  [ -r "$d/idVendor" ] || continue
+  v="$(<"$d/idVendor")"; p="$(<"$d/idProduct")"
+  case "$v:$p" in
+    1d50:6089|1d50:604b|1d50:cc15|1d50:60a1|0bda:2832|0bda:2838|2cf0:5246|2cf0:5250|1d50:6066|1df7:*) ;;
+    *) continue;;
+  esac
+  node="$(printf '/dev/bus/usb/%03d/%03d' "$(<"$d/busnum")" "$(<"$d/devnum")")"
+  g="$(stat -c %G "$node" 2>/dev/null)"; m="$(stat -c %a "$node" 2>/dev/null)"
+  if { [ "$g" = plugdev ] && (( 8#${m:-0} & 8#020 )); } || (( 8#${m:-0} & 8#002 )); then
+    ok "SDR $v:$p ($node): group $g, mode $m"
+  else
+    warn "SDR $v:$p ($node) is group $g, mode $m: the service can't open it. Unplug it and plug it back in; if the warning stays, the distro's udev rules override ours"
+  fi
+done
+
 # ---- config -----------------------------------------------------------------
 # Default sniffer flags for a device, by its --list interface name.
 sdr_args() {
@@ -251,7 +301,7 @@ sdr_args() {
 }
 # Interfaces the new binary can see, native drivers first, one per line.
 list_interfaces() {
-  timeout 20 "$BIN" --list 2>/dev/null | awk '
+  "${LIST_AS[@]}" timeout 20 "$BIN" --list 2>/dev/null | awk '
     /^  (hackrf-|airspy-|bladerf|usrp-|sdrplay-)/ { print $1; next }
     /^  soapy-[0-9]/ { drv=$2; if (drv != "audio") soapy[++n]="soapy:driver=" drv }
     END { for (i=1;i<=n;i++) print soapy[i] }' | awk '!seen[$0]++'
