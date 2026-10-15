@@ -37,6 +37,8 @@ the receiver does.
 
 ## Install
 
+**New to Linux or the terminal?** Follow the step-by-step [Quick Start](QUICKSTART.md).
+
 With your SDR plugged in:
 
 ```bash
@@ -175,6 +177,7 @@ fork adds:
 
 | Document | For |
 |---|---|
+| [QUICKSTART.md](QUICKSTART.md) | Installing step by step, assuming only that you can open a terminal |
 | [docs/ENGINE_REFERENCE.md](docs/ENGINE_REFERENCE.md) | Building by hand, every command-line option, piping to other tools, hardware notes |
 | [docs/NEW_FEATURES.md](docs/NEW_FEATURES.md) | The decoding this fork added, in plain language |
 | [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) | How a burst becomes a decoded message |
