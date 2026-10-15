@@ -54,9 +54,11 @@ int doppler_pos_get_active_sats(int *sat_ids, double *latest_freq,
                                   uint64_t *latest_timestamp,
                                   uint64_t now_ns, int max_out);
 /* Returns recent frequency/timestamp history for one satellite, oldest
- * first. Writes up to max_out entries. Returns count written, or 0 if
- * sat_id is unknown. */
+ * first, and when ecef_km is not NULL the satellite position each IRA
+ * carried (ECEF, km). Writes up to max_out entries. Returns count written,
+ * or 0 if sat_id is unknown. */
 int doppler_pos_get_history(int sat_id, double *freqs,
-                              uint64_t *timestamps, int max_out);
+                              uint64_t *timestamps, double (*ecef_km)[3],
+                              int max_out);
 
 #endif

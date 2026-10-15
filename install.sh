@@ -370,6 +370,8 @@ cp "$BIN" "$STAGE/bin/"
 for p in "$BUILD_DIR"/libiridium-sniffer-gpu.*; do [ -e "$p" ] && cp "$p" "$STAGE/bin/"; done
 cp "$REPO_ROOT/data/waypoints.csv" "$STAGE/data/"
 cp "$REPO_ROOT"/observatory/*.py "$REPO_ROOT/observatory/install_observatory.sh" "$STAGE/observatory/"
+cp -r "$REPO_ROOT/observatory/sgp4" "$STAGE/observatory/"   # vendored, pure Python
+rm -rf "$STAGE/observatory/sgp4/__pycache__"
 git -C "$REPO_ROOT" describe --always --dirty --tags > "$STAGE/VERSION" 2>/dev/null || echo unknown > "$STAGE/VERSION"
 # Swap the whole tree in by rename, so the services never see half a copy.
 as_root mkdir -p "$(dirname "$PREFIX")"

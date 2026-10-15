@@ -996,15 +996,22 @@ static int build_doppler_json(char *buf, int bufsize)
     if (ref_ns == 0)
         ref_ns = now_ns;
 
+    /* wall_ms beside now_ms shows how far the frame clock has fallen behind;
+     * consumers that need true time (the Observatory's orbit work) recover
+     * it precisely from x/y/z, the satellite position each IRA carried. */
     int off = snprintf(buf, bufsize, "{\"enabled\":true,\"now_ms\":%llu,"
-                       "\"sats\":[",
-                       (unsigned long long)(ref_ns / 1000000ULL));
+                       "\"wall_ms\":%llu,\"sats\":[",
+                       (unsigned long long)(ref_ns / 1000000ULL),
+                       (unsigned long long)(now_ns / 1000000ULL));
 
     int emitted = 0;
-    for (int i = 0; i < n && off < bufsize - 512; i++) {
+    /* Room for one satellite's worst case (~45 bytes a measurement) before
+     * starting it, so a full buffer drops whole satellites, not array tails. */
+    for (int i = 0; i < n && off < bufsize - DOPPLER_HIST_MAX * 48 - 512; i++) {
         double freqs[DOPPLER_HIST_MAX];
         uint64_t stamps[DOPPLER_HIST_MAX];
-        int h = doppler_pos_get_history(sat_ids[i], freqs, stamps,
+        double ecef[DOPPLER_HIST_MAX][3];
+        int h = doppler_pos_get_history(sat_ids[i], freqs, stamps, ecef,
                                         DOPPLER_HIST_MAX);
         if (h <= 0)
             continue;
@@ -1019,6 +1026,13 @@ static int build_doppler_json(char *buf, int bufsize)
         for (int j = 0; j < h && off < bufsize - 64; j++)
             off += snprintf(buf + off, bufsize - off, "%s%.1f", j ? "," : "",
                             freqs[j]);
+        static const char *axis[3] = { "x", "y", "z" };
+        for (int k = 0; k < 3; k++) {
+            off += snprintf(buf + off, bufsize - off, "],\"%s\":[", axis[k]);
+            for (int j = 0; j < h && off < bufsize - 64; j++)
+                off += snprintf(buf + off, bufsize - off, "%s%.0f",
+                                j ? "," : "", ecef[j][k]);
+        }
         off += snprintf(buf + off, bufsize - off, "]}");
         emitted++;
     }

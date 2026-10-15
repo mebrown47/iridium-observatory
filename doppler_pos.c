@@ -1332,7 +1332,8 @@ int doppler_pos_get_active_sats(int *sat_ids, double *latest_freq,
 }
 
 int doppler_pos_get_history(int sat_id, double *freqs,
-                              uint64_t *timestamps, int max_out)
+                              uint64_t *timestamps, double (*ecef_km)[3],
+                              int max_out)
 {
     pthread_mutex_lock(&pos_lock);
     sat_buffer_t *s = NULL;
@@ -1345,6 +1346,9 @@ int doppler_pos_get_history(int sat_id, double *freqs,
         sat_meas_t *m = sat_buf_get(s, i);
         freqs[i] = m->freq;
         timestamps[i] = m->timestamp;
+        if (ecef_km)
+            for (int k = 0; k < 3; k++)
+                ecef_km[i][k] = m->sat_ecef[k] / 1000.0;
     }
     pthread_mutex_unlock(&pos_lock);
     return n;

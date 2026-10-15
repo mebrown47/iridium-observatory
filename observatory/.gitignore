@@ -8,3 +8,6 @@ observatory.db-journal
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# TLE cache (sky.py), refreshed daily from CelesTrak
+tle/

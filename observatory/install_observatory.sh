@@ -100,7 +100,8 @@ ok "python3: $PYTHON ($("$PYTHON" -V 2>&1))"
 # Compile in memory: py_compile would write __pycache__ beside the sources,
 # which fails when they're installed root-owned under /opt.
 "$PYTHON" -c 'import sys; [compile(open(f).read(), f, "exec") for f in sys.argv[1:]]' \
-  "$OBS_DIR/rollup.py" "$OBS_DIR/trends_server.py" \
+  "$OBS_DIR/rollup.py" "$OBS_DIR/trends_server.py" "$OBS_DIR/orbit.py" "$OBS_DIR/sky.py" \
+  "$OBS_DIR"/sgp4/*.py \
   || die "observatory python failed to compile"
 ok "observatory sources present and compile"
 id "$RUN_USER" >/dev/null 2>&1 || die "service user '$RUN_USER' does not exist"

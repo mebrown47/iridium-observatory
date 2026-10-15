@@ -78,6 +78,14 @@ SYNC="$(printf '01%.0s' $(seq 1 128))"
 ft="$("$BUILD/test_classify" "${ACCESS}${ISY}${SYNC}" | sed -n 's/ft=//p')"
 if [ "$ft" = 7 ]; then ok "ISY classified ft=7"; else bad "ISY ft=$ft (want 7)"; fi
 
+# ---- Tier 1e: Observatory orbit + ring-alert location (vs skyfield fixtures) ----
+echo "== Observatory orbits and receiver location =="
+if out="$("$PY" "$ROOT/observatory/tests/test_orbit.py" 2>&1)"; then
+    ok "orbit.py matches skyfield; ring alerts locate the receiver"
+else
+    bad "observatory/tests/test_orbit.py:"; echo "$out" | grep -E "FAIL|Error" | sed 's/^/    /'
+fi
+
 # ---- Tier 2: oracle cross-check vs iridium-parser.py ----
 if [ "${SKIP_ORACLE:-0}" != 1 ]; then
     echo "== oracle cross-check (vs iridium-parser.py) =="

@@ -10,6 +10,8 @@ external assets — it runs happily on a headless feeder with no internet.
 
   GET /              -> the dashboard (self-contained HTML/CSS/JS)
   GET /api/trends    -> JSON aggregates (optional ?hours=N window)
+  GET /api/sky       -> satellites overhead, their passes, and the receiver's
+                        position from ring alerts (sky.py)
   GET /healthz       -> ok
 
 Usage:
@@ -22,6 +24,7 @@ engine or the live map. Run rollup.py on a timer to keep it current.
 import argparse
 import json
 import os
+import sys
 import sqlite3
 import time
 import urllib.error
@@ -292,6 +295,7 @@ def build_doppler(sniffer_url, timeout=4):
 class Handler(BaseHTTPRequestHandler):
     db_path = DB_PATH
     sniffer_url = SNIFFER_URL
+    sky = None
 
     def log_message(self, *a):
         pass  # quiet; systemd/journald captures what matters
@@ -344,6 +348,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: keep the server alive
                 self._send(500, json.dumps({"error": str(e)}),
                            "application/json")
+        elif u.path == "/api/sky":
+            data = self.sky.get() if self.sky else {"note": "sky tracker not running"}
+            self._send(200, json.dumps(data), "application/json")
         elif u.path == "/healthz":
             self._send(200, "ok", "text/plain")
         else:
@@ -1054,6 +1061,33 @@ DOPPLER_PAGE = r"""<!doctype html>
   .empty{color:var(--dim);padding:34px;text-align:center;font-size:13px;
     background:var(--panel);border:1px solid var(--line);border-radius:10px}
   a{color:var(--accent)}
+  /* receiver location from ring alerts */
+  .loc{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:14px 18px;margin-bottom:16px}
+  .loc .big{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+  .loc .big .k{color:var(--dim);font-weight:400;font-size:14px;margin-right:6px}
+  .loc .sub{color:var(--dim);font-size:12.5px;margin-top:5px;line-height:1.55}
+  .loc .sub b{color:var(--fg);font-weight:500}
+  /* S-curves beside the satellite panel; stacked when narrow */
+  .split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,520px);
+    gap:16px;align-items:start}
+  @media (max-width:1100px){.split{grid-template-columns:minmax(0,1fr)}}
+  .sky{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:12px 14px}
+  .sky h2{font-size:14px;margin:0 0 4px;font-weight:600}
+  .sky .meta{color:var(--dim);font-size:11.5px;margin-bottom:8px}
+  .sky .warn{color:var(--warn)}
+  .sky table{width:100%;border-collapse:collapse;font-size:12.5px;
+    font-variant-numeric:tabular-nums;margin-bottom:14px}
+  .sky th{color:var(--dim);font-weight:500;text-align:right;padding:4px 6px;
+    border-bottom:1px solid var(--line);font-size:11.5px}
+  .sky td{text-align:right;padding:4px 6px;border-bottom:1px solid var(--grid)}
+  .sky th:first-child,.sky td:first-child{text-align:left}
+  .sky .heard{color:var(--good)}
+  .tl .lbl{fill:var(--fg);font-size:10.5px}
+  .tl .mx{fill:var(--fg);font-size:9.5px;font-weight:600}
+  .tl .tick{stroke:var(--warn);stroke-width:1.2}
+  .tl .now{stroke:var(--hot);stroke-width:1.5}
 </style></head>
 <body>
 <header>
@@ -1066,6 +1100,7 @@ DOPPLER_PAGE = r"""<!doctype html>
 </header>
 <main>
   <div class="cards" id="cards"></div>
+  <div class="loc" id="loc"><div class="sub">Finding where the receiver is…</div></div>
   <div class="note">
     <b>What am I looking at?</b> Each panel is one satellite currently
     overhead. Iridium satellites move at ~16,000 mph, so their signal arrives
@@ -1085,7 +1120,11 @@ DOPPLER_PAGE = r"""<!doctype html>
     shows what was actually measured. Each panel is scaled to its own
     satellite's frequency range — compare <i>shapes</i>, not heights.
   </div>
-  <div id="facets" class="facets"></div>
+  <div class="split">
+    <div id="facets" class="facets"></div>
+    <aside class="sky" id="sky"><h2>Satellites</h2>
+      <div class="meta">loading…</div></aside>
+  </div>
   <p style="color:var(--dim);font-size:11.5px;margin:12px 2px 30px">
     Absolute measured burst frequency, each panel on its own scale.
     Updates every 5s. <span id="src"></span>
@@ -1228,7 +1267,9 @@ function render(d){
   sats.forEach(s=>{
     const f=document.createElement("div");
     f.className="facet";
-    f.innerHTML='<h3>Sat '+s.sat+'<span class="chan">'+
+    const nm=SKY&&SKY.names&&SKY.names[s.sat];
+    f.innerHTML='<h3>'+(nm?esc(nm)+' <span class="chan">sat '+s.sat+'</span>':'Sat '+s.sat)+
+      '<span class="chan">'+
       (s.f_min/1e6).toFixed(4)+'–'+(s.f_max/1e6).toFixed(4)+' MHz · near ch'+
       s.near_chan+'</span></h3>'+
       '<div class="meta">'+s.n+' bursts · '+Math.round(s.span_s)+'s · swing '+
@@ -1243,10 +1284,134 @@ function render(d){
   });
   pending.forEach(([chart,s])=>sCurve(chart,s));
 }
+/* ---- receiver location and satellites (GET /api/sky) ---- */
+let SKY=null;
+function deg(v,p,n){return Math.abs(v).toFixed(4)+"° "+(v>=0?p:n);}
+function ago(s){return s<90?Math.round(s)+" s ago":Math.round(s/60)+" min ago";}
+function hhmm(t){return new Date(t*1000).toISOString().substr(11,8);}
+
+function renderLoc(d){
+  const box=document.getElementById("loc");
+  let h="";
+  if(d.fix){
+    const f=d.fix;
+    h+='<div class="big"><span class="k">Your estimated location is:</span>'+
+      deg(f.lat,"N","S")+", "+deg(f.lon,"E","W")+'</div>';
+    h+='<div class="sub">From <b>'+f.n_obs+'</b> ring alerts of <b>'+f.n_sats+
+      '</b> satellites, fitted '+ago(f.age_s+(d.age_s||0))+' to '+f.rms_hz.toFixed(0)+' Hz rms. ';
+    if(f.settled)h+='Settled: the last two fits agree within '+
+      f.moved_km.toFixed(1)+' km; typically within a few km of the true position.';
+    else h+='<span style="color:var(--warn)">Provisional — '+(f.moved_km==null?
+      'first fit':'moved '+Math.round(f.moved_km)+' km since the last fit')+
+      '. Early fits can be off by hundreds of km; it settles as more ring alerts arrive '+
+      '(refit every 2 min).</span>';
+    h+='</div>';
+  }else{
+    h+='<div class="big"><span class="k">Your estimated location is:</span>'+
+      '<span style="color:var(--dim)">not yet</span></div>';
+    h+='<div class="sub">'+esc(d.feed_note||d.tle&&d.tle.note||d.note||
+      "Needs ring alerts from two satellites, usually within a few minutes.")+'</div>';
+  }
+  const sf=d.sniffer_fix;
+  if(sf)h+='<div class="sub">iridium-sniffer\'s own coarser estimate: '+
+    deg(sf.lat,"N","S")+", "+deg(sf.lon,"E","W")+
+    (sf.hdop!=null?" (hdop "+sf.hdop+")":"")+
+    (sf.dist_km!=null?" — <b>"+Math.round(sf.dist_km)+" km</b> from the fit above":"")+'</div>';
+  if(d.clock_offset_s!=null)h+='<div class="sub">Receiver frame clock '+
+    Math.abs(d.clock_offset_s).toFixed(1)+' s '+(d.clock_offset_s>=0?"behind":"ahead of")+
+    ' true time (recovered from the satellite positions the ring alerts carry).</div>';
+  box.innerHTML=h;
+}
+
+function timeline(host,d){
+  const ps=d.passes||[], w0=d.window[0], w1=d.window[1], now=d.now;
+  const rowH=16, top=16, nameW=34, padR=8;
+  const W=Math.max(300,Math.round(host.clientWidth||480));
+  const H=top+rowH*ps.length+6;
+  host.innerHTML="";
+  const svg=el("svg",{viewBox:"0 0 "+W+" "+H,width:W,height:H,class:"tl"});
+  host.appendChild(svg);
+  const iw=W-nameW-padR, X=t=>nameW+iw*(t-w0)/(w1-w0);
+  for(let m=-20;m<=40;m+=10){
+    const x=X(now+m*60);
+    svg.appendChild(el("line",{x1:x,y1:top-2,x2:x,y2:H,class:"gl"}));
+    svg.appendChild(el("text",{x:x,y:10,"text-anchor":"middle",class:"ax"},m?(m>0?"+":"")+m:"now"));
+  }
+  ps.forEach((p,r)=>{
+    const y=top+r*rowH;
+    svg.appendChild(el("text",{x:0,y:y+11,class:"lbl"},p.short));
+    // the pass, in 20 s pieces shaded by elevation: brighter = higher
+    for(let k=0;k<p.el.length;k++){
+      const a=p.rise+k*20, b=Math.min(p.set,a+20);
+      if(b<=a&&p.el.length>1)break;
+      const o=0.25+0.75*Math.min(1,p.el[k]/60);
+      svg.appendChild(el("rect",{x:X(a),y:y+2,width:Math.max(1,X(b)-X(a)),
+        height:rowH-5,fill:"var(--accent)","fill-opacity":o.toFixed(2)}));
+    }
+    p.heard.forEach(t=>svg.appendChild(el("line",{x1:X(t),y1:y+1,x2:X(t),
+      y2:y+rowH-2,class:"tick"})));
+    const xc=X(p.culm);
+    if(xc>nameW+6&&xc<W-padR-6)svg.appendChild(el("text",{x:xc,y:y+10.5,
+      "text-anchor":"middle",class:"mx"},Math.round(p.max_el)));
+    const hit=el("rect",{x:X(p.rise),y:y,width:Math.max(2,X(p.set)-X(p.rise)),
+      height:rowH,fill:"transparent"});
+    hit.appendChild(el("title",null,p.name+"\nrise "+hhmm(p.rise)+", highest "+
+      p.max_el+"° at "+hhmm(p.culm)+", set "+hhmm(p.set)+" UTC ("+
+      ((p.set-p.rise)/60).toFixed(1)+" min)\n"+p.heard.length+" ring alerts heard"));
+    svg.appendChild(hit);
+  });
+  const xn=X(now);
+  svg.appendChild(el("line",{x1:xn,y1:top-2,x2:xn,y2:H,class:"now"}));
+}
+
+function renderSky(d){
+  const box=document.getElementById("sky");
+  let h='<h2>Satellites</h2><div class="meta">';
+  if(d.tle&&d.tle.n){
+    const age=d.tle.age_days;
+    h+=d.tle.n+' TLEs ('+esc(d.tle.source)+', newest '+age.toFixed(1)+' days old'+
+      (age>3?' — <span class="warn">stale</span>':'')+')';
+    if(d.station)h+=' · from '+(d.station.source==="configured"?"the configured station":
+      "the estimated location");
+  }
+  if(d.tle&&d.tle.note)h+=' <span class="warn">'+esc(d.tle.note)+'</span>';
+  h+='</div>';
+  if(!d.visible){
+    box.innerHTML=h+'<div class="meta">'+esc(d.note||"waiting…")+'</div>';
+    return;
+  }
+  h+='<table><tr><th>satellite</th><th>el °</th><th>az °</th>'+
+    '<th>Doppler at RA</th><th>drift</th><th>heard</th></tr>';
+  d.visible.forEach(v=>{
+    h+='<tr><td>'+esc(v.name)+'</td><td>'+v.el.toFixed(1)+'</td><td>'+v.az+
+      '</td><td>'+(v.doppler_hz>=0?"+":"")+(v.doppler_hz/1000).toFixed(2)+' kHz</td><td>'+
+      (v.drift_hz_s>=0?"+":"")+v.drift_hz_s+' Hz/s</td><td'+
+      (v.heard?' class="heard">'+v.heard:'>')+'</td></tr>';
+  });
+  h+='</table><div class="meta">Passes, 20 min ago to 40 min ahead. Bar: elevation, '+
+    'brighter = higher, peak in degrees; <span style="color:var(--warn)">ticks</span>: '+
+    'ring alerts heard.</div><div id="tl"></div>';
+  box.innerHTML=h;
+  timeline(document.getElementById("tl"),d);
+}
+
+async function loadSky(){
+  try{
+    const d=await (await fetch("/api/sky")).json();
+    SKY=d;
+    renderLoc(d);
+    renderSky(d);
+    if(LAST)render(LAST);
+  }catch(e){}
+}
+loadSky();
+setInterval(loadSky,30000);
+
 // Charts are sized in real pixels, so a resize needs a redraw.
 let rz=null;
 window.addEventListener("resize",()=>{clearTimeout(rz);
-  rz=setTimeout(()=>{if(LAST)render(LAST);},150);});
+  rz=setTimeout(()=>{if(LAST)render(LAST);if(SKY&&SKY.passes)
+    timeline(document.getElementById("tl"),SKY);},150);});
 load();
 setInterval(load,5000);
 </script>
@@ -1262,10 +1427,35 @@ def main():
     ap.add_argument("--sniffer", default=SNIFFER_URL,
                     help="base URL of the running iridium-sniffer web map "
                          "(read-only; supplies /api/doppler)")
+    ap.add_argument("--tle-dir", default=None,
+                    help="where Iridium TLEs are cached (default: tle/ beside --db)")
+    ap.add_argument("--no-tle-download", action="store_true",
+                    help="never fetch TLEs from CelesTrak; use the newest *.tle "
+                         "in --tle-dir or ~/iridium-tle")
+    ap.add_argument("--station", default=None, metavar="LAT,LON[,HEIGHT_M]",
+                    help="the receiver's known position, for the satellite table "
+                         "and passes (default: where the ring alerts place it)")
     args = ap.parse_args()
 
     Handler.db_path = args.db
     Handler.sniffer_url = args.sniffer
+    station = None
+    if args.station:
+        try:
+            v = [float(x) for x in args.station.replace(" ", "").split(",")]
+            station = (v[0], v[1], v[2] if len(v) > 2 else 0.0)
+            if not (-90 <= station[0] <= 90 and -180 <= station[1] <= 360):
+                raise ValueError
+        except (ValueError, IndexError):
+            ap.error("--station wants LAT,LON[,HEIGHT_M] in degrees and metres")
+    # The vendored sgp4 sits beside this file; the import works however the
+    # server was started.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import sky
+    tle_dir = args.tle_dir or os.path.join(os.path.dirname(os.path.abspath(args.db)), "tle")
+    Handler.sky = sky.SkyTracker(args.sniffer, tle_dir, station,
+                                 download=not args.no_tle_download)
+    Handler.sky.start()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"observatory trends: http://{args.host}:{args.port}/  db={args.db}")
     try:
