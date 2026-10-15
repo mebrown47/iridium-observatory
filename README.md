@@ -5,7 +5,7 @@ radio and shows what it hears: pager messages, aircraft datalink (ACARS, ADS-C p
 reports, CPDLC clearances), satellites passing overhead, and where your receiver is,
 worked out from the satellites alone, typically to within a few km. It keeps a daily archive and turns it into
 long-run dashboards, and it can feed aircraft messages and positions to aggregators
-such as airframes.io and thebaldgeek.net.
+such as airframes.io.
 
 It is a fork of [iridium-sniffer](https://github.com/alphafox02/iridium-sniffer) and keeps
 that project's receiver engine at its core. [How it differs](#how-it-differs-from-iridium-sniffer)
