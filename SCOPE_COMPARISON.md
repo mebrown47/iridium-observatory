@@ -61,7 +61,7 @@ during oracle validation.
 | Type | Original | Now | Rationale for not deep-decoding |
 |------|----------|-----|---------------------------------|
 | IRA, IBC | Decoded | Decoded (unchanged) | — |
-| IDA → ACARS | Decoded (map position only) | **Decoded + surfaced**: ADS-C/CPDLC broken out into AT1 & CPDLC tabs and archived | See Scope 3 / [docs/AT1_DECODE.md](docs/AT1_DECODE.md) |
+| IDA → ACARS | Decoded (map position only) | **Decoded + surfaced**: ADS-C/CPDLC broken out into the AT1 tab and archived | See Scope 3 / [docs/AT1_DECODE.md](docs/AT1_DECODE.md) |
 | **MSG** | RAW passthrough | **Decoded** | — |
 | **IIP** | RAW passthrough | **Decoded (CRC-validated)** | — |
 | ISY, IU3, IU6 | RAW passthrough | **Classified** | No decodable payload / structure not public |
@@ -114,14 +114,15 @@ far enough to drop a dot on the map. This fork walks the full decode tree in
 - **AT1 tab** — ADS-C reports rendered as one operator-readable line
   (position / flight level / speed / heading / vertical rate / winds / temp /
   next waypoint + ETA), via `web_map_add_premium_msg(reg, flt, "AT1", …)`.
-- **CPDLC tab** — clearances located with `la_proto_tree_find_cpdlc()`, each
-  element formatted and flattened to one line (`flatten_la_text()`).
+- **CPDLC in the AT1 tab** — clearances located with `la_proto_tree_find_cpdlc()`,
+  each element formatted and flattened to one line (`flatten_la_text()`), and listed
+  in the same tab under the label "CPDLC".
 - **Archived** — each decoded message's proto tree is written to the `--archive`
   JSONL (`archive_log_acars()`), feeding the Observatory's Aviation dashboard.
 
 All additive; the RF path and the existing map positioning are unchanged.
-Requires the (already-optional) libacars-2 at build time; without it these tabs
-stay empty and raw ACARS still flows.
+Requires the (already-optional) libacars-2 at build time; without it the AT1 tab
+stays empty and raw ACARS still flows.
 
 ---
 

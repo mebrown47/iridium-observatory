@@ -1,0 +1,1094 @@
+# Engine reference: the `iridium-sniffer` program
+
+This is the manual for the receiver program at the heart of iridium-observatory.
+Most people don't need it: `./install.sh` sets the program up as a service and
+asks the questions that matter (see the [README](../README.md)). Read on to build
+by hand, run the program directly, pipe it into other tools, or tune it.
+
+The program is the RF engine of [iridium-sniffer](https://github.com/alphafox02/iridium-sniffer)
+(© CEMAXECUTER LLC), and keeps its name: the executable is still `iridium-sniffer`.
+Most of this manual is inherited from that project. Where this fork has changed
+or added something, the text says so; the options it has added are listed under
+[Options added by iridium-observatory](#options-added-by-iridium-observatory).
+
+## Building by hand
+
+### DragonOS Noble
+
+DragonOS Noble ships with HackRF, BladeRF, USRP (UHD), SoapySDR, and OpenCL drivers pre-installed. Just clone and build:
+
+```bash
+git clone https://github.com/mebrown47/iridium-observatory.git
+cd iridium-observatory
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+```
+
+CMake auto-detects the available SDR libraries, GPU support, and libacars. All SDR backends, OpenCL GPU acceleration, and ACARS ARINC-622 decoding should be enabled automatically.
+
+### Ubuntu / Debian
+
+```bash
+git clone https://github.com/mebrown47/iridium-observatory.git
+cd iridium-observatory
+
+# Core dependencies
+sudo apt install build-essential cmake libfftw3-dev
+
+# SDR libraries (install only what you have)
+sudo apt install libhackrf-dev      # HackRF One
+sudo apt install libbladerf-dev     # BladeRF
+sudo apt install libuhd-dev         # USRP (B2x0, N2x0, X3x0, etc.)
+sudo apt install libsoapysdr-dev    # RTL-SDR, Airspy, LimeSDR, etc. via SoapySDR
+# SDRplay native API: install from https://www.sdrplay.com/api/
+
+# Optional: ACARS ARINC-622/ADS-C/CPDLC decoding (libacars-2)
+sudo apt install libacars-dev        # where packaged; Ubuntu 24.04 has none, so build
+                                     # https://github.com/szpajder/libacars v2.2.1 from source
+
+# Optional: ZMQ multi-consumer output (replaces stdout piping)
+sudo apt install libzmq3-dev         # --zmq flag
+
+# Optional: GPU-accelerated burst detection
+sudo apt install ocl-icd-opencl-dev  # OpenCL (NVIDIA, AMD, Intel)
+
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+```
+
+CMake output shows what was detected:
+
+```
+-- HackRF: enabled
+-- BladeRF: enabled
+-- USRP (UHD): enabled
+-- SoapySDR: enabled
+-- libacars: enabled (ARINC-622/ADS-C/CPDLC decoding)
+-- ZMQ: enabled (multi-consumer PUB/SUB output)
+-- GPU acceleration: OpenCL
+```
+
+### Low-Power Hardware (N100, Pi 5, ARM)
+
+The downmix worker count auto-scales based on CPU cores: 4 workers on 8+ cores, 2 on 4 cores, 1 on 2 cores. On low-power CPUs like the Intel N100 (4 cores), this prevents 100% CPU saturation that occurs when 4 workers compete for 4 cores. Override with `--workers=N` if needed.
+
+The Pi 5's VideoCore VII GPU passes basic Vulkan compute tests but cannot sustain the throughput needed for real-time FFT batch processing. Build CPU-only and use `--no-gpu`:
+
+```bash
+git clone https://github.com/mebrown47/iridium-observatory.git
+cd iridium-observatory
+sudo apt install build-essential cmake libfftw3-dev libsoapysdr-dev
+
+mkdir build && cd build
+cmake .. -DUSE_OPENCL=OFF
+make -j$(nproc)
+```
+
+**FFTW wisdom (important for ARM):** FFTW uses `FFTW_MEASURE` to benchmark FFT algorithms at plan creation time. On x86 this is fast and unnoticeable. On ARM it can block for 30-60+ seconds per plan, causing `q_max` to climb during live capture as samples queue up while plans are being built.
+
+Pre-generate a wisdom file to avoid this. iridium-sniffer automatically loads wisdom from `~/.iridium-sniffer-fftw-wisdom` at startup and saves updated wisdom on shutdown. After the first successful run (or the command below), subsequent starts are immediate.
+
+The required wisdom entries depend on sample rate. The burst detection FFT size varies, while the downmix FFTs are always the same (cof4096 for CFO estimation, cof2048/cob2048 for correlation):
+
+| Sample Rate | Burst FFT | Wisdom Command |
+|-------------|-----------|----------------|
+| 2-2.4 MHz (RTL-SDR) | 2048 | `fftwf-wisdom -v -o ~/.iridium-sniffer-fftw-wisdom cof2048 cof4096 cob2048` |
+| 6 MHz (Airspy Mini) | 8192 | `fftwf-wisdom -v -o ~/.iridium-sniffer-fftw-wisdom cof8192 cof4096 cof2048 cob2048` |
+| 10 MHz (default) | 8192 | `fftwf-wisdom -v -o ~/.iridium-sniffer-fftw-wisdom cof8192 cof4096 cof2048 cob2048` |
+| 12 MHz (extended) | 16384 | `fftwf-wisdom -v -o ~/.iridium-sniffer-fftw-wisdom cof16384 cof4096 cof2048 cob2048` |
+
+The naming convention: `cof` = complex forward, `cob` = complex backward, followed by the FFT size. If running multiple sample rates on the same system, include all burst FFT sizes in one command (e.g., `cof2048 cof8192 cof4096 cob2048`). The "system-wisdom import failed" warning from `fftwf-wisdom` is normal on a fresh system and can be ignored.
+
+GNU Radio manages FFTW wisdom automatically (in `~/.gr_fftw_wisdom`), which is why gr-iridium users never encounter this issue. Since iridium-sniffer replaces the GNU Radio dependency, it handles wisdom directly.
+
+### Build Variants
+
+```bash
+# OpenCL GPU (default when available)
+cmake .. -DUSE_OPENCL=ON
+
+# Vulkan GPU
+cmake .. -DUSE_VULKAN=ON -DUSE_OPENCL=OFF
+
+# CPU only
+cmake .. -DUSE_OPENCL=OFF
+
+# Debug build with AddressSanitizer
+cmake .. -DCMAKE_BUILD_TYPE=Debug
+```
+
+
+## Command-line quick start
+
+```bash
+# List available SDR devices
+./iridium-sniffer --list
+
+# Live capture (specify your SDR with -i)
+./iridium-sniffer -i soapy-0                          # RTL-SDR, Airspy, etc.
+./iridium-sniffer -i hackrf-SERIAL                # HackRF
+./iridium-sniffer -i usrp-PRODUCT-SERIAL             # USRP
+
+# Live capture with web map (open http://localhost:8888)
+./iridium-sniffer -i soapy-0 --web
+
+# Process an IQ recording (no -i needed)
+./iridium-sniffer -f recording.cf32
+
+# Pipe to iridium-toolkit
+./iridium-sniffer -i soapy-0 | python3 iridium-toolkit/iridium-parser.py
+
+# ZMQ multi-consumer output (multiple iridium-toolkit subscribers)
+./iridium-sniffer -i soapy-0 --zmq
+
+# Built-in ACARS/SBD decoding (no Python needed)
+./iridium-sniffer -i soapy-0 --acars
+
+# ACARS JSON to stdout (dumpvdl2/dumphfdl compatible format)
+./iridium-sniffer -i soapy-0 --acars-json --station=MYSTATION
+
+# Feed airframes.io directly (iridium-toolkit JSON format over TCP)
+./iridium-sniffer -i soapy-0 --feed --station=MYSTATION
+
+# Aircraft positions to tar1090/VRS via BaseStation SBS feed
+./iridium-sniffer --update-db                       # download aircraft database (one time)
+./iridium-sniffer -i soapy-0 --acars --basestation  # local server on port 30003
+./iridium-sniffer -i soapy-0 --acars --basestation=HOST:PORT  # push to remote
+
+# Feed acarshub via UDP (iridium-toolkit JSON format)
+./iridium-sniffer -i soapy-0 --feed=udp://127.0.0.1:5558 --station=MYSTATION
+
+# Feed both acarshub and airframes.io simultaneously
+./iridium-sniffer -i soapy-0 --feed=udp://127.0.0.1:5558 --feed --station=MYSTATION
+
+# Stream JSON via UDP (dumpvdl2 format, for future aggregator support)
+./iridium-sniffer -i soapy-0 --acars-udp=192.168.1.100:5555 --station=MYSTATION
+
+# Direct ACARS/SBD recovery via iridium-toolkit (bypasses iridium-parser.py)
+./iridium-sniffer -i soapy-0 --parsed | python3 iridium-toolkit/reassembler.py -m acars
+
+# Estimate receiver position from Doppler shift (with web map)
+./iridium-sniffer -i soapy-0 --position
+
+# Position with height aiding (100m above sea level)
+./iridium-sniffer -i soapy-0 --position=100
+
+# Send IDA frames to Wireshark
+./iridium-sniffer -i soapy-0 --gsmtap
+```
+
+## Performance
+
+Tested against gr-iridium on a 60-second IQ recording (cf32, 10 MHz, 1622 MHz center, USRP B210):
+
+**Default threshold (16 dB) -- maximum frame recovery:**
+
+| Metric | iridium-sniffer | gr-iridium |
+|--------|-----------------|------------|
+| Detected bursts | 5468 | ~3666 |
+| Demodulated RAW frames | 3701 | 2713 |
+| Ok rate | 68% | 74% |
+| IDA frames (internal `--parsed`) | 743 | -- |
+| IDA frames (external iridium-parser.py) | 373 | 690 |
+
+The default 16 dB threshold detects more bursts than gr-iridium, including weaker signals at the noise floor. Many of these marginal bursts fail demodulation, which lowers the ok percentage -- but the absolute frame count is 36% higher (3701 vs 2713). This is the recommended setting for maximum data recovery.
+
+**Matched threshold (18 dB) -- apples-to-apples comparison:**
+
+| Metric | iridium-sniffer | gr-iridium |
+|--------|-----------------|------------|
+| Detected bursts | 3668 | ~3666 |
+| Demodulated RAW frames | 2737 | 2713 |
+| Ok rate | 75% | 74% |
+| IDA frames (internal `--parsed`) | 605 | -- |
+| IDA frames (external iridium-parser.py) | 361 | 690 |
+
+At 18 dB (gr-iridium's default), burst detection counts are nearly identical. The ok rate now matches gr-iridium at 75% vs 74%. The external parser IDA gap (361 vs 690) reflects that gr-iridium's GNU Radio-based demodulator produces cleaner bits -- more frames survive standard BCH correction. Use `--threshold=18` if ok rate percentage is more important than total frame count.
+
+**A note on live ok% rates:** In live SDR capture, you may see ok\_avg of 35-50% with iridium-sniffer compared to 70-80% shown in gr-iridium guides. This is expected and not a problem. iridium-sniffer uses a lower default detection threshold (16 dB vs gr-iridium's 18 dB), which catches more weak bursts at the noise floor. These marginal detections lower the ok percentage but increase the total number of successfully decoded frames. The ok% statistic measures what fraction of detected bursts decode -- not how many frames you are actually recovering. What matters is decoded frames per second, and iridium-sniffer typically recovers more usable data than gr-iridium despite the lower ok% figure.
+
+**x64 Processing speed (60s cf32 file, i7-11800H):**
+
+| Configuration | Wall time | CPU time | Realtime factor |
+|---------------|-----------|----------|-----------------|
+| AVX2 + GPU | 15.1s | 23.6s | 4.0x |
+| AVX2 only | 12.0s | 21.5s | 5.0x |
+| SSE4.2 only | - | - | ~3.5x est. |
+| Scalar + GPU | 16.1s | 42.6s | 3.7x |
+| Scalar only (baseline) | 13.0s | 40.6s | 4.6x |
+
+**ARM NEON performance (Apple M3 Max, 12 GB 10-min ci8 recording):**
+
+| Configuration | CPU Time (user) | Wall Time | Realtime Factor |
+|---------------|-----------------|-----------|------------------|
+| NEON (default on AArch64) | 647.8s | 2:31.98 | **3.9x** |
+| Scalar | 995.2s | 3:58.02 | 2.5x |
+
+Four SIMD tiers are available: AVX2+FMA (256-bit, x86), SSE4.2 (128-bit, x86), NEON (128-bit, AArch64), and scalar. On x86 the tier is selected at runtime via CPUID; on AArch64 NEON is the default. Use `--simd=MODE` to force a specific path (`auto`/`avx2`/`sse42`/`neon`/`scalar`) for testing or debugging. AVX2 provides ~1.9x CPU time reduction over scalar; SSE4.2 provides ~1.5x (helps on older Intel Celeron/Atom); NEON provides ~1.54x on Apple Silicon. GPU acceleration adds startup overhead for files this size but becomes beneficial for longer recordings and continuous live capture.
+
+All SIMD configurations produce identical demodulated output (frame count, bit content). GPU vs CPU may differ by a few frames due to floating-point rounding in the burst detection FFT.
+
+The IDA decoder uses BCH(31,20) t=2 hard-decision error correction, identical to iridium-toolkit's `bch_repair()`. Standard BCH corrects up to 2 bit errors per 31-bit block. An experimental Chase soft-decision extension is available via `--chase=N` (N=1..7), which uses per-bit amplitude scores from the demodulator to attempt recovery of blocks with more than 2 errors on **IDA frames only** (IRA/IBC Chase is completely disabled). Chase recovery is off by default.
+
+## Built-in Web Map (Beta)
+
+The `--web` flag starts an embedded HTTP server that decodes IRA (ring alert) and IBC (broadcast) frames in real time and displays them on a map. This provides similar functionality to [Iridium Live](https://github.com/microp11/iridium-live) without any external dependencies.
+
+**Note:** The web map feature is currently in beta. Position plotting and satellite tracking are functional but undergoing validation.
+
+**In iridium-observatory:** the map gains Pager and AT1 tabs beside the ACARS panel (AT1
+carries ADS-C position reports and CPDLC clearances) and a live frame-type counter, and encrypted or compressed ACARS payloads (H1 sub-label T2)
+are shown as `[encoded payload, N chars]` rather than as noise. One endpoint is added
+beside the ones listed below: `GET /api/doppler` (per-satellite ring-alert frequencies,
+times and satellite positions), which feeds the Observatory's Doppler page.
+
+```bash
+# Default port 8888
+./iridium-sniffer -i soapy-0 --web
+
+# Custom port
+./iridium-sniffer -i soapy-0 --web=9090
+```
+
+Then open `http://localhost:8888` in a browser.
+
+The map shows:
+
+- **Beam footprints** -- ground-level Iridium beam centers from IRA frames, colored per satellite.
+- **MT positions** -- mobile terminal (handset/IoT device) locations extracted from paging messages.
+- **Aircraft positions** -- rough location estimates from ACARS messages (see below).
+- **Paging events** -- beam positions where subscriber paging was detected.
+- **Receiver position** -- estimated location from the Doppler solver (when `--position` is active).
+- **Active satellite count** and frame totals in the status bar.
+- **Auto-centering** on the first received position, then free pan/zoom.
+
+All layers are individually toggleable via the layer control panel.
+
+Data updates once per second via Server-Sent Events. The map uses Leaflet.js with OpenStreetMap tiles, loaded from CDN. No files need to be installed or served separately.
+
+### Aircraft Position Layer
+
+When `--web` and `--acars` are used together, decoded ACARS messages are correlated with the most recent IRA ground beam position to estimate the transmitting aircraft's location:
+
+```bash
+./iridium-sniffer -i soapy-0 --web --acars
+```
+
+Each aircraft (identified by tail number) gets a colored dot at its latest beam-center fix and a dashed track line connecting successive fixes. Clicking a marker shows the registration, flight number (if present in the message), satellite/beam that carried the message, and the time of the last decoded message.
+
+**Accuracy note:** Position accuracy is approximately 150-200 km -- the radius of an Iridium beam footprint. This is sufficient to identify which region or ocean an aircraft is crossing, but not precise tracking. The track line connects beam-center positions and may show jumps when consecutive messages arrive via different satellites.
+
+**API endpoints:**
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | HTML map page |
+| `GET /api/events` | SSE stream (1 Hz JSON updates) |
+| `GET /api/state` | JSON snapshot of current state |
+
+The web map runs alongside normal RAW output. Adding `--web` does not change what appears on stdout, so you can pipe to iridium-toolkit at the same time:
+
+```bash
+./iridium-sniffer -i soapy-0 --web | python3 iridium-toolkit/iridium-parser.py
+```
+
+## Doppler Positioning (Experimental)
+
+The `--position` flag enables receiver geolocation from Doppler shift measurements. As Iridium LEO satellites pass overhead at ~7.5 km/s, each decoded burst's frequency offset encodes the satellite-receiver geometry. By collecting measurements from multiple satellite passes, an iterated weighted least-squares solver estimates the receiver's latitude and longitude -- no GPS required.
+
+```bash
+# Basic positioning (implies --web for map display)
+./iridium-sniffer -i soapy-0 --position
+
+# With height aiding for better accuracy (altitude in meters above sea level)
+./iridium-sniffer -i soapy-0 --position=100
+```
+
+The solver runs every 10 seconds and requires at least 5 measurements from 2+ satellites before attempting a solution. Position estimates appear on stderr and as a green marker on the web map. With open sky and height aiding, expect convergence within 5-10 minutes. Accuracy improves with more satellite passes -- the solver uses motion-validated spatial clustering to reject corrupted IRA positions and outlier rejection (3-sigma) to filter bad measurements.
+
+Height aiding constrains the altitude to a known value and significantly improves horizontal accuracy. Without it, the vertical component is poorly determined by Doppler-only measurements.
+
+Based on: Z. Tan et al., "New Method for Positioning Using IRIDIUM Satellite Signals of Opportunity," IEEE Access, vol. 7, 2019.
+
+**In iridium-observatory:** this fork fixed errors in the solver that could place
+fixes about 1,500 km off, and made it give the same answer for the same input. The
+Observatory's Doppler page (port 8890) adds a second, independent estimate: it
+fits the ring alerts against published satellite orbits (TLEs), settles within
+minutes of a restart, and agreed with this solver to within 1 km on the home
+feeder. `/api/doppler` now also reports the satellite position each ring alert
+carried, which that fit needs.
+
+## GSMTAP Output (Wireshark Integration)
+
+The `--gsmtap` flag enables native IDA (Iridium Data Access) frame decoding and sends the decoded LAPDm frames to Wireshark via UDP. This replaces the `iridium-parser.py -m gsmtap` Python pipeline for protocol analysis.
+
+```bash
+# Start Wireshark listening for GSMTAP
+wireshark -k -i lo -f "udp port 4729"
+
+# In another terminal, run with GSMTAP enabled
+./iridium-sniffer -i soapy-0 --gsmtap
+
+# Custom destination host and port
+./iridium-sniffer -i soapy-0 --gsmtap=192.168.1.100:4729
+
+# Combined with web map
+./iridium-sniffer -i soapy-0 --web --gsmtap
+```
+
+Wireshark decodes the packets as GSM/LAPDm signaling. Typical messages seen:
+
+- **Immediate Assignment / Reject** -- channel management (most common)
+- **Paging Request** -- satellite looking for a handset (contains TMSI)
+- **Location Update Reject** -- satellite denying a registration attempt
+- **System Information** -- broadcast parameters
+- **SBD (Short Burst Data)** payloads
+
+The IDA decoder implements:
+- LCW (Link Control Word) extraction via 46-bit permutation table and 3 BCH components
+- Payload descrambling: 124-bit block de-interleave, BCH(31,20) with poly=3545
+- CRC-CCITT verification
+- Multi-burst reassembly (16 concurrent slots, frequency/time/sequence matching)
+
+GSMTAP runs alongside normal RAW output and the web map. Adding `--gsmtap` does not change stdout.
+
+## Built-in ACARS / SBD Decoding
+
+These flags control ACARS/SBD output, and can be combined:
+
+| Flag | Output |
+|------|--------|
+| `--acars` | Human-readable text to stdout |
+| `--acars-json` | JSON to stdout (dumpvdl2/dumphfdl format) |
+| `--acars-udp=HOST:PORT` | JSON via UDP (dumpvdl2/dumphfdl format, repeatable, max 4) |
+| `--feed[=PROTO://HOST:PORT]` | Feed aggregator (iridium-toolkit JSON format, repeatable, max 4) |
+
+This replaces the `reassembler.py -m acars` pipeline entirely -- no Python needed. When [libacars-2](https://github.com/szpajder/libacars) is installed, ARINC-622 application payloads (ADS-C, CPDLC, OHMA, MIAM) are fully decoded. Without libacars, basic ACARS field extraction still works.
+
+```bash
+# Human-readable text output
+./iridium-sniffer -i usrp-B210-SERIAL --acars
+
+# JSON output to stdout
+./iridium-sniffer -i usrp-B210-SERIAL --acars-json --station=MYSTATION
+
+# Stream JSON over UDP to a remote aggregator
+./iridium-sniffer -i usrp-B210-SERIAL --acars-udp=192.168.1.100:5555 --station=MYSTATION
+
+# Feed acarshub via UDP (iridium-toolkit JSON format)
+./iridium-sniffer -i usrp-B210-SERIAL --feed=udp://127.0.0.1:5558 --station=MYSTATION
+
+# Feed airframes.io directly via TCP (iridium-toolkit JSON format)
+./iridium-sniffer -i usrp-B210-SERIAL --feed --station=MYSTATION
+
+# Feed both acarshub (UDP) and airframes.io (TCP) simultaneously
+./iridium-sniffer -i usrp-B210-SERIAL --feed=udp://127.0.0.1:5558 --feed --station=MYSTATION
+
+# Text on stdout + UDP JSON stream simultaneously
+./iridium-sniffer -i usrp-B210-SERIAL --acars --acars-udp=192.168.1.100:5555 --station=MYSTATION
+```
+
+### Text Output
+
+**Example (with libacars):**
+
+```
+ACARS: 2026-02-24T13:06:52Z DL [hdr:iridium]
+ACARS:
+ Reassembly: skipped
+ Reg: .N-XXXXX
+ Mode: 2 Label: H1 Blk id: F More: 0 Ack: !
+ Sublabel: MD
+ Message:
+  MSG/RX24-FEB-26 1306Z /RXFLIGHT PLANS PXXXX AND PXXXX ARE AVAILABLE FOR UPLINK
+```
+
+Heartbeat pings (Label `_d`) are the most common ACARS message type on Iridium. H1-labeled messages carry ARINC-622 application data -- airline operational control (AOC) messages, flight plan uplinks, ADS-C position reports, and CPDLC clearances. When libacars is present, these payloads are decoded into structured fields rather than appearing as opaque binary.
+
+Non-ACARS SBD traffic (IoT telemetry, maritime tracking, etc.) is also displayed:
+
+```
+SBD: 2026-02-24T12:56:07Z DL 6841542344504f4c4c203635313530 | hAT#DPOLL 65150
+```
+
+### JSON Format
+
+JSON mode (`--acars-json` or `--acars-udp`) produces one JSON object per line. The envelope format matches [dumpvdl2](https://github.com/szpajder/dumpvdl2) and [dumphfdl](https://github.com/szpajder/dumphfdl), with `"iridium"` as the top-level protocol key (analogous to `"vdl2"` and `"hfdl"`). ACARS field names inside the `"acars"` object are identical to what libacars produces, so aggregation sites can ingest all three tools with one parser.
+
+**With libacars** (ARINC-622/ADS-C/CPDLC decoded):
+
+```json
+{
+  "iridium": {
+    "app": { "name": "iridium-sniffer", "ver": "1.0" },
+    "station": "MYSTATION",
+    "t": { "sec": 1740412012, "usec": 555856 },
+    "freq": 1623126868,
+    "sig_level": 29.02,
+    "acars": {
+      "err": false,
+      "crc_ok": true,
+      "more": false,
+      "reg": ".N12345",
+      "mode": "2",
+      "label": "H1",
+      "blk_id": "F",
+      "ack": "!",
+      "sublabel": "DF",
+      "mfi": "01",
+      "msg_text": "...",
+      "arinc622": { "...decoded application payload..." }
+    }
+  }
+}
+```
+
+**Without libacars** (basic ACARS fields only):
+
+```json
+{
+  "iridium": {
+    "app": { "name": "iridium-sniffer", "ver": "1.0" },
+    "station": "MYSTATION",
+    "t": { "sec": 1740412012, "usec": 555856 },
+    "freq": 1623126868,
+    "sig_level": 29.02,
+    "acars": {
+      "err": false,
+      "crc_ok": true,
+      "more": false,
+      "reg": ".N12345",
+      "mode": "2",
+      "label": "H1",
+      "blk_id": "F",
+      "ack": "!",
+      "msg_text": "..."
+    }
+  }
+}
+```
+
+The envelope (`app`, `station`, `t`, `freq`, `sig_level`) and ACARS field names (`err`, `crc_ok`, `more`, `reg`, `mode`, `label`, `blk_id`, `ack`, `flight`, `msg_num`, `msg_num_seq`, `msg_text`) are the same with or without libacars. The difference is that libacars adds decoded ARINC-622 application layer objects (`arinc622`, `adsc`, `cpdlc`, etc.) nested after the base ACARS fields. Sites that already ingest dumpvdl2 or dumphfdl JSON can use the same parser -- just check for the `"iridium"` key instead of `"vdl2"` or `"hfdl"`.
+
+### UDP Streaming
+
+`--acars-udp=HOST:PORT` sends each ACARS JSON object as a UDP datagram to a remote host. This flag can be specified multiple times (up to 4) to feed multiple aggregators simultaneously. Combine `--acars` (text on stdout) with `--acars-udp` to get human-readable local output while feeding remote sites. The JSON format is the same regardless of output method.
+
+**Shutdown stats** are printed to stderr:
+
+```
+SBD: 339 packets from 15964 IDA messages (75 short, 260 single, 1 multi-pkt)
+ACARS: 80 messages decoded (1 with errors)
+```
+
+### Installing libacars (optional but recommended)
+
+libacars-2 is optional. Without it, ACARS messages are still decoded but ARINC-622 application payloads remain as raw text. With it, ADS-C, CPDLC, and other embedded protocols are fully decoded.
+
+```bash
+# Ubuntu / Debian / DragonOS
+sudo apt install libacars-dev
+
+# Or build from source
+git clone https://github.com/szpajder/libacars.git
+cd libacars && mkdir build && cd build
+cmake .. && make -j$(nproc) && sudo make install
+sudo ldconfig
+```
+
+CMake reports the detection status at build time:
+
+```
+-- libacars: enabled (ARINC-622/ADS-C/CPDLC decoding)
+```
+
+or:
+
+```
+-- libacars: not found (basic ACARS only)
+```
+
+### Feeding acarshub and airframes.io
+
+The traditional Python pipeline for getting Iridium ACARS into aggregators requires four processes chained together:
+
+```bash
+# Traditional pipeline (gr-iridium + iridium-toolkit + acars.py)
+iridium-extractor -D 4 rtl-sdr | iridium-parser.py | reassembler.py -m acars -a json | acars.py -s MYSTATION
+```
+
+iridium-sniffer replaces that entire chain with a single `--feed` flag. The feed output uses the iridium-toolkit JSON format (the same format produced by iridium-toolkit's `reassembler.py -m acars -a json`), so existing aggregators accept it without changes.
+
+**Feed directly to airframes.io** (TCP, port 5590):
+
+```bash
+# Bare --feed defaults to tcp://feed.airframes.io:5590
+./iridium-sniffer -i soapy-0 --feed --station=MYSTATION
+```
+
+**Feed a local acarshub instance** (UDP, port 5558):
+
+```bash
+./iridium-sniffer -i soapy-0 --feed=udp://127.0.0.1:5558 --station=MYSTATION
+```
+
+**Feed acarshub via TCP** (also supported):
+
+```bash
+./iridium-sniffer -i soapy-0 --feed=tcp://127.0.0.1:15590 --station=MYSTATION
+```
+
+**Feed both acarshub and airframes.io simultaneously** (`--feed` is repeatable, max 4):
+
+```bash
+./iridium-sniffer -i soapy-0 --feed=udp://127.0.0.1:5558 --feed --station=MYSTATION
+```
+
+Add `--acars` for human-readable text output locally while feeding:
+
+```bash
+./iridium-sniffer -i soapy-0 --acars --feed --station=MYSTATION
+```
+
+**Docker Compose (acarshub):** Set `ENABLE_IRDM=true` and configure the transport. For UDP: `IRDM_CONNECTIONS=udp` (default port 5558). For TCP: `IRDM_CONNECTIONS=tcp://HOST:PORT`. See the [docker-acarshub](https://github.com/sdr-enthusiasts/docker-acarshub) documentation for details.
+
+**Two JSON formats:** iridium-sniffer produces two distinct ACARS JSON formats for different purposes:
+
+- `--feed` currently outputs the **iridium-toolkit format** (`"app": {"name": "iridium-toolkit"}` at the top level). This is the established format that acarshub and airframes.io already accept. Use this for feeding aggregators today.
+
+- `--acars-json` / `--acars-udp` output a **dumpvdl2/dumphfdl envelope format** (`"iridium"` as the top-level key, matching the structure of dumpvdl2's `"vdl2"` and dumphfdl's `"hfdl"`). This is a richer, more structured format with full libacars ARINC-622 decoding. Once aggregator sites accept the dumpvdl2 envelope, `--feed` will adopt it and `--acars-udp` can be retired -- `--feed` remains the single flag for feeding aggregators regardless of which wire format it carries.
+
+## BaseStation (SBS) Aircraft Position Feed
+
+Output decoded aircraft positions in BaseStation MSG,3 format for integration with VRS (Virtual Radar Server), tar1090, PlanePlotter, and other tracking tools. Aircraft registrations are mapped to real ICAO hex addresses using the tar1090-db aircraft database (568K+ entries).
+
+```bash
+# Download aircraft database (one time, ~33 MB)
+./iridium-sniffer --update-db
+
+# Server mode: tracking tools connect to port 30003
+./iridium-sniffer -i soapy-0 --acars --basestation --web
+
+# Push to a remote aggregator
+./iridium-sniffer -i soapy-0 --acars --basestation=192.168.1.50:30003 --web
+
+# Custom server port
+./iridium-sniffer -i soapy-0 --acars --basestation=30006 --web
+```
+
+Output format (one line per position):
+```
+MSG,3,1,1,A98539,1,2026/04/06,00:15:54.000,2026/04/06,00:15:54.000,UAL928,37000,,,52.000,-40.000,,,,0
+```
+
+Four position sources feed the output, in priority order:
+1. **ADS-C GPS** -- structured position from ARINC-622 ADS-C reports (requires libacars)
+2. **ACARS free text** -- coordinates extracted from known message labels (H1/POS, label 20, 44, 4J, 15, SA)
+3. **Waypoint lookup** -- first/current fix name resolved via bundled 125K-entry aviation waypoint database
+4. **Beam estimate** -- approximate position from IRA ground beam correlation (~200 km accuracy)
+
+The aircraft database is stored at `~/.iridium-sniffer/aircraft.csv` and can be updated at any time with `--update-db`. Use `--aircraft-db=PATH` to specify a custom path.
+
+In push mode (`--basestation=HOST:PORT`), the connection auto-reconnects if dropped.
+
+## Parsed IDA Output
+
+The `--parsed` flag enables internal IDA frame decoding and outputs parsed IDA lines directly to stdout. This was added primarily for recovering ACARS, SBD, and other IDA-based message content without requiring the external Python `iridium-parser.py` pipeline.
+
+```bash
+# Direct to reassembler (no iridium-parser.py needed for IDA/ACARS/SBD)
+./iridium-sniffer -i soapy-0 --parsed | python3 iridium-toolkit/reassembler.py -m acars
+
+# Traditional pipeline (still works, decodes all frame types)
+./iridium-sniffer -i soapy-0 | python3 iridium-toolkit/iridium-parser.py | python3 iridium-toolkit/reassembler.py -m acars
+```
+
+**Current capabilities and limitations:**
+
+`--parsed` currently decodes **IDA frames only**. These are the data-carrying frames used for ACARS, SBD messaging, voice call setup, and other payload traffic. IDA is what the reassembler needs for message reconstruction.
+
+Frame types **not yet decoded** by `--parsed` (these pass through as `RAW:` lines):
+- IRA (ring alerts) -- satellite position and paging events
+- IBC (broadcast channel) -- satellite ID, beam, Iridium time
+- VOC/VOZ (voice) -- voice codec frames
+- ISY, ITL, IIU, IMS, and other signaling types
+
+For IRA and IBC, the `--web` map feature already decodes these frame types independently using a separate decoder. The `--parsed` limitation only affects stdout text output.
+
+If all frame types are needed on stdout (not just IDA), use the traditional pipeline: `iridium-sniffer | iridium-parser.py`. The external parser handles all frame types; `--parsed` handles IDA only.
+
+In parsed mode, decoded IDA frames appear as `IDA:` lines with fields matching `iridium-parser.py` output format. Non-IDA frames continue to appear as `RAW:` lines. The `--parsed` flag adds no measurable overhead.
+
+## Burst IQ Capture
+
+The `--save-bursts` option saves IQ samples from successfully decoded bursts to a directory for offline analysis, algorithm development, or research.
+
+```bash
+# Save all decoded bursts
+./iridium-sniffer -i soapy-0 --save-bursts bursts/
+
+# Process file and save bursts
+./iridium-sniffer -f recording.cf32 --format=cf32 --save-bursts bursts/
+```
+
+**Output files per burst:**
+- `<timestamp>_<freq>_<id>_<direction>.cf32` - Complex float32 IQ samples (RRC-filtered, aligned to unique word)
+- `<timestamp>_<freq>_<id>_<direction>.meta` - Metadata (burst ID, frequency, SNR, sample rate, etc.)
+
+**Use cases:**
+- RF fingerprinting and satellite authentication research
+- Algorithm development and testing without live satellite passes
+- Building datasets for signal processing research
+- Debugging demodulation issues on specific bursts
+- Regression testing with real satellite data
+
+Captured IQ is at 250 kHz sample rate, 10 samples per symbol, after RRC matched filtering. Each file contains one complete burst ready for demodulation.
+
+## Usage
+
+### File Input
+
+The IQ format is auto-detected from the file extension (`.cf32`/`.fc32`/`.cfile` for cf32, `.ci16`/`.cs16`/`.sc16` for ci16). Files with unrecognized extensions default to ci8. Use `--format` to override.
+
+```bash
+# Auto-detected as cf32 from extension
+./iridium-sniffer -f recording.cf32
+
+# Auto-detected as ci16
+./iridium-sniffer -f recording.cs16
+
+# Explicit format override (e.g., .raw file that is actually cf32)
+./iridium-sniffer -f recording.raw --format cf32
+
+# Custom sample rate and center frequency
+./iridium-sniffer -f recording.cf32 -r 10000000 -c 1622000000
+```
+
+**SigMF support:** When the input file has a `.sigmf-data` or `.sigmf-meta` extension, iridium-sniffer reads the companion `.sigmf-meta` JSON file and auto-applies sample rate, center frequency, and data format. This allows zero-config playback of SigMF recordings:
+
+```bash
+# All parameters auto-detected from .sigmf-meta
+./iridium-sniffer -f recording.sigmf-data
+
+# Passing .sigmf-meta directly also works (auto-opens the .sigmf-data)
+./iridium-sniffer -f recording.sigmf-meta
+
+# Explicit flags override SigMF metadata
+./iridium-sniffer -f recording.sigmf-data -r 5000000
+```
+
+Supported SigMF datatypes: `cf32_le`, `ci16_le`, `ci8`, `cu8`. Command-line flags (`-r`, `-c`, `--format`) always take priority over SigMF metadata.
+
+### Live Capture
+
+Specifying `-i` selects an SDR interface and implies live capture (no `-l` needed). Use `--list` to see available devices:
+
+```bash
+./iridium-sniffer --list
+```
+
+Then specify the interface with `-i`. SoapySDR devices can be selected by index (`soapy-N`) or by device args (`soapy:driver=X,serial=Y`) for deterministic selection when multiple devices are connected:
+
+```bash
+# Airspy R2 / Mini, native driver (iridium-observatory; use serial from --list)
+./iridium-sniffer -i airspy-SERIAL -B --airspy-sensitivity=12
+
+# RTL-SDR / other SoapySDR devices (by index)
+./iridium-sniffer -i soapy-0
+
+# SoapySDR device by serial number or driver args
+./iridium-sniffer -i soapy:driver=airspy,serial=ABC123
+./iridium-sniffer -i soapy:driver=rtlsdr,serial=00000001
+
+# HackRF (use serial from --list)
+./iridium-sniffer -i hackrf-SERIAL
+
+# USRP (use serial from --list)
+./iridium-sniffer -i usrp-PRODUCT-SERIAL
+
+# SDRplay (native API, use serial from --list)
+./iridium-sniffer -i sdrplay-SERIAL
+
+# BladeRF
+./iridium-sniffer -i bladerf1
+
+# With gain and bias tee
+./iridium-sniffer -i soapy-0 -B --soapy-gain=40
+./iridium-sniffer -i hackrf-SERIAL --hackrf-lna=40 --hackrf-vga=20
+./iridium-sniffer -i usrp-PRODUCT-SERIAL --usrp-gain=50
+./iridium-sniffer -i sdrplay-SERIAL --sdrplay-gain=50 -B
+
+# Per-element gain control (Airspy R2: LNA 0-15, MIX 0-15, VGA 0-15)
+./iridium-sniffer -i soapy-0 --soapy-gain-element=LNA:10 --soapy-gain-element=MIX:9 --soapy-gain-element=VGA:10
+
+# Discover available gain elements for your device
+./iridium-sniffer -i soapy-0 -v --diagnostic 2>&1 | grep "gain elements"
+
+# SoapySDR device-specific settings
+./iridium-sniffer -i soapy:driver=airspy,serial=ABC --soapy-setting=bitpack:true
+./iridium-sniffer -i soapy:driver=bladerf --soapy-setting=biastee_rx:true
+```
+
+### Piping to iridium-toolkit
+
+```bash
+# Real-time decode
+./iridium-sniffer -i soapy-0 | python3 iridium-toolkit/iridium-parser.py
+
+# Direct to reassembler (parsed mode, bypasses iridium-parser.py)
+./iridium-sniffer -i soapy-0 --parsed | python3 iridium-toolkit/reassembler.py -m acars
+
+# File processing with full reassembly (traditional pipeline)
+./iridium-sniffer -f recording.cf32 --format cf32 | \
+    python3 iridium-toolkit/iridium-parser.py | \
+    python3 iridium-toolkit/reassembler.py
+```
+
+### ZMQ Multi-Consumer Output
+
+The `--zmq` flag publishes output lines over a ZMQ PUB socket, enabling multiple independent iridium-toolkit consumers to subscribe simultaneously. This replaces the stdout pipe (which only supports a single consumer) with a fan-out architecture matching how gr-iridium's ZMQ output worked.
+
+```bash
+# Publish RAW output on default endpoint (tcp://*:7006)
+./iridium-sniffer -i soapy-0 --zmq
+
+# Custom endpoint
+./iridium-sniffer -i soapy-0 --zmq=tcp://*:9999
+
+# ZMQ + ACARS: RAW lines go to ZMQ, ACARS text goes to stdout
+./iridium-sniffer -i soapy-0 --zmq --acars --station=MYSTATION
+
+# ZMQ + web map
+./iridium-sniffer -i soapy-0 --zmq --web
+```
+
+Subscribers connect using any ZMQ SUB client. With iridium-toolkit:
+
+```bash
+# Terminal 1: iridium-parser.py
+python3 -c "
+import zmq, sys
+ctx = zmq.Context()
+sub = ctx.socket(zmq.SUB)
+sub.connect('tcp://127.0.0.1:7006')
+sub.subscribe(b'')
+while True:
+    print(sub.recv_string())
+    sys.stdout.flush()
+" | python3 iridium-toolkit/iridium-parser.py
+
+# Terminal 2: reassembler for ACARS (subscribed to same ZMQ)
+python3 -c "
+import zmq, sys
+ctx = zmq.Context()
+sub = ctx.socket(zmq.SUB)
+sub.connect('tcp://127.0.0.1:7006')
+sub.subscribe(b'')
+while True:
+    print(sub.recv_string())
+    sys.stdout.flush()
+" | python3 iridium-toolkit/iridium-parser.py | python3 iridium-toolkit/reassembler.py -m acars
+```
+
+When `--zmq` is combined with `--acars`, RAW lines are still published to ZMQ (so iridium-toolkit consumers get full data) while ACARS text output goes to stdout. Without `--acars`, RAW lines go to both stdout and ZMQ.
+
+ZMQ PUB sockets are non-blocking: if no subscribers are connected, messages are silently dropped with no performance impact. Subscribers can connect and disconnect at any time.
+
+Requires libzmq (`sudo apt install libzmq3-dev`). The feature is compiled in only when libzmq is detected at build time.
+
+### ZMQ SUB Input
+
+Receive IQ samples from a remote SDR over a ZMQ PUB socket. This enables running the SDR on one machine and iridium-sniffer on another, or sharing a single SDR stream across multiple decoders.
+
+```bash
+# Receive cf32 IQ samples from GNU Radio ZMQ PUB sink
+./iridium-sniffer --zmq-sub=tcp://192.168.1.10:5555 --format=cf32 -r 10000000
+
+# Default endpoint (localhost:5555)
+./iridium-sniffer --zmq-sub --format=cf32 -r 10000000
+
+# With web map and custom center frequency
+./iridium-sniffer --zmq-sub=tcp://remote-sdr:5555 --format=cf32 -r 10000000 -c 1622000000 --web
+```
+
+The sample format (`--format`) and sample rate (`-r`) must match what the publisher is sending. GNU Radio's `zeromq.pub_sink` typically outputs cf32 (complex float32).
+
+### VITA 49 (VRT) Input
+
+Receive IQ samples via VITA 49 / VRT signal data packets over UDP. This enables receiving from SDR platforms that output VITA 49, such as FlexRadio, REDHAWK SCA, Sceptre, or custom VRT sources.
+
+```bash
+# Auto-configure from VRT context packets (sample rate, frequency, format)
+./iridium-sniffer --vita49
+
+# Specify bind address and port
+./iridium-sniffer --vita49=192.168.1.100:5000
+
+# Override specific values (context auto-fills the rest)
+./iridium-sniffer --vita49 -c 1626270833
+
+# With web map
+./iridium-sniffer --vita49 --web
+```
+
+**Auto-configuration from context packets:** When the VRT source sends IF context packets (type 0x4), iridium-sniffer automatically extracts sample rate, RF center frequency, and sample format (ci8/ci16/cf32) from the context fields. On startup, the tool waits up to 5 seconds for a context packet before falling back to command-line values or defaults.
+
+Command-line flags (`-r`, `-c`, `--format`) override auto-detected values. If `--format` is specified but the context reports a different format, iridium-sniffer exits with an error since mismatched sample formats produce unusable output. Sample rate and center frequency mismatches produce a warning but continue.
+
+The parser accepts VRT signal data packets (type 0x0 and 0x1) with optional VRL framing. Sequence gap detection is built in and logged at shutdown. No external libraries are required -- VITA 49 parsing uses only POSIX sockets.
+
+## Command Reference
+
+The program's own `--help` (iridium-observatory build of 2026-10-15). Run
+`iridium-sniffer --help` for the version you have.
+
+```
+Usage: iridium-sniffer <-f FILE | -i IFACE> [options]
+Standalone Iridium satellite burst detector and demodulator.
+Outputs iridium-toolkit compatible RAW format to stdout.
+
+Input (one required):
+    -f, --file=FILE         read IQ samples from file
+    -l, --live              capture live from SDR (implied by -i)
+    --format=FMT            IQ file format: ci8 (default), ci16, cf32
+
+SDR options:
+    -i, --interface=IFACE   SDR to use (see --list for available devices):
+                             soapy-N (by index) or soapy:driver=X,serial=Y (by args)
+                             hackrf-SERIAL, bladerfN, usrp-PRODUCT-SERIAL
+                             sdrplay-SERIAL (native SDRplay API)
+    -c, --center-freq=HZ    center frequency in Hz (default: 1622000000)
+    -r, --sample-rate=HZ    sample rate in Hz (default: 10000000)
+    -B, --bias-tee           enable bias tee power
+    --clock-source=SRC       clock reference: internal (default), external, gpsdo
+    --time-source=SRC        time/PPS reference: internal (default), external, gpsdo
+
+Gain options:
+    --hackrf-lna=GAIN       HackRF LNA gain in dB (default: 40)
+    --hackrf-vga=GAIN       HackRF VGA gain in dB (default: 20)
+    --hackrf-amp            enable HackRF RF amplifier
+    --bladerf-gain=GAIN     BladeRF gain in dB (default: 40)
+    --usrp-gain=GAIN        USRP gain in dB (default: 40)
+    --soapy-gain=GAIN       SoapySDR gain in dB (default: 30)
+    --sdrplay-gain=GAIN    SDRplay IF gain reduction 20-59, disables AGC (default: AGC on)
+    --airspy-sensitivity=N  Airspy R2/Mini sensitivity preset 0-21 (default: 12)
+    --airspy-linearity=N    Airspy linearity preset 0-21, for strong nearby signals
+                             (overrides sensitivity)
+    --airspy-lna=N --airspy-mixer=N --airspy-vga=N
+                             Airspy manual stage gains 0-15 (override both presets)
+    --soapy-gain-element=NAME:VAL  set SoapySDR per-element gain (repeatable)
+                             e.g. LNA:10, MIX:9, VGA:10 (Airspy R2)
+                             skips aggregate --soapy-gain when any element is set
+                             use -v to list available gain elements for your device
+    --soapy-setting=K:V    SoapySDR device setting (repeatable)
+                             e.g. bitpack:true (Airspy), biastee_rx:true (bladeRF)
+
+Detection options:
+    -d, --threshold=DB      burst detection threshold in dB (default: 16.0)
+    --no-gpu                disable GPU acceleration (use CPU FFTW)
+    --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar
+    --no-simd               alias for --simd=scalar
+    --workers=N             downmix worker threads (1-32, default: auto from CPU cores)
+    --chase[=N]             enable Chase soft-decision BCH decoder (experimental)
+                             N = flip-bits count, 0-7 (default 5 = 31 combos).
+                             0 or omitting --chase disables (default).
+                             Generates per-bit LLR scores; tries 2^N-1 flip
+                             combinations on BCH-rejected blocks.  IDA/ACARS
+                             path gated by CRC-16; IRA/IBC have no payload CRC.
+                             Off by default.
+
+Web map:
+    --web[=PORT]            enable live web map (default port: 8888)
+    --archive[=DIR]         append JSONL archive of frame-type rollups and
+                             decoded messages (default dir: ./archive)
+    --position[=HEIGHT_M]   estimate receiver position from Doppler shift
+                             optional height aiding in meters (implies --web)
+
+GSMTAP:
+    --gsmtap[=HOST:PORT]    send IDA frames as GSMTAP/LAPDm via UDP
+                             (default: 127.0.0.1:4729, for Wireshark)
+
+Output options:
+    --file-info=STR         file info string for output (default: auto)
+    --file-start=TIME       time of the file's first sample: Unix seconds, ISO 8601
+                             UTC, or 'sigmf' (captures[0].core:datetime of the
+                             .sigmf-meta, also <name>.sigmf-meta beside any file).
+                             Frame times then follow the recording's clock instead
+                             of the wall clock at start (default). With --zmq-sub:
+                             the time of the first sample received.
+    --save-bursts=DIR       save IQ samples of decoded bursts to directory
+    --diagnostic            setup verification mode (suppresses RAW output)
+    --no-gardner           disable Gardner timing recovery (enabled by default)
+    --uw-reject=T          drop UW-fail bursts with sync score < T as false
+                           positives (default 0.70; 0 disables). Does not
+                           affect decoding, only the UW-fail count.
+    --parsed               output parsed IDA lines (pipe to reassembler.py)
+    --parsed=full          output every frame as iridium-parser.py prints it
+                           (native port; see docs/NATIVE_PARSER_PLAN.md)
+    --reassemble=MODE[,ARG,...]  reassemble frames as iridium-toolkit's
+                           reassembler.py -m MODE -a ARG,... does (MODE: ida,
+                           sbd, acars; ARG: json, showerrs, nopings, perfect)
+                           and print that instead of frames (native port)
+    --messages=MODE[,ARG,...]  alongside the frames (repeatable, up to 4):
+                           reassemble as --reassemble does and print each
+                           message as "RSM: MODE N T1,...,TN | <line>", with
+                           the times of its N IDA frames (libacars: json only)
+    --parse-harder         for --parsed=full and --reassemble: parse as
+                           iridium-parser.py --harder does (recovers frames
+                           with bit errors in their headers)
+    --parse-uw-ec          likewise iridium-parser.py --uw-ec (accepts an
+                           access code with up to 3 symbol errors)
+    --replay-raw=FILE      read RAW: lines (this program's output) instead of
+                           samples and run only the output stage on them
+                           (tests; hard bits only, as iridium-toolkit gets)
+    --acars               decode and display ACARS messages from IDA
+    --acars-json          output ACARS as JSON (compatible with acars.py)
+    --acars-udp=HOST:PORT stream ACARS JSON via UDP (repeatable, max 4)
+    --feed[=PROTO://HOST:PORT] feed aggregator (iridium-toolkit JSON format)
+                             udp://HOST:PORT for acarshub (e.g. udp://127.0.0.1:5558)
+                             tcp://HOST:PORT for airframes.io direct
+                             bare --feed defaults to tcp://feed.airframes.io:5590
+                             repeatable (max 4, mix udp:// and tcp://)
+    --station=ID          station identifier for ACARS JSON output
+    --zmq[=ENDPOINT]     publish output via ZMQ PUB socket for multi-consumer
+                             (default: tcp://*:7006, compatible with iridium-toolkit)
+    --zmq-sub[=ENDPOINT]  receive IQ samples via ZMQ SUB socket
+                             (default: tcp://127.0.0.1:5555, use with -f and -r)
+    --vita49[=IP:PORT]    receive IQ via VITA 49 (VRT) UDP packets
+                             (default: 0.0.0.0:4991, auto-detects -r/-c/format
+                             from VRT context packets if not specified)
+
+  BaseStation output:
+    --basestation[=PORT]     SBS server on PORT (default 30003, tools connect in)
+    --basestation=HOST:PORT  SBS push to remote host (auto-reconnect)
+    --basestation-beam       include beam-estimated positions in SBS feed
+                             (default: only GPS-quality positions are sent)
+    --aircraft-db=PATH       aircraft database CSV (default: ~/.iridium-sniffer/aircraft.csv)
+    --update-db              download/update aircraft database and exit
+
+    -v, --verbose           verbose output to stderr
+    -h, --help              show this help
+    --list                  list available SDR interfaces
+
+The output format is compatible with iridium-toolkit. Pipe to iridium-parser.py:
+    iridium-sniffer -l | python3 iridium-toolkit/iridium-parser.py
+```
+
+### Options added by iridium-observatory
+
+Everything else above is inherited from iridium-sniffer.
+
+| Option | What it does |
+|---|---|
+| `--airspy-sensitivity`, `--airspy-linearity`, `--airspy-lna`, `--airspy-mixer`, `--airspy-vga`, `--airspy-no-packing` | Native Airspy R2 / Mini gain and transfer settings; `-i airspy-SERIAL` selects the radio |
+| `--archive[=DIR]` | Append-only daily JSONL archive of frame-type counts and decoded messages, read by the Observatory |
+| `--uw-reject=T` | Drop burst-detector false positives by unique-word sync score (default 0.70) |
+| `--file-start=TIME` | Time of a recording's first sample, so frame times follow the recording's clock |
+| `--parsed=full` | Every frame as iridium-parser.py prints it (native port) |
+| `--reassemble=MODE[,ARG,...]` | Reassemble as iridium-toolkit's reassembler.py does (ida, sbd, acars) |
+| `--messages=MODE[,ARG,...]` | Print reassembled messages alongside the frames |
+| `--parse-harder`, `--parse-uw-ec` | iridium-parser.py's `--harder` and `--uw-ec` recovery modes |
+| `--replay-raw=FILE` | Run only the output stage on saved RAW lines (testing) |
+
+See [NATIVE_PARSER_PLAN.md](NATIVE_PARSER_PLAN.md) for the native parser and reassembler, and
+[NEW_FEATURES.md](NEW_FEATURES.md) for the decoding this fork added.
+
+## Recommended Settings
+
+**Center frequency:** 1622 MHz (default) covers the full authorized Iridium band. With 10 MHz sample rate, this captures 1617-1627 MHz, which includes:
+- Iridium's exclusive band: 1618.725-1626.5 MHz (7.775 MHz)
+- Shared Iridium/Globalstar: 1617.775-1618.725 MHz (0.95 MHz)
+- Ring alert/simplex channels: 1626.0-1626.5 MHz
+
+Below 1617.775 MHz is Globalstar's exclusive territory. The ITU allocation extends down to 1616 MHz, but Iridium is not authorized to transmit there.
+
+**Sample rate:** 10 MHz (default) covers the full authorized Iridium band without processing empty spectrum. SDRs with 12 MHz capability can use `-r 12000000 -c 1621000000` to cover the entire ITU allocation including the unauthorized guard band, but this provides no additional Iridium signals. There is no decimation (`-D`) flag -- each detected burst is automatically downmixed and decimated to 250 kHz internally regardless of input sample rate.
+
+**Narrowband SDRs (RTL-SDR):** For RTL-SDR and other SDRs limited to 2-3 MHz bandwidth, use `-c 1625500000 -r 2400000` to center on the ring alert and simplex channels (1624.3-1626.7 MHz). This captures the IRA frames needed for the web map. The default 1622 MHz center is optimized for wideband receivers and places ring alert channels outside narrowband capture range.
+
+**Threshold:** 16 dB (default) balances sensitivity and false positives. Lower values (14 dB) catch weaker bursts at the cost of more noise. Higher values (18-20 dB) are more selective but may miss marginal signals.
+
+## SDR Hardware
+
+Any SDR that tunes to L-band (1616-1626.5 MHz) and samples at 2 MHz or above will work. Tested hardware:
+
+| SDR | ADC | Max Rate | Notes |
+|-----|-----|----------|-------|
+| Ettus USRP B210 | 12-bit | 56 MHz | Best sensitivity, dual channel |
+| HackRF One | 8-bit | 20 MHz | Widely available, good performance |
+| BladeRF | 12-bit | 40 MHz | Good sensitivity |
+| SDRplay RSPdx/RSP1A/RSP1B | 14-bit | 10 MHz | Native API, bias tee on Antenna B (RSPdx/RSP2) |
+| Airspy R2 / Mini | 12-bit | 10 / 6 MHz | Native driver (iridium-observatory); the R2's 10 MHz covers the whole band. Bias tee for an LNA |
+| RTL-SDR (via SoapySDR) | 8-bit | 2.4 MHz | Limited bandwidth, but works |
+| LimeSDR, etc. | varies | varies | Via SoapySDR |
+
+## Clock and Time Source
+
+For improved Doppler positioning accuracy, SDRs with external reference inputs can be configured to use a disciplined clock and/or GPS-synchronized timestamps.
+
+```bash
+# USRP with Ettus GPSDO module (disciplined 10 MHz + GPS time)
+./iridium-sniffer -i usrp-B210-SERIAL --clock-source gpsdo --time-source gpsdo --position
+
+# USRP with external GPSDO feeding 10 MHz REF IN + PPS IN
+./iridium-sniffer -i usrp-B210-SERIAL --clock-source external --time-source external --position
+
+# bladeRF with external 10 MHz reference (disciplines onboard VCTCXO)
+./iridium-sniffer -i bladerf0 --clock-source external
+
+# bladeRF with 1 PPS reference (GPSDO mode)
+./iridium-sniffer -i bladerf0 --clock-source gpsdo
+```
+
+| Source | USRP | bladeRF | SoapySDR |
+|--------|------|---------|----------|
+| `internal` (default) | Onboard oscillator | Onboard VCTCXO | Device default |
+| `external` | 10 MHz REF IN SMA | VCTCXO tamer (10 MHz) | `setClockSource("external")` |
+| `gpsdo` | Ettus GPSDO module | VCTCXO tamer (1 PPS) | `setClockSource("gpsdo")` |
+
+When `--time-source` is set to `external` or `gpsdo`, hardware timestamps from the SDR are used for burst timing instead of the host system clock. This eliminates OS scheduling jitter and clock drift, providing sub-microsecond burst arrival times for Doppler positioning.
+
+When no clock/time source is specified, behavior is identical to previous versions -- no extra API calls are made.
+
+## GPU Acceleration
+
+GPU acceleration offloads the burst detection FFT to the GPU. The rest of the signal processing pipeline (downmix, demod) runs on the CPU regardless.
+
+| Platform | Backend | Notes |
+|----------|---------|-------|
+| NVIDIA | OpenCL | Full GPU pipeline, best performance |
+| AMD | OpenCL | ROCm or Mesa drivers |
+| Intel integrated | OpenCL | Via NEO or Beignet |
+| Raspberry Pi 5 | Vulkan | V3D passes validation but cannot sustain batch FFT throughput; use `--no-gpu` |
+| No GPU | CPU | FFTW fallback, handles 10 MHz fine on x86; ARM requires pre-generated wisdom (see above) |
+
+On fast x86 CPUs at 10 MHz, the CPU FFTW path keeps up easily. GPU acceleration is most beneficial for continuous live capture on desktop/laptop systems. A startup validation test verifies GPU correctness by running a test FFT with a known input.
+
+Both backends can be disabled at runtime with `--no-gpu`.
+
+## Output Format
+
+stdout produces the iridium-toolkit RAW format:
+
+```
+RAW: i-10-t1 0000442.4080 1624960925 N:10.77-71.83 I:00000003560  50% 0.11738 179 001100011011...
+```
+
+Fields are: file info, timestamp (ms), frequency (Hz), magnitude and noise floor (dB), burst ID, confidence (%), signal level, payload symbol count, and demodulated bits.
+
+### Signal Levels
+
+The `N:` field contains two values separated by a sign: **magnitude** and **noise floor**, both in dB.
+
+- **Magnitude** (`10*log10(burst_power / baseline)`) measures how far the burst rises above the averaged noise floor in the FFT. This is an SNR-like ratio, not an absolute power level.
+- **Noise floor** is in dBFS/Hz -- the averaged baseline power spectral density at the burst frequency.
+
+The magnitude calculation is equivalent to gr-iridium's approach (both measure burst power relative to baseline). However, differences in gain settings, sample rate, FFT size, and threshold will change which bursts are detected and the reported values. If signal levels appear lower than expected, check gain settings first -- the `--soapy-gain-element` or device-specific gain flags allow fine-tuning individual gain stages.
+
+The `signal level` field (e.g. `0.11738`) is the raw burst amplitude in linear scale, separate from the dB magnitude.
+
+This output is consumed directly by [iridium-toolkit](https://github.com/muccc/iridium-toolkit) for higher-layer protocol decoding including ACARS, SBD messaging, pager data, voice, and satellite telemetry.
+
+stderr shows a status line once per second in the same format as gr-iridium, so existing monitoring scripts work without changes.
