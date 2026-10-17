@@ -893,13 +893,18 @@ static void *output_thread_fn(void *arg) {
                 if (web_enabled)
                     web_map_count_type(ftype);
                 if (archive_enabled) {
-                    /* Ring alerts only: their satellite number is matched
-                     * to real satellites by orbit (observatory/sky.py).
-                     * IBC sv_id is not: on the feeder two values ran in
-                     * every minute of the day, so counting it inflated
-                     * "active satellites" past anything overhead. */
+                    /* Ring alerts only, and only on the ring-alert channel
+                     * (S.07, within Doppler of it; the window doppler_pos.c
+                     * uses). Their satellite number is matched to real
+                     * satellites by orbit (observatory/sky.py). Frames that
+                     * pass as IRA elsewhere in the band are something else:
+                     * on the feeder they carried satellite number 95 at
+                     * ~250 a minute, all day, and IBC sv_id isn't a
+                     * satellite either. Both inflated "active satellites". */
                     int sat_id = -1;
-                    if (dec && decoded.type == FRAME_IRA)
+                    const double ra_hz = IR_BASE_FREQ + (246 + 0.5) * IR_CHANNEL_WIDTH;
+                    if (dec && decoded.type == FRAME_IRA &&
+                        fabs(decoded.frequency - ra_hz) <= 100e3)
                         sat_id = decoded.ira.sat_id;
                     archive_count_frame(ftype,
                                         demod->direction == DIR_UPLINK,
