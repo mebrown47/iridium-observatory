@@ -16,3 +16,7 @@ archive/
 *.zip
 build-install/
 build-install.log
+
+# AppImage builds (packaging/appimage/build-appimage.sh)
+build-appimage-work/
+*.AppImage

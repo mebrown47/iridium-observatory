@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=iridium-observatory
+Comment=Listen to the Iridium satellite network with an RTL-SDR, Airspy or HackRF
+Exec=AppRun
+Icon=iridium-observatory
+Terminal=true
+Categories=HamRadio;Science;Network;

@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 Mike Brown
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# AppRun — the iridium-observatory AppImage launcher. Picks the radio, starts
+# the receiver (live map) and the Observatory dashboards, prints their
+# addresses, and stops both on Ctrl+C. Nothing is installed; data lives in
+# ~/.local/share/iridium-observatory.
+#
+#   ./iridium-observatory-x86_64.AppImage              start (asks which radio if several)
+#   ./iridium-observatory-x86_64.AppImage --setup-usb  one time: let you open the radio (asks for your password)
+#   ./iridium-observatory-x86_64.AppImage --help       all options
+#
+set -uo pipefail
+
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+BIN="$HERE/usr/bin/iridium-sniffer"
+OBS="$HERE/usr/share/iridium-observatory/observatory"
+# Our own libraries, and only our own SoapySDR modules (the RTL-SDR one):
+# a system SoapySDR's modules may be built for a different version.
+export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export SOAPY_SDR_ROOT="$HERE/usr"
+export SOAPY_SDR_PLUGIN_PATH="$HERE/usr/lib/SoapySDR/modules0.8"
+export PYTHONDONTWRITEBYTECODE=1        # the AppImage is read-only
+
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/iridium-observatory"
+WEB_PORT=8888; OBS_PORT=8890
+SDR=""; BIAS=""; OPEN_BROWSER=1; OBSERVATORY=1
+EXTRA=()
+
+B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; Z=$'\e[0m'
+[ -t 1 ] || { B=""; G=""; Y=""; R=""; Z=""; }
+say()  { printf '%s\n' "$*"; }
+warn() { printf '%s\n' "${Y}$*${Z}" >&2; }
+die()  { printf '%s\n' "${R}$*${Z}" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+iridium-observatory: listen to the Iridium satellite network with an RTL-SDR,
+Airspy or HackRF, and watch it on two web pages.
+
+Usage: $(basename "${APPIMAGE:-$0}") [options] [-- receiver options]
+
+  --setup-usb        one time: let your user open RTL-SDR, Airspy and HackRF radios
+                     (asks for your password; run it if your radio isn't found)
+  --list             list the radios this computer can see, then exit
+  --sdr NAME         use this radio (a name from --list), instead of asking
+  -B, --bias-tee     power an LNA through the antenna cable
+  --data DIR         keep the archive and database here (default: $DATA)
+  --web-port N       live map port (default 8888)
+  --obs-port N       Observatory port (default 8890)
+  --no-browser       don't open the pages in a browser
+  --no-observatory   run the receiver only
+  -- ...             anything after -- goes to the receiver, e.g. -- --hackrf-vga=32
+  sniffer ...        run the receiver program directly with your own options
+  -h, --help         this help
+
+Data: $DATA
+EOF
+}
+
+# ---- one-time USB access ---------------------------------------------------
+setup_usb() {
+  local rule=/etc/udev/rules.d/52-iridium-observatory-sdr.rules
+  say "This lets your user open RTL-SDR, Airspy and HackRF radios without root."
+  say "It writes $rule and a blacklist for the TV-tuner driver that grabs RTL-SDRs."
+  say "You'll be asked for your password."
+  getent group plugdev >/dev/null 2>&1 || sudo groupadd -r plugdev || die "could not create the plugdev group"
+  sudo tee "$rule" >/dev/null <<'RULE' || die "could not write $rule"
+# Written by iridium-observatory: let plugdev (and whoever is logged in at the
+# screen) open these SDRs.
+# Airspy R2 / Mini
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="60a1", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+# HackRF One, Jawbreaker, rad1o
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="6089", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="604b", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="cc15", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+# RTL-SDR (RTL2832U)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2832", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+RULE
+  # The kernel's DVB-T TV driver claims RTL-SDR dongles before librtlsdr can.
+  sudo tee /etc/modprobe.d/blacklist-iridium-observatory-rtl.conf >/dev/null <<'BL'
+# Written by iridium-observatory: let librtlsdr use RTL2832U dongles as SDRs.
+blacklist dvb_usb_rtl28xxu
+BL
+  sudo modprobe -r dvb_usb_rtl28xxu 2>/dev/null || true
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger --subsystem-match=usb
+  sudo udevadm settle --timeout=10 || true
+  if [[ " $(id -nG) " != *" plugdev "* ]]; then
+    sudo usermod -aG plugdev "$(id -un)"
+    say "Added you to the plugdev group."
+  fi
+  say "${G}Done.${Z} Unplug the radio and plug it back in, then start iridium-observatory again."
+  say "(If it still isn't found from an SSH session, log out and back in once.)"
+}
+
+# ---- radios ----------------------------------------------------------------
+list_radios() {
+  timeout 20 "$BIN" --list 2>/dev/null | awk '
+    /^  (hackrf-|airspy-)/ { print $1; next }
+    /^  soapy-[0-9]/ && $2 == "rtlsdr" { rtl = 1 }
+    END { if (rtl) print "soapy:driver=rtlsdr" }'
+}
+# Known SDRs plugged in, by USB id, whether or not we can open them.
+usb_radios() {
+  local d id
+  for d in /sys/bus/usb/devices/*; do
+    [ -r "$d/idVendor" ] || continue
+    id="$(<"$d/idVendor"):$(<"$d/idProduct")"
+    case "$id" in
+      1d50:60a1) echo "Airspy";;
+      1d50:6089|1d50:604b|1d50:cc15) echo "HackRF";;
+      0bda:2832|0bda:2838) echo "RTL-SDR";;
+    esac
+  done
+}
+radio_args() {
+  case "$1" in
+    hackrf-*)   echo "-i $1 --hackrf-lna=40 --hackrf-vga=20";;
+    airspy-*)   echo "-i $1 --airspy-sensitivity=12";;
+    # An RTL-SDR's 2.4 MHz covers the ring-alert and pager channels at the top of the band.
+    soapy:driver=rtlsdr*) echo "-i $1 -r 2400000 -c 1625500000 --soapy-gain=40";;
+    *)          echo "-i $1";;
+  esac
+}
+
+port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# ---- arguments -------------------------------------------------------------
+if [ "${1:-}" = sniffer ]; then shift; exec "$BIN" "$@"; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --setup-usb)      setup_usb; exit $?;;
+    --list)           list_radios; exit 0;;
+    --sdr)            SDR="${2:?--sdr needs a radio name (see --list)}"; shift;;
+    -B|--bias-tee)    BIAS="-B";;
+    --data)           DATA="${2:?--data needs a folder}"; shift;;
+    --web-port)       WEB_PORT="${2:?}"; shift;;
+    --obs-port)       OBS_PORT="${2:?}"; shift;;
+    --no-browser)     OPEN_BROWSER=0;;
+    --no-observatory) OBSERVATORY=0;;
+    -h|--help)        usage; exit 0;;
+    --)               shift; EXTRA=("$@"); break;;
+    *)                die "unknown option: $1 (try --help)";;
+  esac
+  shift
+done
+
+say "${B}iridium-observatory${Z} $(cat "$HERE/VERSION" 2>/dev/null)"
+mkdir -p "$DATA/archive" || die "cannot create $DATA"
+
+# ---- pick the radio ----------------------------------------------------------
+if [ -z "$SDR" ]; then
+  mapfile -t RADIOS < <(list_radios)
+  if [ "${#RADIOS[@]}" -eq 0 ]; then
+    mapfile -t SEEN < <(usb_radios)
+    if [ "${#SEEN[@]}" -gt 0 ]; then
+      die "Found ${SEEN[*]} on USB, but can't open it. Run this once, then try again:
+    $(basename "${APPIMAGE:-$0}") --setup-usb"
+    fi
+    die "No RTL-SDR, Airspy or HackRF found. Plug one in and try again."
+  elif [ "${#RADIOS[@]}" -eq 1 ]; then
+    SDR="${RADIOS[0]}"
+  else
+    say "Radios found:"
+    for i in "${!RADIOS[@]}"; do say "  $((i+1))) ${RADIOS[$i]}"; done
+    n=1
+    if [ -t 0 ]; then read -r -p "Which one [1]: " n || true; fi
+    [[ "${n:-1}" =~ ^[0-9]+$ ]] && [ "${n:-1}" -ge 1 ] && [ "${n:-1}" -le "${#RADIOS[@]}" ] || n=1
+    SDR="${RADIOS[$((${n:-1}-1))]}"
+  fi
+fi
+say "Radio: $SDR"
+
+port_busy "$WEB_PORT" && die "Port $WEB_PORT is in use. Is iridium-observatory already running (perhaps installed as a service)?
+Stop it, or start this one with --web-port and --obs-port set to free ports."
+[ "$OBSERVATORY" = 1 ] && port_busy "$OBS_PORT" && die "Port $OBS_PORT is in use. Start with --obs-port set to a free port."
+
+# ---- start ---------------------------------------------------------------------
+PIDS=()
+cleanup() {
+  trap - INT TERM EXIT
+  [ "${#PIDS[@]}" -gt 0 ] && kill "${PIDS[@]}" 2>/dev/null
+  wait 2>/dev/null
+  say ""; say "Stopped. Your data is in $DATA"
+}
+trap cleanup INT TERM EXIT
+
+# shellcheck disable=SC2046
+"$BIN" $(radio_args "$SDR") $BIAS --acars --position --web="$WEB_PORT" \
+  --archive="$DATA/archive" "${EXTRA[@]}" > "$DATA/receiver.log" 2>&1 &
+RX=$!; PIDS+=("$RX")
+sleep 4
+if ! kill -0 "$RX" 2>/dev/null; then
+  warn "The receiver stopped straight away. The end of its log ($DATA/receiver.log):"
+  tail -8 "$DATA/receiver.log" >&2
+  grep -qiE "unable to open|not found|access|permission|busy" "$DATA/receiver.log" && \
+    warn "If the radio is in use by another program, close it. Otherwise run once: $(basename "${APPIMAGE:-$0}") --setup-usb"
+  exit 1
+fi
+
+if [ "$OBSERVATORY" = 1 ]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 not found: running the live map only (install python3 for the Observatory)."
+    OBSERVATORY=0
+  else
+    ( while kill -0 "$RX" 2>/dev/null; do
+        python3 "$OBS/rollup.py" --archive "$DATA/archive" --db "$DATA/observatory.db" >> "$DATA/observatory.log" 2>&1
+        sleep 300
+      done ) &
+    PIDS+=("$!")
+    python3 "$OBS/trends_server.py" --db "$DATA/observatory.db" --port "$OBS_PORT" \
+      --sniffer "http://127.0.0.1:$WEB_PORT" >> "$DATA/observatory.log" 2>&1 &
+    PIDS+=("$!")
+  fi
+fi
+
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+say ""
+say "  ${G}Running.${Z} Open these in a web browser:"
+say "    Live map:     ${B}http://localhost:$WEB_PORT/${Z}"
+[ "$OBSERVATORY" = 1 ] && say "    Observatory:  ${B}http://localhost:$OBS_PORT/${Z}   (charts fill in over the first hour;"
+[ "$OBSERVATORY" = 1 ] && say "                  the Doppler page finds your location in about 20 minutes)"
+[ -n "$IP" ] && say "  From another computer, use http://$IP:$WEB_PORT/ and http://$IP:$OBS_PORT/"
+say "  Logs and data: $DATA"
+say "  Press Ctrl+C to stop."
+
+if [ "$OPEN_BROWSER" = 1 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null; then
+  ( sleep 2; xdg-open "http://localhost:$WEB_PORT/" >/dev/null 2>&1
+    [ "$OBSERVATORY" = 1 ] && { sleep 1; xdg-open "http://localhost:$OBS_PORT/doppler" >/dev/null 2>&1; } ) &
+fi
+
+wait "$RX"
+warn "The receiver stopped. The end of its log:"
+tail -8 "$DATA/receiver.log" >&2
+exit 1
