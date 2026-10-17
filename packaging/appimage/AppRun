@@ -186,7 +186,10 @@ cleanup() {
   wait 2>/dev/null
   say ""; say "Stopped. Your data is in $DATA"
 }
-trap cleanup INT TERM EXIT
+# Ctrl+C (or a TERM) is the normal way to stop: clean up and exit, so the
+# "receiver stopped" warning below is reached only when it really died.
+trap 'cleanup; exit 0' INT TERM
+trap cleanup EXIT
 
 # shellcheck disable=SC2046
 "$BIN" $(radio_args "$SDR") $BIAS --acars --position --web="$WEB_PORT" \
