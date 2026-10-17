@@ -40,6 +40,11 @@ SNIFFER_URL = "http://127.0.0.1:8888"
 IR_BASE_FREQ = 1616000000.0
 IR_CHANNEL_WIDTH = 41666.667
 
+# Ring alerts a satellite number needs in an hour to count as a satellite
+# heard (not a corrupted frame). First guess; tune against the orbit-named
+# satellites on the Doppler page.
+MIN_SAT_FRAMES = 50
+
 # Kept in sync with rollup.FRAME_TYPES; drives legend order + colors.
 FRAME_TYPES = ["IRA", "IBC", "MSG", "IDA", "VOC", "IIP", "IU3", "ISY",
                "IU6", "IDA_UL_FAIL", "ITL", "RAW"]
@@ -106,17 +111,28 @@ def build_trends(path, hours=None):
             for s in ("acars", "cpdlc", "adsc", "pager"):
                 h.setdefault(s, 0)
 
-        # Active sats per hour + total frames per hour.
-        active = []
-        for r in rows("SELECT hour,COUNT(DISTINCT sat_id) n,SUM(count) c "
-                      "FROM sat_hourly WHERE hour>=? GROUP BY hour ORDER BY "
-                      "hour", floor):
-            active.append({"hour": r["hour"], "n": r["n"], "frames": r["c"]})
-
-        # Top satellites over the window.
-        top_sats = [{"sat": r["sat_id"], "count": r["c"]} for r in rows(
-            "SELECT sat_id,SUM(count) c FROM sat_hourly WHERE hour>=? "
-            "GROUP BY sat_id ORDER BY c DESC LIMIT 24", floor)]
+        # Active sats per hour + total frames per hour. A satellite counts
+        # in an hour only when its ring alerts reach MIN_SAT_FRAMES: a pass
+        # gives hundreds, while frames corrupted into a wrong satellite
+        # number that still passes BCH give a handful. Ring alerts only
+        # (sat_ira_hourly); a DB from before that table has no data here.
+        has_ira = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                              "AND name='sat_ira_hourly'").fetchone()
+        active, top_sats, nsat = [], [], 0
+        if has_ira:
+            for r in rows("SELECT hour,COUNT(*) n,SUM(count) c FROM "
+                          "sat_ira_hourly WHERE hour>=? AND count>=? "
+                          "GROUP BY hour ORDER BY hour", floor, MIN_SAT_FRAMES):
+                active.append({"hour": r["hour"], "n": r["n"],
+                               "frames": r["c"]})
+            # Top satellites over the window.
+            top_sats = [{"sat": r["sat_id"], "count": r["c"]} for r in rows(
+                "SELECT sat_id,SUM(count) c FROM sat_ira_hourly WHERE hour>=? "
+                "AND count>=? GROUP BY sat_id ORDER BY c DESC LIMIT 24",
+                floor, MIN_SAT_FRAMES)]
+            nsat = rows("SELECT COUNT(DISTINCT sat_id) n FROM sat_ira_hourly "
+                        "WHERE hour>=? AND count>=?", floor,
+                        MIN_SAT_FRAMES)[0]["n"]
 
         # Totals over the window.
         tf = rows("SELECT dir,SUM(count) c FROM frame_hourly WHERE hour>=? "
@@ -128,8 +144,6 @@ def build_trends(path, hours=None):
         uw = rows("SELECT dir,SUM(count) c FROM uw_hourly WHERE hour>=? "
                   "GROUP BY dir", floor)
         uw_tot = {r["dir"]: r["c"] for r in uw}
-        nsat = rows("SELECT COUNT(DISTINCT sat_id) n FROM sat_hourly "
-                    "WHERE hour>=?", floor)[0]["n"]
 
         meta = {r[0]: r[1] for r in con.execute(
             "SELECT key,value FROM meta").fetchall()}

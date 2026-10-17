@@ -893,11 +893,14 @@ static void *output_thread_fn(void *arg) {
                 if (web_enabled)
                     web_map_count_type(ftype);
                 if (archive_enabled) {
+                    /* Ring alerts only: their satellite number is matched
+                     * to real satellites by orbit (observatory/sky.py).
+                     * IBC sv_id is not: on the feeder two values ran in
+                     * every minute of the day, so counting it inflated
+                     * "active satellites" past anything overhead. */
                     int sat_id = -1;
                     if (dec && decoded.type == FRAME_IRA)
                         sat_id = decoded.ira.sat_id;
-                    else if (dec && decoded.type == FRAME_IBC)
-                        sat_id = decoded.ibc.sat_id;
                     archive_count_frame(ftype,
                                         demod->direction == DIR_UPLINK,
                                         sat_id);

@@ -89,6 +89,13 @@ def init_db(con):
             hour INTEGER, sat_id INTEGER, count INTEGER,
             PRIMARY KEY (hour, sat_id)
         );
+        -- Ring-alert satellite numbers only ("ira_sats" in the archive).
+        -- sat_hourly (the older "sats", mixed with IBC sv_id) is kept
+        -- but no longer read.
+        CREATE TABLE IF NOT EXISTS sat_ira_hourly (
+            hour INTEGER, sat_id INTEGER, count INTEGER,
+            PRIMARY KEY (hour, sat_id)
+        );
         CREATE TABLE IF NOT EXISTS msg_hourly (
             hour INTEGER, service TEXT, dir TEXT, count INTEGER,
             PRIMARY KEY (hour, service, dir)
@@ -350,7 +357,8 @@ class Agg:
     def __init__(self):
         self.frame = {}   # (hour,type,dir) -> count
         self.uw = {}      # (hour,dir) -> count
-        self.sat = {}     # (hour,sat_id) -> count
+        self.sat = {}     # (hour,sat_id) -> count, legacy "sats"
+        self.sat_ira = {} # (hour,sat_id) -> count, "ira_sats"
         self.msg = {}     # (hour,service,dir) -> count
         self.messages = []  # per-message rows (M4)
         self.cpdlcs = []    # per-CPDLC rows (M4)
@@ -375,6 +383,8 @@ class Agg:
                 self.add(self.uw, (h, "UL"), uw[1])
             for sid, n in ev.get("sats", {}).items():
                 self.add(self.sat, (h, int(sid)), n)
+            for sid, n in ev.get("ira_sats", {}).items():
+                self.add(self.sat_ira, (h, int(sid)), n)
         elif e == "acars":
             h = hour_of(ev["t"])
             ts = sec_of(ev["t"])
@@ -433,6 +443,7 @@ class Agg:
         upsert("frame_hourly", ("hour", "type", "dir"), self.frame)
         upsert("uw_hourly", ("hour", "dir"), self.uw)
         upsert("sat_hourly", ("hour", "sat_id"), self.sat)
+        upsert("sat_ira_hourly", ("hour", "sat_id"), self.sat_ira)
         upsert("msg_hourly", ("hour", "service", "dir"), self.msg)
 
         con.executemany(

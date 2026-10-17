@@ -99,7 +99,10 @@ static void flush_rollup(void)
         }
         fprintf(A.fp, ",\"uw\":[%u,%u]", A.uw_fail[0], A.uw_fail[1]);
         if (A.n_sats > 0) {
-            fprintf(A.fp, ",\"sats\":{");
+            /* Satellite numbers from ring alerts only (main.c). The key
+             * changed from "sats", which also counted IBC sv_id values that
+             * don't name satellites, so old and new counts never mix. */
+            fprintf(A.fp, ",\"ira_sats\":{");
             for (int i = 0; i < A.n_sats; i++)
                 fprintf(A.fp, "%s\"%d\":%u", i ? "," : "",
                         A.sats[i].sat_id, A.sats[i].count);
