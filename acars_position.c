@@ -42,6 +42,88 @@ static double tagged_degrees(const char *s, char **end)
     return d + m / 60.0;
 }
 
+static int trp_sep(char c)
+{
+    return c == ' ' || c == ',' || c == '#' || c == '/' ||
+           c == '\r' || c == '\n' || c == '\t';
+}
+
+/* Signed decimal degrees with exactly 4 places, e.g. "-099.3047" */
+static int deg4(const char *s, int n, double lim, double *v)
+{
+    int i = 0, d = 0;
+    if (i < n && s[i] == '-') i++;
+    while (i < n && s[i] >= '0' && s[i] <= '9') { i++; d++; }
+    if (d < 1 || d > 3 || i + 5 != n || s[i] != '.')
+        return 0;
+    for (int k = i + 1; k < n; k++)
+        if (s[k] < '0' || s[k] > '9')
+            return 0;
+    *v = strtod(s, NULL);
+    return *v >= -lim && *v <= lim;
+}
+
+/* The last HHMMSS LAT LON record in a TRP report (Format 4 below). */
+static int trp_position(const char *text, double *lat, double *lon)
+{
+    const char *tok[3] = {0};
+    int len[3] = {0}, found = 0;
+    const char *s = text;
+    while (*s) {
+        while (*s && trp_sep(*s)) s++;
+        if (!*s) break;
+        const char *b = s;
+        while (*s && !trp_sep(*s)) s++;
+        tok[0] = tok[1]; len[0] = len[1];
+        tok[1] = tok[2]; len[1] = len[2];
+        tok[2] = b; len[2] = (int)(s - b);
+        double la, lo;
+        int time_ok = tok[0] && len[0] == 6;
+        for (int k = 0; time_ok && k < 6; k++)
+            time_ok = tok[0][k] >= '0' && tok[0][k] <= '9';
+        if (time_ok && deg4(tok[1], len[1], 90, &la) &&
+            deg4(tok[2], len[2], 180, &lo)) {
+            *lat = la;
+            *lon = lo;
+            found = 1;
+        }
+    }
+    return found;
+}
+
+/* The last [NS]DDMM.m,[EW]DDDMM.m record (Format 5 below). */
+static int ddmm_position(const char *text, double *lat, double *lon)
+{
+    int found = 0;
+    for (const char *s = text; *s; s++) {
+        if ((*s != 'N' && *s != 'S') || (s > text && !trp_sep(s[-1])))
+            continue;
+        const char *p = s + 1;
+        int k = 0;
+        while (k < 4 && p[k] >= '0' && p[k] <= '9') k++;
+        if (k != 4 || p[4] != '.' || p[5] < '0' || p[5] > '9')
+            continue;
+        char *end;
+        double a = strtod(p, &end);
+        if (*end != ',' || (end[1] != 'E' && end[1] != 'W'))
+            continue;
+        const char *q = end + 2;
+        k = 0;
+        while (k < 5 && q[k] >= '0' && q[k] <= '9') k++;
+        if (k != 5 || q[5] != '.' || q[6] < '0' || q[6] > '9')
+            continue;
+        double o = strtod(q, NULL);
+        double am = a - 100 * (int)(a / 100), om = o - 100 * (int)(o / 100);
+        double la = (int)(a / 100) + am / 60.0, lo = (int)(o / 100) + om / 60.0;
+        if (am >= 60 || om >= 60 || la > 90 || lo > 180)
+            continue;
+        *lat = *s == 'S' ? -la : la;
+        *lon = end[1] == 'W' ? -lo : lo;
+        found = 1;
+    }
+    return found;
+}
+
 int acars_extract_text_position(const char *label, const char *text,
                                         double *lat, double *lon)
 {
@@ -212,6 +294,26 @@ int acars_extract_text_position(const char *label, const char *text,
             }
         }
     }
+
+    /*
+     * Format 4: TRP reports, records of HHMMSS LAT LON in signed decimal
+     * degrees to 4 places, oldest first, separated by spaces, commas or '#':
+     *   TRP 110814  32.8998  -97.0403 289 142.5 ...
+     *   /A1 215402, 45.7750,-102.8185,330,...  (records /A1 to /A5)
+     *   TRP#190829#045.7379#-099.3047#350#...
+     * The last record is the newest.
+     */
+    if (strstr(text, "TRP") && trp_position(text, lat, lon))
+        return 1;
+
+    /*
+     * Format 5: [NS]DDMM.m,[EW]DDDMM.m records, oldest first, then the
+     * time and the weather:
+     *   N3006.4,W08531.3,210145,40004,-51.3,296,029,ER,00000,0,
+     * The last record is the newest.
+     */
+    if (ddmm_position(text, lat, lon))
+        return 1;
 
     return 0;
 }
