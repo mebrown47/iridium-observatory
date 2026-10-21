@@ -8,6 +8,7 @@
 #     - IIP CRC-24 reference vectors
 #     - MSG encode->decode round-trip (incl. BCH error correction)
 #     - LCW classification (ISY frame -> ft 7)
+#     - positions from ACARS text (coordinates, then named fixes)
 #
 #   Tier 2 (optional; needs network + python3 `crcmod`):
 #     - Cross-check the C MSG decoder against iridium-toolkit's iridium-parser.py
@@ -36,6 +37,9 @@ $CC -O2 -I"$ROOT" -o "$BUILD/test_msg" \
 $CC -O2 -I"$ROOT" -o "$BUILD/test_classify" \
     "$HERE/test_classify.c" "$ROOT/ida_decode.c" "$ROOT/frame_decode.c" -lm \
     || { echo "build test_classify failed"; exit 2; }
+$CC -O2 -I"$ROOT" -o "$BUILD/test_acars_position" \
+    "$HERE/test_acars_position.c" "$ROOT/acars_position.c" "$ROOT/waypoint_db.c" -lm \
+    || { echo "build test_acars_position failed"; exit 2; }
 
 # ---- Tier 1a: CRC-24 vectors ----
 echo "== IIP CRC-24 vectors =="
@@ -69,6 +73,16 @@ for spec in "1 flip:80" "2 spread:80 200" "2 close:80 96"; do
     got="$(decode_txt "$b")"
     if [ "$got" = "BCH ERROR CORRECTION" ]; then ok "$name corrected"; else bad "$name got=[$got]"; fi
 done
+
+# ---- Tier 1c2: positions from ACARS text ----
+echo "== ACARS text positions =="
+printf 'HASTE,46.000000,-101.000000\nGOODY,10.000000,10.000000\nBADFX,242917,541148\n' > "$BUILD/fixes.csv"
+while read -r line; do
+    case "$line" in
+        PASS*) ok "${line#PASS }" ;;
+        FAIL*) bad "${line#FAIL }" ;;
+    esac
+done < <("$BUILD/test_acars_position" "$BUILD/fixes.csv" 2>/dev/null)
 
 # ---- Tier 1d: LCW classification (ISY vector from iridium-toolkit tests) ----
 echo "== LCW classification (ISY -> ft 7) =="
