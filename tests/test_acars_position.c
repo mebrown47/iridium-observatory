@@ -54,5 +54,21 @@ int main(int argc, char **argv)
           "FPN/RI:DA:KSEA:AA:KEWR,HASTE", '-', 0, 0);
     check("other labels ignored", "5Z",
           "POSN46247W101478,HASTE", '-', 0, 0);
+
+    /* the rules both engines apply: aircraft-sent only, fix only in POS */
+    double lat, lon;
+    int r;
+    r = acars_aircraft_position("H1", "POSN46247W101478,KSEA", 1, &lat, &lon);
+    printf("%s aircraft-sent coordinates: got %d\n", r == ACARS_POS_TEXT ? "PASS" : "FAIL", r);
+    fails += r != ACARS_POS_TEXT;
+    r = acars_aircraft_position("H1", "POSN46247W101478,KSEA", 0, &lat, &lon);
+    printf("%s uplink ignored: got %d\n", r == 0 ? "PASS" : "FAIL", r);
+    fails += r != 0;
+    r = acars_aircraft_position("H1", "#M1BPOS,HASTE,190504", 1, &lat, &lon);
+    printf("%s POS report naming a fix: got %d\n", r == ACARS_POS_FIX ? "PASS" : "FAIL", r);
+    fails += r != ACARS_POS_FIX;
+    r = acars_aircraft_position("H1", "PWI/WD430,HASTE,149009,430M62", 1, &lat, &lon);
+    printf("%s fix outside a POS report ignored: got %d\n", r == 0 ? "PASS" : "FAIL", r);
+    fails += r != 0;
     return fails ? 1 : 0;
 }

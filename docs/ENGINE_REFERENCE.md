@@ -586,8 +586,14 @@ MSG,3,1,1,A98539,1,2026/04/06,00:15:54.000,2026/04/06,00:15:54.000,UAL928,37000,
 Four position sources feed the output, in priority order:
 1. **ADS-C GPS** -- structured position from ARINC-622 ADS-C reports (requires libacars)
 2. **ACARS free text** -- coordinates extracted from known message labels (H1/POS, label 20, 44, 4J, 15, SA)
-3. **Waypoint lookup** -- first/current fix name resolved via bundled 125K-entry aviation waypoint database
+3. **Waypoint lookup** -- in a POS report that names a fix instead of coordinates, that fix, resolved via the bundled aviation waypoint database
 4. **Beam estimate** -- approximate position from IRA ground beam correlation (~200 km accuracy)
+
+Sources 2 and 3 use only messages the aircraft sent. A message to the aircraft carries other places
+(predicted winds at fixes along its route, weather), and a fix lookup outside POS reports matches
+ordinary words: over 95 days of one feeder's messages it found 924 "fixes" (ENTER, WINDS, wind
+forecast fixes) and no real position. A receiver that hears only the satellite downlink, as most
+do, gets ADS-C and beam positions only.
 
 The aircraft database is stored at `~/.iridium-sniffer/aircraft.csv` and can be updated at any time with `--update-db`. Use `--aircraft-db=PATH` to specify a custom path.
 

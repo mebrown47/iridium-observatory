@@ -86,7 +86,8 @@ SDR / IQ File / ZMQ SUB / VITA 49
             |  SBD packet extraction from reassembled IDA payloads
             |  Multi-packet SBD reassembly
             |  ACARS message parsing (libacars-2 for ARINC-622/ADS-C/CPDLC)
-            |  Position extraction (4-tier: ADS-C > text coords > waypoint > beam)
+            |  Position extraction (4-tier: ADS-C > text coords > waypoint > beam;
+            |    text and waypoint from aircraft-sent messages only, acars_position.c)
             |  Terminal output (plain text or JSON)
             |  UDP/TCP feed output (--feed, repeatable, max 4 endpoints)
             |  UDP streaming (--acars-udp, dumpvdl2 envelope format)

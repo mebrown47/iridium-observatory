@@ -29,6 +29,22 @@ int acars_extract_text_position(const char *label, const char *text,
 int acars_extract_waypoint_position(const char *label, const char *text,
                                     double *lat, double *lon);
 
+/*
+ * The aircraft's position from a message, by these rules:
+ * nothing unless the aircraft sent it (an uplink's coordinates and fixes
+ * are someone else's: wind forecasts along the route, weather); then
+ * coordinates in the text; then, only in a POS report that names a fix
+ * instead of coordinates, that fix. Anywhere else the fix lookup matches
+ * ordinary words: on 95 days of a feeder's Iridium messages it found 924
+ * "fixes" (ENTER, WINDS, the fixes of wind forecasts) and no real position.
+ * A raw "#xxx" sub-label prefix (e.g. "#M1B") is allowed before POS.
+ * Returns ACARS_POS_TEXT or ACARS_POS_FIX and fills lat/lon, or 0.
+ */
+#define ACARS_POS_TEXT 1
+#define ACARS_POS_FIX  2
+int acars_aircraft_position(const char *label, const char *text,
+                            int from_aircraft, double *lat, double *lon);
+
 #ifdef __cplusplus
 }
 #endif

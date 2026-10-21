@@ -917,17 +917,16 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
             else if (strstr(msg->txt, " ON")) strncpy(oooi_str, "ON",  3);
         }
 
-        /* Extract position from ACARS free text when ADS-C is absent.
-         * Only attempt on labels known to carry current aircraft position
-         * (not destination waypoints or flight plan coordinates). */
+        /* Extract position from ACARS text when ADS-C is absent: only
+         * from messages the aircraft sent, on labels known to carry its
+         * current position (acars_aircraft_position has the rules). */
         int text_pos = 0;
         int wp_pos = 0;
         if (!adsc_pos && msg->txt && msg->txt[0]) {
-            text_pos = acars_extract_text_position(msg->label, msg->txt,
-                                                    &pos_lat, &pos_lon);
-            if (!text_pos)
-                wp_pos = acars_extract_waypoint_position(msg->label, msg->txt,
-                                                          &pos_lat, &pos_lon);
+            int src = acars_aircraft_position(msg->label, msg->txt, ul,
+                                              &pos_lat, &pos_lon);
+            text_pos = src == ACARS_POS_TEXT;
+            wp_pos = src == ACARS_POS_FIX;
         }
 
         /* Position source priority:
@@ -1595,7 +1594,7 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                 }
             }
 
-            /* Try free text position extraction, then waypoint fallback */
+            /* Position from the text, if the aircraft sent it */
             double pos_lat = 0, pos_lon = 0;
             int have_text_pos = 0;
             if (txt_f && txt_f_len > 0) {
@@ -1604,11 +1603,8 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                            txt_f_len : (int)sizeof(txt_z) - 1;
                 memcpy(txt_z, txt_f, zlen);
                 txt_z[zlen] = '\0';
-                have_text_pos = acars_extract_text_position(label_f, txt_z,
-                                                             &pos_lat, &pos_lon);
-                if (!have_text_pos)
-                    have_text_pos = acars_extract_waypoint_position(
-                                        label_f, txt_z, &pos_lat, &pos_lon);
+                have_text_pos = acars_aircraft_position(label_f, txt_z, ul,
+                                                        &pos_lat, &pos_lon) != 0;
             }
 
             int bc_sat = 0, bc_beam = 0;

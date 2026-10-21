@@ -294,3 +294,19 @@ int acars_extract_waypoint_position(const char *label, const char *text,
 
     return 0;
 }
+
+int acars_aircraft_position(const char *label, const char *text,
+                            int from_aircraft, double *lat, double *lon)
+{
+    if (!from_aircraft || !text || !text[0])
+        return 0;
+    if (acars_extract_text_position(label, text, lat, lon))
+        return ACARS_POS_TEXT;
+    const char *t = text;
+    if (t[0] == '#' && strlen(t) > 4)
+        t += 4;
+    if (strncmp(t, "POS", 3) == 0 &&
+        acars_extract_waypoint_position(label, t, lat, lon))
+        return ACARS_POS_FIX;
+    return 0;
+}
