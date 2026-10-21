@@ -82,6 +82,15 @@ int main(int argc, char **argv)
           "N3011.2,W08555.9,210148,40003,-51.0,297,030,ER,00000,0,\r\n"
           "N3015.9,W08620.5,210151,40005,-51.0,305,033,ER,00000,0",
           't', 30.265, -86.341667);
+    check("label 32, hemisphere letters", "32",
+          "P,R,2026-09-26 19:00:28,7984,63200,N45.773 W101.368,25654,234,22,-25,410,430,701,,",
+          't', 45.773, -101.368);
+    check("label 83, PR packed degrees and minutes", "83",
+          "001PR26190048N4500.6W10043.34304280140", 't', 45.01, -100.721667);
+    check("label 83, origin destination time", "83",
+          "EHAM,KLAX,261903, 46.79,-101.63,37999,272,-142.4, 18200", 't', 46.79, -101.63);
+    check("label 83 without a position", "83",
+          "EHAM,KLAX,261903,FL380", '-', 0, 0);
     check("other labels ignored", "5Z",
           "POSN46247W101478,HASTE", '-', 0, 0);
 

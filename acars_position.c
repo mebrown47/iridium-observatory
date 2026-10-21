@@ -124,11 +124,113 @@ static int ddmm_position(const char *text, double *lat, double *lon)
     return found;
 }
 
+/* Degrees and minutes as [NS]DDMM.m then [EW]DDDMM.m, with nothing between */
+static int ddmm_packed(const char *p, double *lat, double *lon)
+{
+    if (p[0] != 'N' && p[0] != 'S')
+        return 0;
+    for (int k = 1; k <= 6; k++)
+        if (k == 5 ? p[k] != '.' : (p[k] < '0' || p[k] > '9'))
+            return 0;
+    const char *q = p + 7;
+    if (*q != 'E' && *q != 'W')
+        return 0;
+    for (int k = 1; k <= 7; k++)
+        if (k == 6 ? q[k] != '.' : (q[k] < '0' || q[k] > '9'))
+            return 0;
+    double a = strtod(p + 1, NULL), o = strtod(q + 1, NULL);
+    double am = a - 100 * (int)(a / 100), om = o - 100 * (int)(o / 100);
+    double la = (int)(a / 100) + am / 60.0, lo = (int)(o / 100) + om / 60.0;
+    if (am >= 60 || om >= 60 || la > 90 || lo > 180)
+        return 0;
+    *lat = p[0] == 'S' ? -la : la;
+    *lon = *q == 'W' ? -lo : lo;
+    return 1;
+}
+
+/*
+ * Label 32 position report, decimal degrees with hemisphere letters:
+ *   P,R,2026-09-26 19:00:28,7984,63200,N45.773 W101.368,25654,...
+ */
+static int label32_position(const char *text, double *lat, double *lon)
+{
+    for (const char *s = text; *s; s++) {
+        if ((*s != 'N' && *s != 'S') || (s > text && s[-1] != ','))
+            continue;
+        if (s[1] < '0' || s[1] > '9')
+            continue;
+        char *end;
+        double la = strtod(s + 1, &end);
+        if (!memchr(s + 1, '.', (size_t)(end - s - 1)) || *end != ' ' ||
+            (end[1] != 'E' && end[1] != 'W'))
+            continue;
+        const char *q = end + 2;
+        if (*q < '0' || *q > '9')
+            continue;
+        double lo = strtod(q, &end);
+        if (!memchr(q, '.', (size_t)(end - q)) || (*end != ',' && *end != '\0') ||
+            la > 90 || lo > 180)
+            continue;
+        *lat = *s == 'S' ? -la : la;
+        *lon = q[-1] == 'W' ? -lo : lo;
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * Label 83 position report, two layouts:
+ *   001PR26190048N4500.6W10043.34304280140   (PR, DDHHMMSS, then packed
+ *                                             degrees and minutes)
+ *   EHAM,KLAX,261903, 46.79,-101.63,37999,... (origin, destination,
+ *                                             DDHHMM, signed degrees)
+ */
+static int label83_position(const char *text, double *lat, double *lon)
+{
+    const char *pr = strstr(text, "PR");
+    if (pr) {
+        int k = 0;
+        while (k < 8 && pr[2 + k] >= '0' && pr[2 + k] <= '9') k++;
+        if (k == 8 && ddmm_packed(pr + 10, lat, lon))
+            return 1;
+    }
+    /* ICAO,ICAO,DDHHMM, lat,lon */
+    const char *f = text;
+    for (int field = 0; field < 3; field++) {
+        const char *c = strchr(f, ',');
+        int n = (int)(c ? c - f : 0);
+        if (!c || (field < 2 && n != 4) || (field == 2 && n != 6))
+            return 0;
+        for (int i = 0; i < n; i++)
+            if (field < 2 ? (f[i] < 'A' || f[i] > 'Z') : (f[i] < '0' || f[i] > '9'))
+                return 0;
+        f = c + 1;
+    }
+    char *end;
+    double la = strtod(f, &end);
+    if (end == f || *end != ',' || !memchr(f, '.', (size_t)(end - f)))
+        return 0;
+    f = end + 1;
+    double lo = strtod(f, &end);
+    if (end == f || *end != ',' || !memchr(f, '.', (size_t)(end - f)) ||
+        la < -90 || la > 90 || lo < -180 || lo > 180)
+        return 0;
+    *lat = la;
+    *lon = lo;
+    return 1;
+}
+
 int acars_extract_text_position(const char *label, const char *text,
                                         double *lat, double *lon)
 {
     if (!label || !text || !text[0])
         return 0;
+
+    /* Labels with one position layout of their own (parsers above) */
+    if (label[0] == '3' && label[1] == '2')
+        return label32_position(text, lat, lon);
+    if (label[0] == '8' && label[1] == '3')
+        return label83_position(text, lat, lon);
 
     /* Labels known to carry current aircraft position in text:
      *   H1  - position/met report (POS preamble)
