@@ -97,6 +97,7 @@ extern double soapy_gain_val;
 extern int sdrplay_gain_val;
 extern int bias_tee;
 extern int use_gpu;
+extern int full_burst_window;
 extern int simd_mode;
 extern int use_chase;
 extern char *save_bursts_dir;
@@ -193,6 +194,8 @@ static void usage(int exitcode) {
 "Detection options:\n"
 "    -d, --threshold=DB      burst detection threshold in dB (default: 16.0)\n"
 "    --no-gpu                disable GPU acceleration (use CPU FFTW)\n"
+"    --full-burst-window     demodulate each burst's whole 16 ms hold-open tail,\n"
+"                             as gr-iridium does (default: cut it to the frame)\n"
 "    --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar\n"
 "    --no-simd               alias for --simd=scalar\n"
 "    --workers=N             downmix worker threads (1-32, default: auto from CPU cores)\n"
@@ -329,6 +332,7 @@ void parse_options(int argc, char **argv) {
         OPT_FORMAT,
         OPT_LIST,
         OPT_NO_GPU,
+        OPT_FULL_BURST_WINDOW,
         OPT_NO_SIMD,
         OPT_SIMD,
         OPT_CHASE,
@@ -394,6 +398,7 @@ void parse_options(int argc, char **argv) {
         { "usrp-gain",      required_argument, NULL, OPT_USRP_GAIN },
         { "soapy-gain",     required_argument, NULL, OPT_SOAPY_GAIN },
         { "no-gpu",         no_argument,       NULL, OPT_NO_GPU },
+        { "full-burst-window", no_argument,    NULL, OPT_FULL_BURST_WINDOW },
         { "no-simd",        no_argument,       NULL, OPT_NO_SIMD },
         { "simd",           required_argument, NULL, OPT_SIMD },
         { "chase",          optional_argument, NULL, OPT_CHASE },
@@ -601,6 +606,7 @@ void parse_options(int argc, char **argv) {
             case OPT_AIRSPY_NO_PACKING:  airspy_packing = 0;         break;
 #endif
             case OPT_NO_GPU:      use_gpu = 0;                       break;
+            case OPT_FULL_BURST_WINDOW: full_burst_window = 1;       break;
             case OPT_NO_SIMD:     simd_mode = SIMD_SCALAR;           break;
             case OPT_SIMD:
                 if (strcmp(optarg, "auto") == 0)

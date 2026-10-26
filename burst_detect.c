@@ -56,6 +56,26 @@ typedef struct gpu_burst_fft gpu_burst_fft_t;
  * worker wakeup. */
 #define DETECT_BATCH_FRAMES 512
 
+/* FFT frames of a burst's window kept after the detector last saw it.
+ *
+ * The detector holds a burst open for post_len (16 ms) after its last active
+ * frame, so that one burst is not split in two, and the IQ handed to the
+ * downmix used to run to the end of that hold: about 23 ms per burst on
+ * average, where a normal-band frame is at most ~10 ms. Decimating the rest
+ * was most of the downmix's work, for real bursts and false detections alike.
+ *
+ * The end cannot simply be last_active, though. last_active only follows the
+ * centre bin +-1 (~3.7 kHz of a 35 kHz burst), and a weak burst's energy
+ * wanders out of that strip within a frame or two while the burst goes on:
+ * on a 20-minute feeder recording, cutting at last_active + 4 frames lost 38%
+ * of frames. A window that runs from start to the band's longest frame, or
+ * this many frames past the last activity when that is later (back-to-back
+ * TDMA bursts on one channel make one long detection), is close to lossless
+ * on the same recording: -32% CPU (1219 s against 1809 s with
+ * --full-burst-window), 143,016 frames against 142,937 (56 lost, 252 new),
+ * 88,709 at >=80% confidence against 88,733, and the same 58 ACARS messages. */
+#define BURST_TAIL_FRAMES 8
+
 /* ---- Internal types ---- */
 
 typedef struct {
@@ -87,6 +107,9 @@ struct _burst_detector {
     int max_burst_len;
     float threshold;        /* pre-computed: pow(10, dB/10) / history_size / ENBW */
     int history_size;
+    int full_window;
+    int frame_len_normal;   /* samples from a burst's start that hold its longest frame */
+    int frame_len_simplex;
 
     /* FFT */
     fftwf_plan fft_plan;
@@ -283,6 +306,16 @@ burst_detector_t *burst_detector_create(burst_config_t *config) {
         ? config->burst_post_len
         : (int)(config->sample_rate * 16e-3);
 
+    /* How much of a burst the downmix needs: the pre-roll (two FFT frames),
+     * the frame in which the burst was first seen, a long preamble and the
+     * longest frame of its band, and two frames of margin. See
+     * emit_gone_bursts(). 14.3 ms normal, 24.4 ms simplex at 10 MS/s. */
+    d->full_window = config->full_window;
+    d->frame_len_normal = 5 * d->fft_size + (int)((double)config->sample_rate
+        * (IR_PREAMBLE_LENGTH_LONG + IR_MAX_FRAME_LENGTH_NORMAL) / IR_SYMBOLS_PER_SECOND);
+    d->frame_len_simplex = 5 * d->fft_size + (int)((double)config->sample_rate
+        * (IR_PREAMBLE_LENGTH_LONG + IR_MAX_FRAME_LENGTH_SIMPLEX) / IR_SYMBOLS_PER_SECOND);
+
     /* Burst width in FFT bins */
     int burst_width_hz = config->burst_width > 0
         ? config->burst_width
@@ -321,6 +354,13 @@ burst_detector_t *burst_detector_create(burst_config_t *config) {
                 d->fft_size, threshold_db, d->threshold,
                 d->history_size, d->burst_width, d->max_bursts,
                 d->burst_pre_len, d->burst_post_len, d->max_burst_len);
+        if (d->full_window)
+            fprintf(stderr, "burst_detect: full burst windows (post_len tail kept)\n");
+        else
+            fprintf(stderr, "burst_detect: burst windows %.1f ms (simplex %.1f ms) "
+                    "or until %d FFT frames after the burst was last seen\n",
+                    d->frame_len_normal * 1e3 / d->sample_rate,
+                    d->frame_len_simplex * 1e3 / d->sample_rate, BURST_TAIL_FRAMES);
     }
 
     /* Allocate FFT */
@@ -819,6 +859,16 @@ static void emit_gone_bursts(burst_detector_t *d, burst_callback_t cb, void *use
         /* Extract IQ samples from ringbuffer */
         uint64_t extract_start = ab->start;
         uint64_t extract_stop = ab->stop + d->burst_pre_len;
+        if (!d->full_window) {
+            double hz = d->center_frequency + (ab->center_bin - d->fft_size / 2)
+                        * (double)d->sample_rate / d->fft_size;
+            uint64_t frame_end = extract_start + (uint64_t)(hz >= IR_SIMPLEX_FREQUENCY_MIN
+                                 ? d->frame_len_simplex : d->frame_len_normal);
+            uint64_t active_end = ab->last_active + (uint64_t)BURST_TAIL_FRAMES * d->fft_size;
+            uint64_t end = frame_end > active_end ? frame_end : active_end;
+            if (extract_stop > end)
+                extract_stop = end;
+        }
         size_t num_samples;
         float complex *samples = ringbuf_extract(d, extract_start, extract_stop,
                                                   &num_samples);

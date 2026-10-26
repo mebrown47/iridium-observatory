@@ -60,6 +60,8 @@ typedef struct {
     float threshold;        /* dB, default 16.0 */
     int history_size;       /* default 512 */
     int use_gpu;            /* 1 = use OpenCL GPU FFT, 0 = FFTW CPU */
+    int full_window;        /* 1 = hand on the whole post_len tail (gr-iridium),
+                               0 = cut each burst to its frame (default) */
 } burst_config_t;
 
 /* Create a burst detector with the given configuration.
