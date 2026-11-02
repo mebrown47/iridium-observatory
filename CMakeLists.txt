@@ -5,6 +5,15 @@ set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/Modules" ${CMAKE_MODULE_PATH})
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-common -Wall -Wextra -Wno-unused-parameter -std=c99 -Werror=implicit-function-declaration")
 
+# Plain complex multiply and divide, without C99 Annex G's inf/NaN recovery.
+# Under -std=c99, GCC 11 (Ubuntu 22.04) calls libgcc's __mulsc3 on every
+# complex multiply in the rotator loop, not only when the result is NaN, which
+# was half the engine's CPU on a 10 MS/s Airspy feed. GCC 13 keeps the call
+# behind a branch, so the cost does not show on 24.04. Every sample here is
+# finite and small, so the recovery path never changes a result: a 60 s
+# capture decodes to identical frames with and without this flag.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fcx-limited-range")
+
 set(GPU_PLUGIN_NAME "libiridium-sniffer-gpu.so")
 
 if(UNIX AND NOT APPLE)
