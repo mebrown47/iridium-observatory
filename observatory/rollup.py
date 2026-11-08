@@ -509,10 +509,18 @@ def main():
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
+    # A missing archive directory is a configuration error (wrong --archive
+    # path). An empty one is normal on a fresh install: the receiver hasn't
+    # written anything yet, so exit cleanly instead of showing as failed.
+    if not os.path.isdir(args.archive):
+        print(f"rollup: archive directory {args.archive} does not exist "
+              f"(check --archive)", file=sys.stderr)
+        return 1
     files = sorted(glob.glob(os.path.join(args.archive, "iridium-*.jsonl")))
     if not files:
-        print(f"rollup: no archive files in {args.archive}", file=sys.stderr)
-        return 1
+        print(f"rollup: waiting for data: no archive files in {args.archive} "
+              f"yet (the receiver writes them once it is running)")
+        return 0
 
     os.makedirs(os.path.dirname(os.path.abspath(args.db)), exist_ok=True)
     con = sqlite3.connect(args.db)
