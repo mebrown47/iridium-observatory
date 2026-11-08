@@ -103,7 +103,10 @@ info "Preflight"
 have systemctl || die "systemd is required"
 have sudo || die "sudo is required"
 if [ "$DRY_RUN" -eq 0 ]; then
-  sudo -v || die "sudo failed"
+  # Try a no-password check first: "sudo -v" asks for a password whenever any
+  # matching rule needs one (e.g. %sudo alongside a NOPASSWD rule, as on
+  # Raspberry Pi OS), even though the commands themselves would not.
+  sudo -n true 2>/dev/null || sudo -v || die "sudo failed"
 fi
 RUN_USER="$(id -un)"
 ok "user: $RUN_USER   arch: $(uname -m)   $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown OS}")"
@@ -531,8 +534,15 @@ else
     warn "web map not answering on :$WEB_PORT yet — recent log:"
     journalctl -u iridium-sniffer -n 15 --no-pager 2>/dev/null | sed 's/^/      /' || true
   fi
-  curl -fs "http://127.0.0.1:$OBS_PORT/healthz" >/dev/null && ok "observatory answering on :$OBS_PORT" \
-    || warn "observatory not answering on :$OBS_PORT — journalctl -u observatory-trends"
+  # The dashboards were restarted moments ago; give them a few seconds too.
+  obs=0
+  for _ in $(seq 1 10); do
+    if curl -fs -o /dev/null "http://127.0.0.1:$OBS_PORT/healthz"; then obs=1; break; fi
+    sleep 1
+  done
+  if [ "$obs" -eq 1 ]; then ok "observatory answering on :$OBS_PORT"
+  else warn "observatory not answering on :$OBS_PORT — journalctl -u observatory-trends"
+  fi
 fi
 
 info "Done"
