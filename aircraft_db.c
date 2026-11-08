@@ -10,15 +10,22 @@
 
 #include <ctype.h>
 #include <err.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "aircraft_db.h"
 
 #define DB_URL "https://github.com/wiedehopf/tar1090-db/raw/refs/heads/csv/aircraft.csv.gz"
+
+/* tar1090-db has ~600k rows; anything far below that is a broken download,
+ * and must not replace a good database. */
+#define DB_MIN_ROWS 100000
 
 typedef struct {
     char reg[12];   /* registration (e.g., "N712TW") */
@@ -162,6 +169,111 @@ const char *aircraft_db_default_path(void)
     return path;
 }
 
+/* Fetch url into out with curl, run directly (no shell, so no quoting
+ * problems with odd HOME paths). -f makes HTTP errors fail instead of
+ * saving the server's error page. */
+static int fetch_url(const char *url, const char *out)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        warn("aircraft_db: fork");
+        return -1;
+    }
+    if (pid == 0) {
+        execlp("curl", "curl", "-fsSL", "--retry", "3",
+               "--connect-timeout", "30", "-o", out, url, (char *)NULL);
+        _exit(127);
+    }
+
+    int status;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            warn("aircraft_db: waitpid");
+            return -1;
+        }
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 0;
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 127)
+        warnx("aircraft_db: download failed: curl is not installed");
+    else if (WIFEXITED(status))
+        warnx("aircraft_db: download failed (curl exit code %d)",
+              WEXITSTATUS(status));
+    else
+        warnx("aircraft_db: download failed (curl killed by signal %d)",
+              WTERMSIG(status));
+    return -1;
+}
+
+/* A database row starts with a 6-digit ICAO hex address and a ';'. */
+static int looks_like_row(const char *line)
+{
+    for (int i = 0; i < 6; i++)
+        if (!isxdigit((unsigned char)line[i]))
+            return 0;
+    return line[6] == ';';
+}
+
+/* Decompress gz_path into out_path. Returns the number of database rows
+ * written, or -1 if the file is not gzip, is truncated or corrupt, or the
+ * output could not be written. */
+static long gunzip_file(const char *gz_path, const char *out_path)
+{
+    gzFile in = gzopen(gz_path, "rb");
+    if (!in) {
+        warnx("aircraft_db: cannot open %s", gz_path);
+        return -1;
+    }
+    if (gzdirect(in)) {     /* zlib passes non-gzip input through as-is */
+        warnx("aircraft_db: download is not a gzip file");
+        gzclose(in);
+        return -1;
+    }
+
+    FILE *out = fopen(out_path, "w");
+    if (!out) {
+        warn("aircraft_db: cannot write %s", out_path);
+        gzclose(in);
+        return -1;
+    }
+
+    char line[4096];
+    long rows = 0;
+    int at_line_start = 1, failed = 0;
+    while (gzgets(in, line, sizeof(line))) {
+        size_t len = strlen(line);
+        if (fwrite(line, 1, len, out) != len) {
+            warn("aircraft_db: write to %s", out_path);
+            failed = 1;
+            break;
+        }
+        if (at_line_start && looks_like_row(line))
+            rows++;
+        at_line_start = len > 0 && line[len - 1] == '\n';
+    }
+
+    if (!failed) {
+        int zerr;
+        const char *msg = gzerror(in, &zerr);
+        if (zerr != Z_OK) {
+            warnx("aircraft_db: download is corrupt: %s", msg);
+            failed = 1;
+        }
+    }
+    /* gzclose reports a stream that ended early (Z_BUF_ERROR) */
+    int zclose = gzclose(in);
+    if (!failed && zclose != Z_OK) {
+        warnx("aircraft_db: download is truncated or corrupt (zlib %d)",
+              zclose);
+        failed = 1;
+    }
+    if (fclose(out) != 0 && !failed) {
+        warn("aircraft_db: write to %s", out_path);
+        failed = 1;
+    }
+    return failed ? -1 : rows;
+}
+
 int aircraft_db_update(void)
 {
     const char *path = aircraft_db_default_path();
@@ -170,32 +282,47 @@ int aircraft_db_update(void)
         return -1;
     }
 
-    /* Create directory */
     char dir[512];
     snprintf(dir, sizeof(dir), "%s/.iridium-sniffer", getenv("HOME"));
-    mkdir(dir, 0755);
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        warn("aircraft_db: cannot create %s", dir);
+        return -1;
+    }
 
-    /* Download and decompress */
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd),
-             "curl -sL '%s' | gunzip > '%s.tmp' && mv '%s.tmp' '%s'",
-             DB_URL, path, path, path);
+    /* Download and unpack to temporary files beside the database; the
+     * current database is replaced only once the new one checks out. */
+    char gz_tmp[600], csv_tmp[600];
+    snprintf(gz_tmp, sizeof(gz_tmp), "%s.gz.tmp", path);
+    snprintf(csv_tmp, sizeof(csv_tmp), "%s.tmp", path);
 
     fprintf(stderr, "aircraft_db: downloading from tar1090-db...\n");
-    int ret = system(cmd);
-    if (ret != 0) {
-        warnx("aircraft_db: download failed (is curl installed?)");
+    if (fetch_url(DB_URL, gz_tmp) != 0) {
+        unlink(gz_tmp);
+        return -1;
+    }
+
+    long rows = gunzip_file(gz_tmp, csv_tmp);
+    unlink(gz_tmp);
+    if (rows < 0) {
+        unlink(csv_tmp);
+        return -1;
+    }
+    if (rows < DB_MIN_ROWS) {
+        warnx("aircraft_db: download has only %ld aircraft (expected over "
+              "%d); keeping the current database", rows, DB_MIN_ROWS);
+        unlink(csv_tmp);
+        return -1;
+    }
+
+    if (rename(csv_tmp, path) != 0) {
+        warn("aircraft_db: cannot replace %s", path);
+        unlink(csv_tmp);
         return -1;
     }
 
     struct stat st;
-    if (stat(path, &st) != 0 || st.st_size < 1000) {
-        warnx("aircraft_db: downloaded file is too small or missing");
-        unlink(path);
-        return -1;
-    }
-
-    fprintf(stderr, "aircraft_db: saved to %s (%.1f MB)\n",
-            path, st.st_size / 1e6);
+    double mb = stat(path, &st) == 0 ? st.st_size / 1e6 : 0.0;
+    fprintf(stderr, "aircraft_db: saved %ld aircraft to %s (%.1f MB)\n",
+            rows, path, mb);
     return 0;
 }

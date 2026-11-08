@@ -55,6 +55,7 @@ endif()
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 find_package(FFTW REQUIRED)
+find_package(ZLIB REQUIRED)   # aircraft DB download (--update-db)
 
 # SDR backends (all optional, need at least one for live capture)
 find_package(HackRF)
@@ -241,6 +242,7 @@ target_link_libraries(iridium-sniffer PRIVATE
     Threads::Threads
     m
     FFTW::Float
+    ZLIB::ZLIB
 )
 include_directories(${FFTW_INCLUDE_DIR})
 

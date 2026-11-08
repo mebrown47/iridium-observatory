@@ -34,7 +34,7 @@ git clone https://github.com/mebrown47/iridium-observatory.git
 cd iridium-observatory
 
 # Core dependencies
-sudo apt install build-essential cmake libfftw3-dev
+sudo apt install build-essential cmake libfftw3-dev zlib1g-dev
 
 # SDR libraries (install only what you have)
 sudo apt install libhackrf-dev      # HackRF One
@@ -79,7 +79,7 @@ The Pi 5's VideoCore VII GPU passes basic Vulkan compute tests but cannot sustai
 ```bash
 git clone https://github.com/mebrown47/iridium-observatory.git
 cd iridium-observatory
-sudo apt install build-essential cmake libfftw3-dev libsoapysdr-dev
+sudo apt install build-essential cmake libfftw3-dev zlib1g-dev libsoapysdr-dev
 
 mkdir build && cd build
 cmake .. -DUSE_OPENCL=OFF
