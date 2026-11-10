@@ -64,7 +64,12 @@ class CoverageCollector:
         self.stats = {}         # hour -> [frames, attributed, ambiguous, unplaced, uplink]
         self.note = "starting"
         self.lost = 0
+        # Failed bursts never locked onto a unique word, so their frequency
+        # is rougher than a decoded frame's; one margin for both either
+        # drops most failures (biasing success rates up) or loosens the
+        # decoded frames. Each kind learns its own.
         self.margin = orbit.AdaptiveMargin()
+        self.margin_fail = orbit.AdaptiveMargin()
         con = sqlite3.connect(db_path)
         con.executescript(SCHEMA)
         con.execute("PRAGMA journal_mode=WAL")
@@ -88,6 +93,7 @@ class CoverageCollector:
             return
         self.note = ""
         types = d["types"]
+        fail_type = types.index("FAIL") if "FAIL" in types else -1
         cand = {}
         for _, tms, f, mag, ty, dr, _sid in d["f"]:
             t = tms / 1000.0 + clock
@@ -100,9 +106,10 @@ class CoverageCollector:
             b = int(t // 10)
             if b not in cand:
                 cand[b] = [v["index"] for v in c.visible(b * 10 + 5, st, -4.0)]
-            m = self.margin.margin()
+            am = self.margin_fail if ty == fail_type else self.margin
+            m = am.margin()
             r = orbit.identify_frame(c, t, f, st, rx, cand[b], margin_hz=m, max_residual_hz=m)
-            self.margin.add(r)
+            am.add(r)
             if r is None:
                 stv[3] += 1
                 continue
@@ -207,5 +214,6 @@ class CoverageCollector:
             # rounded: enough to say which region, not which house
             "station": {"lat": round(station[0], 1), "lon": round(station[1], 1)} if station else None,
             "margin_hz": round(self.margin.margin()),
+            "margin_fail_hz": round(self.margin_fail.margin()),
             "note": self.note, "lost": self.lost,
         }

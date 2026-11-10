@@ -64,7 +64,9 @@ def main():
     types = collections.defaultdict(collections.Counter)
     resid = []
     wrong_examples = []
-    margin = orbit.AdaptiveMargin()      # the rule the coverage collector uses
+    margin = orbit.AdaptiveMargin()      # the rules the coverage collector uses:
+    margin_fail = orbit.AdaptiveMargin() # decoded frames and failed bursts apart
+    fail_consistent = fail_placed = 0
     lost = 0
     t_end = time.time() + args.minutes * 60
     first = True
@@ -115,6 +117,8 @@ def main():
         rx = statistics.median(o for _, o in offsets)
 
         cand_cache = {}
+        decoded_sats = collections.defaultdict(set)   # 10-s bucket -> satellites decoded then
+        placed_fails = []
         for s_, tms, f, mag, ty, dr, sid in frames:
             if dr == 1:                      # uplink: not a satellite's transmission
                 continue
@@ -122,9 +126,15 @@ def main():
             b = int(t // 10)
             if b not in cand_cache:
                 cand_cache[b] = [v["index"] for v in c.visible(b * 10 + 5, st, -4.0)]
-            m = margin.margin()
+            am = margin_fail if ty == fail_type else margin
+            m = am.margin()
             r = orbit.identify_frame(c, t, f, st, rx, cand_cache[b], margin_hz=m, max_residual_hz=m)
-            margin.add(r)
+            am.add(r)
+            if r is not None and not r["ambiguous"]:
+                if ty == fail_type:
+                    placed_fails.append((b, r["sat"]))
+                else:
+                    decoded_sats[b].add(r["sat"])
             label = tnames[ty] if 0 <= ty < len(tnames) else "?"
             types[label]["frames"] += 1
             if r is None:
@@ -150,9 +160,14 @@ def main():
                     if len(wrong_examples) < 5:
                         wrong_examples.append((c.sats[want].name, c.sats[r["sat"]].name,
                                                round(r["residual_hz"]), round(r["runner_up_hz"])))
+        # failed bursts have no ground truth; are they placed on satellites
+        # that also produced decoded frames in the same 10 s?
+        for b, sat in placed_fails:
+            fail_placed += 1
+            fail_consistent += sat in decoded_sats.get(b, ())
         decided = truth["right"] + truth["wrong"]
-        print("%s  margin %4.0f Hz  rx %+6.0f Hz  named IRAs: %d right, %d wrong, %d ambiguous, %d none%s" % (
-            time.strftime("%H:%M:%S"), margin.margin(), rx, truth["right"], truth["wrong"], truth["ambiguous"],
+        print("%s  margin %4.0f/%4.0f Hz  rx %+6.0f Hz  named IRAs: %d right, %d wrong, %d ambiguous, %d none%s" % (
+            time.strftime("%H:%M:%S"), margin.margin(), margin_fail.margin(), rx, truth["right"], truth["wrong"], truth["ambiguous"],
             truth["none"], ("  (%.1f%% right when decided)" % (100.0 * truth["right"] / decided)) if decided else ""))
         time.sleep(args.poll)
 
@@ -172,6 +187,10 @@ def main():
         n = cnt["frames"]
         print("  %-12s %7d   %5.1f%% / %5.1f%% / %5.1f%%" % (
             label, n, 100.0 * cnt["attributed"] / n, 100.0 * cnt["ambiguous"] / n, 100.0 * cnt["none"] / n))
+    if fail_placed:
+        print("failed bursts placed: %d; on a satellite that also decoded in the same 10 s: %.1f%%" % (
+            fail_placed, 100.0 * fail_consistent / fail_placed))
+    print("margins: decoded %.0f Hz, failed %.0f Hz" % (margin.margin(), margin_fail.margin()))
     if resid:
         a = sorted(abs(x) for x in resid)
         print("attributed residuals: median %.0f Hz, 95th percentile %.0f Hz" % (a[len(a) // 2], a[int(len(a) * 0.95)]))
