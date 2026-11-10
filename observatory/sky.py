@@ -52,6 +52,9 @@ class SkyTracker:
         self.wall_lag = None            # wall_ms - now_ms from the sniffer
         self.feed_note = "waiting for iridium-sniffer"
         self.snapshot = {"note": "starting"}
+        # For other threads (coverage.py): replaced whole, never mutated, so
+        # a reader always sees a consistent set.
+        self.shared = {"c": self.c, "station": None, "clock": None, "rx_offset": None}
 
     # ---- inputs
     def _tles(self):
@@ -186,6 +189,16 @@ class SkyTracker:
         snap["window"] = [now - BACK_S, now + AHEAD_S]
         return snap
 
+    def station_now(self):
+        if self.station:
+            return self.station
+        return (self.fix["lat"], self.fix["lon"], 0.0) if self.fix else None
+
+    def _share(self):
+        st = self.station_now()
+        rx = self.ra.rx_offset(self.c, st) if st and self.c.sats else None
+        self.shared = {"c": self.c, "station": st, "clock": self.clock, "rx_offset": rx}
+
     def run(self):
         last_fix = last_sky = last_rx = 0.0
         while True:
@@ -200,6 +213,7 @@ class SkyTracker:
                     self._locate()
                     last_fix = now
                     last_sky = 0.0
+                self._share()
                 if now - last_sky >= SKY_EVERY_S:
                     snap = self._sky()
                     with self.lock:

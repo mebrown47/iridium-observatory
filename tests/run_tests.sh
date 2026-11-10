@@ -100,6 +100,13 @@ else
     bad "observatory/tests/test_orbit.py:"; echo "$out" | grep -E "FAIL|Error" | sed 's/^/    /'
 fi
 
+echo "== Observatory coverage map =="
+if out="$("$PY" "$ROOT/observatory/tests/test_coverage.py" 2>&1)"; then
+    ok "sky cells, success rate and horizon line"
+else
+    bad "observatory/tests/test_coverage.py:"; echo "$out" | grep -E "FAIL|Error" | sed 's/^/    /'
+fi
+
 # ---- Tier 2: oracle cross-check vs iridium-parser.py ----
 if [ "${SKIP_ORACLE:-0}" != 1 ]; then
     echo "== oracle cross-check (vs iridium-parser.py) =="

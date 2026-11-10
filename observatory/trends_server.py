@@ -10,6 +10,8 @@ external assets — it runs happily on a headless feeder with no internet.
 
   GET /              -> the dashboard (self-contained HTML/CSS/JS)
   GET /api/trends    -> JSON aggregates (optional ?hours=N window)
+  GET /coverage      -> sky plot of where the station decodes (sky_coverage.py)
+  GET /api/coverage  -> its data (optional ?hours=N)
   GET /api/sky       -> satellites overhead, their passes, and the receiver's
                         position from ring alerts (sky.py)
   GET /healthz       -> ok
@@ -310,6 +312,7 @@ class Handler(BaseHTTPRequestHandler):
     db_path = DB_PATH
     sniffer_url = SNIFFER_URL
     sky = None
+    coverage = None
 
     def log_message(self, *a):
         pass  # quiet; systemd/journald captures what matters
@@ -362,6 +365,20 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: keep the server alive
                 self._send(500, json.dumps({"error": str(e)}),
                            "application/json")
+        elif u.path == "/coverage":
+            self._send(200, COVERAGE_PAGE, "text/html; charset=utf-8")
+        elif u.path == "/api/coverage":
+            q = parse_qs(u.query)
+            try:
+                hours = max(1, min(24 * 365, int(q.get("hours", ["24"])[0])))
+            except ValueError:
+                hours = 24
+            try:
+                data = (self.coverage.query(hours) if self.coverage
+                        else {"note": "coverage collector not running"})
+                self._send(200, json.dumps(data), "application/json")
+            except Exception as e:  # noqa: keep the server alive
+                self._send(500, json.dumps({"error": str(e)}), "application/json")
         elif u.path == "/api/sky":
             data = self.sky.get() if self.sky else {"note": "sky tracker not running"}
             self._send(200, json.dumps(data), "application/json")
@@ -437,7 +454,7 @@ PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/" class="on">Trends</a><a href="/aviation">Aviation</a>
-    <a href="/doppler">Doppler</a></nav>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a></nav>
   <span class="sub">constellation activity over time</span>
   <span class="spacer"></span>
   <div class="controls" id="win">
@@ -792,7 +809,7 @@ AVIATION_PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation" class="on">Aviation</a>
-    <a href="/doppler">Doppler</a></nav>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a></nav>
   <span class="sub">decoded aircraft traffic — per-tail history &amp; CPDLC log</span>
   <span class="spacer"></span>
   <span class="status" id="status"><span class="dot"></span>loading…</span>
@@ -1107,7 +1124,7 @@ DOPPLER_PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
-    <a href="/doppler" class="on">Doppler</a></nav>
+    <a href="/doppler" class="on">Doppler</a><a href="/coverage">Coverage</a></nav>
   <span class="sub">live satellite passes, drawn in radio frequency</span>
   <span class="spacer"></span>
   <span class="status" id="status"><span class="dot"></span>loading…</span>
@@ -1433,6 +1450,174 @@ setInterval(load,5000);
 """
 
 
+COVERAGE_PAGE = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iridium Observatory — Coverage</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232c; --line:#2b333d;
+    --fg:#e6edf3; --dim:#8b98a5; --accent:#4aa8ff; --good:#3fb950;
+    --warn:#d29922; --hot:#f778ba; --grid:#242c36;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+    padding:16px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:18px;margin:0;font-weight:650;letter-spacing:.2px}
+  header .sub{color:var(--dim);font-size:12.5px}
+  header .spacer{flex:1}
+  header .status{color:var(--dim);font-size:12px}
+  .nav{display:flex;gap:4px}
+  .nav a{color:var(--dim);text-decoration:none;font-size:13px;padding:4px 11px;
+    border-radius:6px;border:1px solid transparent}
+  .nav a:hover{color:var(--fg)}
+  .nav a.on{color:var(--fg);background:var(--panel2);border-color:var(--line)}
+  main{padding:18px 22px;max-width:1200px;margin:0 auto}
+  .controls{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+  .seg{display:flex;gap:4px}
+  .seg button{background:var(--panel);color:var(--dim);border:1px solid var(--line);
+    border-radius:6px;padding:4px 11px;font-size:12.5px;cursor:pointer}
+  .seg button.on{color:var(--fg);background:var(--panel2);border-color:var(--accent)}
+  .wrap{display:grid;grid-template-columns:minmax(0,600px) minmax(0,1fr);gap:18px;align-items:start}
+  @media (max-width:980px){.wrap{grid-template-columns:minmax(0,1fr)}}
+  .plot{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+  svg{display:block;width:100%;height:auto}
+  .ax{fill:var(--dim);font-size:11px}
+  .side .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:12px 14px;margin-bottom:12px}
+  .side .k{color:var(--dim);font-size:11.5px;text-transform:uppercase;letter-spacing:.6px}
+  .side .v{font-size:22px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+  .side .v small{font-size:12.5px;color:var(--dim);font-weight:400}
+  .note{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:12px 16px;color:var(--dim);font-size:12.5px;line-height:1.55;margin-top:14px}
+  .note b{color:var(--fg)}
+  .warn{color:var(--warn)}
+  .legend{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--dim);margin-top:8px}
+  .legend .bar{flex:1;height:10px;border-radius:5px}
+</style></head>
+<body>
+<header>
+  <h1>Iridium Observatory</h1>
+  <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
+    <a href="/doppler">Doppler</a><a href="/coverage" class="on">Coverage</a></nav>
+  <span class="sub">where in the sky this station hears Iridium</span>
+  <span class="spacer"></span>
+  <span class="status" id="status">loading…</span>
+</header>
+<main>
+  <div class="controls">
+    <div class="seg" id="win"><button data-h="6">6h</button><button data-h="24" class="on">24h</button>
+      <button data-h="168">7d</button><button data-h="720">30d</button></div>
+    <div class="seg" id="mode"><button data-m="rate" class="on">Decode success</button>
+      <button data-m="level">Signal level</button><button data-m="n">Bursts</button></div>
+  </div>
+  <div class="wrap">
+    <div class="plot"><div id="sky"></div>
+      <div class="legend"><span id="lo"></span><div class="bar" id="bar"></div><span id="hi"></span></div>
+    </div>
+    <div class="side" id="side"></div>
+  </div>
+  <div class="note">
+    <b>Reading the plot:</b> the station's sky seen from above, north at the top, east to the
+    right, the horizon at the rim and straight up at the centre. Each burst is matched to the
+    satellite that sent it by its Doppler shift, and counted where that satellite was. A cell's
+    colour is the share of its bursts that decoded; grey cells have fewer than <span id="mincell"></span>
+    bursts so far. The <span class="warn">dashed line</span> is the station's effective horizon: for
+    each direction, the lowest elevation that decodes at least <span id="hrate"></span> of its bursts.
+    Trees, roofs and the mounting show up as a horizon line that rises. A full sweep of the sky
+    takes about a day of passes.
+  </div>
+</main>
+<script>
+const NS="http://www.w3.org/2000/svg";
+let WIN=24, MODE="rate", LAST=null;
+const VIR=[[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]];
+function vir(t){t=Math.max(0,Math.min(1,t));const x=t*4,i=Math.min(3,Math.floor(x)),f=x-i,a=VIR[i],b=VIR[i+1];
+  return "rgb("+a.map((v,k)=>Math.round(v+(b[k]-v)*f)).join(",")+")";}
+function el(tag,attrs,txt){const e=document.createElementNS(NS,tag);
+  for(const k in attrs)if(attrs[k]!=null)e.setAttribute(k,attrs[k]);if(txt!=null)e.textContent=txt;return e;}
+function fmt(n){return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(1)+"k":String(n);}
+const S=600,R=262,C=S/2;
+function pt(az,e){const r=R*(90-e)/90,a=az*Math.PI/180;return [C+r*Math.sin(a),C-r*Math.cos(a)];}
+function sector(az0,az1,e0,e1){const r0=R*(90-e0)/90,r1=R*(90-e1)/90,
+  p1=pt(az0,e0),p2=pt(az1,e0),p3=pt(az1,e1),p4=pt(az0,e1),f=v=>v.toFixed(1);
+  return "M"+f(p1[0])+" "+f(p1[1])+"A"+f(r0)+" "+f(r0)+" 0 0 1 "+f(p2[0])+" "+f(p2[1])+
+    "L"+f(p3[0])+" "+f(p3[1])+"A"+f(r1)+" "+f(r1)+" 0 0 0 "+f(p4[0])+" "+f(p4[1])+"Z";}
+function scale(d){
+  const vals=d.cells.filter(c=>c.n>=d.min_cell);
+  if(MODE==="rate") return {lo:0.5,hi:1,v:c=>c.rate,lab:v=>Math.round(v*100)+"%"};
+  if(MODE==="level"){const xs=vals.map(c=>c.level);const lo=Math.min(...xs),hi=Math.max(...xs);
+    return {lo:lo,hi:hi>lo?hi:lo+1,v:c=>c.level,lab:v=>v.toFixed(1)+" dB"};}
+  const xs=vals.map(c=>Math.log10(c.n));const lo=Math.min(...xs),hi=Math.max(...xs);
+  return {lo:lo,hi:hi>lo?hi:lo+1,v:c=>Math.log10(c.n),lab:v=>fmt(Math.round(Math.pow(10,v)))};
+}
+function draw(d){
+  const host=document.getElementById("sky");host.innerHTML="";
+  const svg=el("svg",{viewBox:"0 0 "+S+" "+S,role:"img","aria-label":"Sky coverage plot"});host.appendChild(svg);
+  svg.appendChild(el("circle",{cx:C,cy:C,r:R,fill:"var(--bg)",stroke:"var(--line)"}));
+  const sc=scale(d);
+  d.cells.forEach(c=>{
+    const az0=c.az*d.az_step,e0=c.el*d.el_step,sparse=c.n<d.min_cell;
+    const t=sparse?0:(sc.v(c)-sc.lo)/(sc.hi-sc.lo);
+    const p=el("path",{d:sector(az0,az0+d.az_step,e0,Math.min(90,e0+d.el_step)),
+      fill:sparse?"var(--grid)":vir(t),stroke:"var(--bg)","stroke-width":0.6,"fill-opacity":sparse?0.7:1});
+    p.appendChild(el("title",null,"azimuth "+az0+"–"+(az0+d.az_step)+"°, elevation "+e0+"–"+(e0+d.el_step)+"°\n"+
+      (c.rate!=null?Math.round(c.rate*100)+"% decoded":"")+" ("+fmt(c.ok)+" of "+fmt(c.n)+" bursts)\n"+
+      "mean signal "+c.level+" dB, "+c.sats+" satellites"+(sparse?"\ntoo few bursts to judge yet":"")));
+    svg.appendChild(p);
+  });
+  [0,30,60].forEach(e=>{svg.appendChild(el("circle",{cx:C,cy:C,r:R*(90-e)/90,fill:"none",
+    stroke:"var(--dim)","stroke-opacity":0.35,"stroke-dasharray":e?"2 4":null}));
+    if(e)svg.appendChild(el("text",{x:C+4,y:C-R*(90-e)/90-4,class:"ax"},e+"°"));});
+  for(let a=0;a<360;a+=30){const p=pt(a,0);svg.appendChild(el("line",{x1:C,y1:C,x2:p[0],y2:p[1],
+    stroke:"var(--dim)","stroke-opacity":0.2}));}
+  [["N",0],["E",90],["S",180],["W",270]].forEach(([n,a])=>{const p=pt(a,-7);
+    svg.appendChild(el("text",{x:p[0],y:p[1]+4,"text-anchor":"middle",class:"ax","font-weight":600},n));});
+  let seg=[];const segs=[];
+  d.horizon.forEach((h,i)=>{if(h==null){if(seg.length)segs.push(seg);seg=[];return;}
+    seg.push(pt(i*d.az_step+d.az_step/2,h));});
+  if(seg.length)segs.push(seg);
+  segs.forEach(s=>{if(s.length>1)svg.appendChild(el("polyline",{points:s.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" "),
+    fill:"none",stroke:"var(--warn)","stroke-width":2,"stroke-dasharray":"6 4"}));});
+  document.getElementById("bar").style.background="linear-gradient(90deg,"+[0,.25,.5,.75,1].map(vir).join(",")+")";
+  document.getElementById("lo").textContent=sc.lab(sc.lo);
+  document.getElementById("hi").textContent=sc.lab(sc.hi);
+  document.getElementById("mincell").textContent=d.min_cell;
+  document.getElementById("hrate").textContent=Math.round(d.horizon_rate*100)+"%";
+}
+function card(k,v,sub){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+
+  (sub?' <small>'+sub+'</small>':'')+'</div></div>';}
+function side(d){
+  const s=d.stats,dl=s.frames-s.uplink,shown=d.cells.filter(c=>c.n>=d.min_cell).length;
+  let h="";
+  if(d.note)h+='<div class="card warn">'+d.note+'</div>';
+  h+=card("Bursts placed",fmt(s.attributed),dl?Math.round(100*s.attributed/dl)+"% of downlink":"");
+  h+=card("Ambiguous",dl?Math.round(100*s.ambiguous/dl)+"%":"—","left out: two satellites fit");
+  h+=card("Sky cells",shown,"of 648 with enough bursts");
+  h+=card("Receiver offset",d.rx_offset_hz!=null?(d.rx_offset_hz>=0?"+":"")+Math.round(d.rx_offset_hz)+" Hz":"—","from ring alerts");
+  if(d.first_data)h+=card("Data since",new Date(d.first_data*1000).toLocaleDateString(),"");
+  document.getElementById("side").innerHTML=h;
+}
+async function load(){
+  try{
+    const d=await (await fetch("/api/coverage?hours="+WIN)).json();
+    LAST=d;draw(d);side(d);
+    document.getElementById("status").textContent="updated "+new Date().toLocaleTimeString();
+  }catch(e){document.getElementById("status").textContent="fetch failed";}
+}
+document.getElementById("win").onclick=e=>{const b=e.target.closest("button");if(!b)return;
+  WIN=+b.dataset.h;[...b.parentNode.children].forEach(x=>x.classList.toggle("on",x===b));load();};
+document.getElementById("mode").onclick=e=>{const b=e.target.closest("button");if(!b)return;
+  MODE=b.dataset.m;[...b.parentNode.children].forEach(x=>x.classList.toggle("on",x===b));if(LAST)draw(LAST);};
+load();setInterval(load,60000);
+</script>
+</body></html>
+"""
+
+
 def main():
     ap = argparse.ArgumentParser(description="Iridium Observatory trends server")
     ap.add_argument("--db", default=DB_PATH)
@@ -1470,6 +1655,11 @@ def main():
     Handler.sky = sky.SkyTracker(args.sniffer, tle_dir, station,
                                  download=not args.no_tle_download)
     Handler.sky.start()
+    import sky_coverage
+    Handler.coverage = sky_coverage.CoverageCollector(
+        args.sniffer, os.path.join(os.path.dirname(os.path.abspath(args.db)), "coverage.db"),
+        Handler.sky)
+    Handler.coverage.start()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"observatory trends: http://{args.host}:{args.port}/  db={args.db}")
     try:

@@ -661,10 +661,11 @@ void web_map_count_uw_fail(ir_direction_t direction)
  * Each decoded frame and each unique-word failure, for the Observatory to
  * attribute to a satellite. A fixed ring with its own lock, apart from the
  * map state: a poll never stalls the map, and an unread ring costs only the
- * copy into it. ~57 frames/s on a 10 MS/s station fill it in about 4
- * minutes; the Observatory polls every few seconds. */
-#define FRAME_RING      16384
-#define FRAMES_PER_POLL 8000
+ * copy into it. A 10 MS/s station with a good antenna logs ~320 records
+ * a second (frames plus failed bursts), so 65,536 hold about 3 minutes;
+ * the Observatory polls every 5 s. 2 MB. */
+#define FRAME_RING      65536
+#define FRAMES_PER_POLL 20000
 typedef struct {
     uint64_t seq, ts_ns;
     double freq;
