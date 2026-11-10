@@ -640,8 +640,12 @@ int ida_decode(const demod_frame_t *frame, ida_burst_t *burst)
     lcw_t lcw;
     if (!decode_lcw(data, data_len, &lcw))
         return 0;
-    /* Frame type: 2 = downlink IDA, 6/7 = uplink IDA */
-    if (lcw.ft != 2 && lcw.ft != 6 && lcw.ft != 7)
+    /* Frame type 2 is IDA (SBD data) in BOTH directions; 6 is U6 and 7 is
+     * sync (ISY), also in both directions (iridium-toolkit bitsparser.py).
+     * 6/7 were once accepted here as "uplink IDA" to explain why no uplink
+     * IDA decoded; the real cause was the uplink UW offset in
+     * burst_downmix.c. */
+    if (lcw.ft != 2)
         return 0;
 
     /* Descramble + Chase BCH decode payload (skip 46 LCW bits) */

@@ -823,14 +823,8 @@ static const char *classify_frame_label(const demod_frame_t *demod,
     case 1: { iip_info_t iip; return ida_iip_decode(demod, &iip) ? "IIP" : "RAW"; }
     case 2: return "IDA";
     case 3: return "IU3";
-    case 6: case 7:
-        /* ft 6/7 are uplink-IDA candidates (ida_decode.c). Reaching here means
-         * the burst passed the UW check and its LCW decoded, but the IDA
-         * payload decode failed. On UL, isolate that population explicitly so
-         * "UL IDA present but failing decode" is distinguishable from genuine
-         * DL sync (ISY) / U6 frames. */
-        if (demod->direction == DIR_UPLINK) return "IDA_UL_FAIL";
-        return (ft == 7) ? "ISY" : "IU6";
+    case 6: return "IU6";
+    case 7: return "ISY";   /* both directions, as iridium-toolkit */
     default: break;
     }
 
