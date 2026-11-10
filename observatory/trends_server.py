@@ -216,6 +216,101 @@ def build_handoffs(path, days=0):
         con.close()
 
 
+CO_PRESENT_S = 900     # "related aircraft": same ground address within 15 minutes
+
+
+def build_aircraft_list(path, limit=400):
+    """The aircraft with the most content messages, for the Graph page's
+    tail search."""
+    con = connect_ro(path)
+    if con is None:
+        return {"aircraft": []}
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE name='kg_node'").fetchone():
+            return {"aircraft": []}
+        return {"aircraft": [{"tail": k, "messages": m, "acks": a, "last": l} for k, m, a, l in con.execute(
+            "SELECT key, n-acks, acks, last_t FROM kg_node WHERE kind='aircraft' AND n-acks>0 "
+            "ORDER BY n-acks DESC LIMIT ?", (limit,))]}
+    finally:
+        con.close()
+
+
+def build_aircraft(path, tail):
+    """One aircraft from the knowledge graph: activity by day, the ground
+    addresses and authorities it is tied to, its handoff and contact events,
+    and aircraft that shared its ground addresses within CO_PRESENT_S."""
+    con = connect_ro(path)
+    if con is None:
+        return {"error": "no observatory database yet"}
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE name='kg_node'").fetchone():
+            return {"error": "no knowledge graph yet: it is built by the next rollup run"}
+        tail = (tail or "").strip().upper().lstrip(".")
+        row = con.execute("SELECT id, first_t, last_t, n, acks FROM kg_node "
+                          "WHERE kind='aircraft' AND key=?", (tail,)).fetchone()
+        if not row:
+            return {"error": "%s isn't in the graph: no message to it has been heard" % tail}
+        ac, first, last, n, acks = row
+        # activity by day, acknowledgements included (from the message table)
+        days = [{"day": d, "content": c, "acks": a} for d, c, a in con.execute(
+            "SELECT date(t,'unixepoch'), SUM(lbl!='_d'), SUM(lbl='_d') FROM messages "
+            "WHERE reg=? GROUP BY 1 ORDER BY 1", (tail,))]
+        msgs = con.execute("SELECT m.id, m.key, m.label, e.t FROM kg_edge e JOIN kg_node m ON m.id=e.src "
+                           "WHERE e.kind='sent_to' AND e.dst=? ORDER BY e.t", (ac,)).fetchall()
+        ids = [m[0] for m in msgs]
+        links = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            for src, kind, nkind, label, props in con.execute(
+                    "SELECT e.src, e.kind, n.kind, n.label, e.props FROM kg_edge e JOIN kg_node n ON n.id=e.dst "
+                    "WHERE e.src IN (%s) AND e.kind IN ('from','authority','next_authority','contact')"
+                    % ",".join("?" * len(chunk)), chunk):
+                links.setdefault(src, []).append((kind, nkind, label))
+        events, labels, grounds, authorities = [], {}, {}, {}
+        for mid, key, label, t in msgs:
+            ls = links.get(mid, [])
+            base = label.split(" #")[0]
+            labels[base] = labels.get(base, 0) + 1
+            for kind, nkind, lab in ls:
+                if kind == "from":
+                    grounds[lab] = grounds.get(lab, 0) + 1
+                else:
+                    k = ("contact" if kind == "contact" else
+                         "next authority" if kind == "next_authority" else "authority")
+                    authorities[(lab, k)] = authorities.get((lab, k), 0) + 1
+            notable = [l for l in ls if l[0] != "from"]
+            if key.startswith("cpdlc:") or notable:
+                g = next((l[2] for l in ls if l[0] == "from"), None)
+                events.append({"t": t, "what": base, "ground": g,
+                               "to": [{"kind": k, "name": lab} for k, _, lab in notable]})
+        # related aircraft: messages from the same ground address within 15 min
+        related = {}
+        for gnd_label, t in con.execute(
+                "SELECT g.label, e.t FROM kg_edge s JOIN kg_edge e ON e.src=s.src AND e.kind='from' "
+                "JOIN kg_node g ON g.id=e.dst WHERE s.kind='sent_to' AND s.dst=?", (ac,)):
+            for (other,) in con.execute(
+                    "SELECT DISTINCT a.key FROM kg_edge e JOIN kg_node g ON g.id=e.dst AND g.label=? "
+                    "JOIN kg_edge s ON s.src=e.src AND s.kind='sent_to' JOIN kg_node a ON a.id=s.dst "
+                    "WHERE e.kind='from' AND e.t BETWEEN ? AND ? AND a.id<>?",
+                    (gnd_label, t - CO_PRESENT_S, t + CO_PRESENT_S, ac)):
+                r = related.setdefault(other, {"tail": other, "times": 0, "grounds": set()})
+                r["times"] += 1
+                r["grounds"].add(gnd_label)
+        rel = sorted(related.values(), key=lambda r: -r["times"])[:12]
+        for r in rel:
+            r["grounds"] = sorted(r["grounds"])
+        return {
+            "tail": tail, "first": first, "last": last, "content": n - acks, "acks": acks,
+            "days": days, "labels": sorted(labels.items(), key=lambda kv: -kv[1])[:10],
+            "grounds": sorted(grounds.items(), key=lambda kv: -kv[1]),
+            "authorities": [{"name": k[0], "kind": k[1], "n": v}
+                            for k, v in sorted(authorities.items(), key=lambda kv: -kv[1])],
+            "events": events[-200:], "related": rel, "co_present_s": CO_PRESENT_S,
+        }
+    finally:
+        con.close()
+
+
 def build_aviation(path, tail=None, limit=200):
     con = connect_ro(path)
     if con is None:
@@ -412,6 +507,18 @@ class Handler(BaseHTTPRequestHandler):
                 days = 0
             try:
                 self._send(200, json.dumps(build_handoffs(self.db_path, days)), "application/json")
+            except Exception as e:  # noqa: keep the server alive
+                self._send(500, json.dumps({"error": str(e)}), "application/json")
+        elif u.path == "/api/graph/aircraft":
+            q = parse_qs(u.query)
+            try:
+                data = build_aircraft(self.db_path, q.get("tail", [""])[0])
+                self._send(200, json.dumps(data), "application/json")
+            except Exception as e:  # noqa: keep the server alive
+                self._send(500, json.dumps({"error": str(e)}), "application/json")
+        elif u.path == "/api/graph/aircraft_list":
+            try:
+                self._send(200, json.dumps(build_aircraft_list(self.db_path)), "application/json")
             except Exception as e:  # noqa: keep the server alive
                 self._send(500, json.dumps({"error": str(e)}), "application/json")
         elif u.path == "/coverage":
@@ -912,7 +1019,7 @@ AVIATION_PAGE = r"""<!doctype html>
   </p>
 </main>
 <script>
-let TAIL=null, VIEW="tails", DATA=null;
+let TAIL=new URLSearchParams(location.search).get("tail"), VIEW="tails", DATA=null;
 
 function fmt(n){if(n>=1e6)return (n/1e6).toFixed(1)+"M";
   if(n>=1e3)return (n/1e3).toFixed(1)+"k";return ""+n;}
@@ -1716,6 +1823,14 @@ GRAPH_PAGE = r"""<!doctype html>
   .note{color:var(--dim);font-size:12.5px;line-height:1.55}
   .note b{color:var(--fg)}
   .empty{color:var(--dim);padding:30px;text-align:center}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 12px}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:3px 10px;font-size:12px}
+  .chip b{font-weight:600}
+  .chip.link{cursor:pointer}.chip.link:hover{border-color:var(--accent)}
+  .acgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+  @media (max-width:900px){.acgrid{grid-template-columns:minmax(0,1fr)}}
+  h3{font-size:12.5px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 4px}
+  table.ev th,table.ev td{text-align:left}
 </style></head>
 <body>
 <header>
@@ -1742,6 +1857,17 @@ GRAPH_PAGE = r"""<!doctype html>
   <div class="panel">
     <h2>Handoffs, by pair</h2>
     <div id="table"></div>
+  </div>
+  <div class="panel" id="aircraft">
+    <h2>One aircraft</h2>
+    <div class="meta">Type a tail number, or pick one of the most active. Shows when it was
+      heard, who it talked to, the authorities it was handed to, and aircraft served by the
+      same ground addresses at the same times.</div>
+    <div class="controls"><input id="tail" list="tails" placeholder="tail number, e.g. N913JB"
+      style="background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-size:13px;width:240px">
+      <datalist id="tails"></datalist>
+      <div class="seg"><button id="go">Show</button></div><span class="meta" id="acnote"></span></div>
+    <div id="acview"></div>
   </div>
   <div class="panel note">
     <b>Where this comes from:</b> the Observatory's knowledge graph, built from every stored
@@ -1816,6 +1942,61 @@ async function load(){
     document.getElementById("status").textContent="updated "+new Date().toLocaleTimeString();
   }catch(e){document.getElementById("status").textContent="fetch failed";}
 }
+/* ---- one aircraft ---- */
+function day(s){return s.slice(5);}
+function activity(host,d){
+  host.innerHTML="";
+  if(!d.days.length){host.innerHTML='<div class="meta">no messages</div>';return;}
+  const t0=Date.parse(d.days[0].day),t1=Date.parse(d.days[d.days.length-1].day);
+  const nd=Math.max(1,Math.round((t1-t0)/864e5)+1),W=900,H=110,pl=34,pr=8,pb=20,pt=6;
+  const iw=W-pl-pr,ih=H-pt-pb,bw=Math.max(1,iw/nd-1);
+  const max=Math.max(...d.days.map(x=>x.content+x.acks));
+  const svg=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Messages per day"});host.appendChild(svg);
+  const X=s=>pl+iw*(Date.parse(s)-t0)/864e5/nd, Y=v=>pt+ih*(1-v/max);
+  [0,max].forEach(v=>{svg.appendChild(el("line",{x1:pl,x2:W-pr,y1:Y(v),y2:Y(v),stroke:"var(--grid)"}));
+    svg.appendChild(el("text",{x:pl-6,y:Y(v)+4,"text-anchor":"end",class:"sublbl"},v));});
+  d.days.forEach(x=>{const x0=X(x.day);
+    const a=el("rect",{x:x0,y:Y(x.content+x.acks),width:bw,height:ih*x.acks/max,fill:"var(--dim)","fill-opacity":0.45});
+    a.appendChild(el("title",null,x.day+": "+x.content+" messages, "+x.acks+" acknowledgements"));svg.appendChild(a);
+    const c=el("rect",{x:x0,y:Y(x.content),width:bw,height:ih*x.content/max,fill:"var(--accent)"});
+    c.appendChild(el("title",null,x.day+": "+x.content+" messages, "+x.acks+" acknowledgements"));svg.appendChild(c);});
+  svg.appendChild(el("text",{x:pl,y:H-4,class:"sublbl"},d.days[0].day));
+  svg.appendChild(el("text",{x:W-pr,y:H-4,"text-anchor":"end",class:"sublbl"},d.days[d.days.length-1].day));
+}
+function chips(list,fmt){return '<div class="chips">'+(list.length?list.map(fmt).join(""):'<span class="meta">none</span>')+'</div>';}
+function showAircraft(tail){
+  tail=(tail||"").trim().toUpperCase();if(!tail)return;
+  document.getElementById("tail").value=tail;
+  history.replaceState(null,"","#aircraft="+encodeURIComponent(tail));
+  fetch("/api/graph/aircraft?tail="+encodeURIComponent(tail)).then(r=>r.json()).then(d=>{
+    const v=document.getElementById("acview");
+    if(d.error){v.innerHTML='<div class="empty">'+esc(d.error)+'</div>';return;}
+    let h='<div class="cards">'+card("Messages",d.content,"content")+card("Acknowledgements",d.acks,"")+
+      card("Days heard",d.days.length,"")+card("Seen",ago(d.first),"to "+ago(d.last))+'</div>';
+    h+='<h3>Messages per day</h3><div id="actl"></div><div class="meta">blue: content messages; grey: acknowledgements</div>';
+    h+='<div class="acgrid"><div><h3>Ground addresses</h3>'+chips(d.grounds,g=>'<span class="chip"><b>'+esc(g[0])+'</b> '+g[1]+'</span>');
+    h+='<h3>Authorities and units</h3>'+chips(d.authorities,a=>'<span class="chip"><b>'+esc(a.name)+'</b> '+esc(a.kind)+(a.n>1?' ×'+a.n:'')+'</span>');
+    h+='<h3>Message kinds</h3>'+chips(d.labels,l=>'<span class="chip">'+esc(l[0])+' '+l[1]+'</span>')+'</div>';
+    h+='<div><h3>Related aircraft</h3><div class="meta">served by the same ground address within '+Math.round(d.co_present_s/60)+' minutes</div>'+
+      chips(d.related,r=>'<span class="chip link" data-tail="'+esc(r.tail)+'"><b>'+esc(r.tail)+'</b> ×'+r.times+' · '+esc(r.grounds.join(", "))+'</span>')+'</div></div>';
+    h+='<h3>Handoffs, contacts and CPDLC</h3>';
+    if(d.events.length){h+='<table class="ev"><tr><th>time (UTC)</th><th>message</th><th>from</th><th>to</th></tr>';
+      d.events.slice().reverse().forEach(e=>{h+='<tr><td>'+new Date(e.t*1000).toISOString().slice(0,16).replace("T"," ")+'</td><td>'+esc(e.what)+
+        '</td><td>'+esc(e.ground||"")+'</td><td>'+esc(e.to.map(x=>x.name).join(", "))+'</td></tr>';});h+='</table>';}
+    else h+='<div class="meta">none</div>';
+    h+='<p class="meta">Raw message texts: <a href="/aviation?tail='+encodeURIComponent(d.tail)+'" style="color:var(--accent)">Aviation, '+esc(d.tail)+'</a></p>';
+    v.innerHTML=h;activity(document.getElementById("actl"),d);
+    v.querySelectorAll(".chip.link").forEach(c=>c.onclick=()=>showAircraft(c.dataset.tail));
+  });
+}
+fetch("/api/graph/aircraft_list").then(r=>r.json()).then(d=>{
+  document.getElementById("tails").innerHTML=d.aircraft.map(a=>'<option value="'+esc(a.tail)+'">'+a.messages+' messages</option>').join("");
+  document.getElementById("acnote").textContent=d.aircraft.length?("most active: "+d.aircraft.slice(0,5).map(a=>a.tail).join(", ")):"";
+  const m=location.hash.match(/aircraft=([^&]+)/);
+  showAircraft(m?decodeURIComponent(m[1]):(d.aircraft[0]||{}).tail);
+});
+document.getElementById("go").onclick=()=>showAircraft(document.getElementById("tail").value);
+document.getElementById("tail").onkeydown=e=>{if(e.key==="Enter")showAircraft(e.target.value);};
 document.getElementById("win").onclick=e=>{const b=e.target.closest("button");if(!b)return;
   DAYS=+b.dataset.d;[...b.parentNode.children].forEach(x=>x.classList.toggle("on",x===b));load();};
 load();setInterval(load,300000);

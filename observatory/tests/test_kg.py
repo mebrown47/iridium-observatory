@@ -82,5 +82,15 @@ check(pairs == {("NYCODYA", "KUSA"): 1, ("NYCODYA", "JACKSONVILLE center"): 1}
       and h["senders"] == {"NYCODYA": 1},
       "handoff API: pairs and distinct aircraft per sender", str(h["senders"]))
 
+a = trends_server.build_aircraft(path, "n200bb")
+check(a.get("tail") == "N200BB" and a["grounds"] == [("NYCODYA", 3)]
+      and {(x["name"], x["kind"]) for x in a["authorities"]} == {("KUSA", "next authority"), ("JACKSONVILLE center", "contact")}
+      and len(a["events"]) == 2,
+      "aircraft API: ground addresses, authorities and handoff events for one tail",
+      "%s %s" % (a.get("grounds"), a.get("authorities")))
+check("error" in trends_server.build_aircraft(path, "N999ZZ"), "an unknown tail is reported, not an error page")
+check([x["tail"] for x in trends_server.build_aircraft_list(path)["aircraft"]][:1] == ["N200BB"],
+      "aircraft list: most content messages first")
+
 print("\n%d checks, %d failed" % (checks, fails))
 sys.exit(1 if fails else 0)
