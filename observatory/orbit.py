@@ -41,6 +41,9 @@ IR_BASE = 1616e6
 IR_CHAN_W = 1e7 / 240
 IR_RING_ALERT = 246                     # S.07
 RA_CENTER_HZ = IR_BASE + (IR_RING_ALERT + 0.5) * IR_CHAN_W
+IR_CHANNELS = 252                       # 240 duplex + 12 simplex
+RA_WINDOW_HZ = 100e3                    # ring alerts within this of S.07 (Doppler is +-37 kHz)
+AMBIGUOUS_HZ = 1500.0                   # runner-up this close: attribution ambiguous (identify.h)
 
 KEEP_S = 600.0                          # ring alerts used for a fix (IraAnchor kKeepS)
 
@@ -322,6 +325,43 @@ def _median(v):
     return (s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2) if n else 0.0
 
 
+def channel_center(k):
+    return IR_BASE + (k + 0.5) * IR_CHAN_W
+
+
+def identify_frame(c, t, freq, st, rx_offset, candidates=None):
+    """Which satellite sent a downlink burst heard at true time t (Unix s)
+    and frequency freq (Hz), from station st, with the receiver this far off
+    (Hz, measured - true). iridium-analyzer's identify.cpp matchAll: each
+    satellite above -2 deg names the channel it would have to be sending on
+    to put the burst there; the one whose Doppler then lands nearest wins.
+    candidates = satellite indices to try (default all). Returns dict(sat,
+    channel, residual_hz, runner_up_hz, ambiguous, el, az) or None."""
+    best = second = None
+    for i in (candidates if candidates is not None else range(len(c.sats))):
+        v = c.view(i, t, st)
+        if v is None or v["el"] < -2.0:
+            continue
+        scale = 1.0 - v["range_rate_kms"] / C_KMS
+        ck = (freq - rx_offset) / scale
+        k = int(round((ck - IR_BASE) / IR_CHAN_W - 0.5))
+        if not 0 <= k < IR_CHANNELS:
+            continue
+        res = freq - (channel_center(k) * scale + rx_offset)
+        a = abs(res)
+        if best is None or a < best[0]:
+            second = best
+            best = (a, i, k, res, v)
+        elif second is None or a < second[0]:
+            second = (a, i, k, res, v)
+    if best is None:
+        return None
+    runner = second[0] if second else float("inf")
+    return {"sat": best[1], "channel": best[2], "residual_hz": best[3],
+            "runner_up_hz": runner, "ambiguous": runner - best[0] < AMBIGUOUS_HZ,
+            "el": best[4]["el"], "az": best[4]["az"]}
+
+
 class RingAlerts:
     """Ring alerts from iridium-sniffer, accumulated across /api/doppler
     polls. Each: frame time (Unix s, sniffer frame clock), frequency (Hz),
@@ -408,6 +448,25 @@ class RingAlerts:
                 out.append((t + self.clock_offset, f, i))
         out.sort()
         return out
+
+    def rx_offset(self, c, st, window_s=120.0):
+        """The receiver's frequency offset (Hz, measured - true): the median,
+        over the last window_s of named ring alerts, of each one's measured
+        frequency minus the S.07 frequency its satellite's Doppler predicts
+        (IraAnchor::offsetHz). Short window, so a drifting radio is followed.
+        None until a named ring alert arrives."""
+        obs = self.observations()
+        if not obs:
+            return None
+        newest = obs[-1][0]
+        off = []
+        for t, f, i in obs:
+            if t < newest - window_s:
+                continue
+            v = c.view(i, t, st)
+            if v:
+                off.append(f - RA_CENTER_HZ * (1.0 - v["range_rate_kms"] / C_KMS))
+        return _median(off) if off else None
 
     def locate(self, c, window_s=KEEP_S, max_grid_obs=200):
         """Where the receiver is: the position at which the ring alerts of

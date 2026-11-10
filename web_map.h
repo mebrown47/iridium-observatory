@@ -78,6 +78,14 @@ void web_map_count_type(const char *label);
 void web_map_count_uw_fail(ir_direction_t direction);
 void web_map_count_uw_ambiguous(void);
 
+/* Record one burst for GET /api/frames, the Observatory's per-frame feed
+ * (satellite attribution, coverage map). label = the frame type as for
+ * web_map_count_type(), or NULL for a burst whose unique word failed.
+ * sat_id = the ring alert's satellite number, or -1. Thread-safe; a fixed
+ * ring, so nothing grows when nobody reads it. */
+void web_map_add_frame(uint64_t timestamp_ns, double frequency, float magnitude,
+                       const char *label, ir_direction_t direction, int sat_id);
+
 /* Append an ACARS message to the recent messages feed (chronological tab).
  * Heartbeats (label "_d") and empty-text messages should not be passed in --
  * filter at the call site. Thread-safe. */

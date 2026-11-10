@@ -657,6 +657,89 @@ void web_map_count_uw_fail(ir_direction_t direction)
     pthread_mutex_unlock(&state.lock);
 }
 
+/* ---- Per-frame records (GET /api/frames) ----
+ * Each decoded frame and each unique-word failure, for the Observatory to
+ * attribute to a satellite. A fixed ring with its own lock, apart from the
+ * map state: a poll never stalls the map, and an unread ring costs only the
+ * copy into it. ~57 frames/s on a 10 MS/s station fill it in about 4
+ * minutes; the Observatory polls every few seconds. */
+#define FRAME_RING      16384
+#define FRAMES_PER_POLL 8000
+typedef struct {
+    uint64_t seq, ts_ns;
+    double freq;
+    float mag;
+    int8_t type;        /* index into ftype_names, N_FTYPES = UW failure */
+    int8_t dir;         /* 0 DL, 1 UL, 2 unknown */
+    int16_t sat;        /* ring alert's satellite number, -1 otherwise */
+} frame_rec_t;
+static frame_rec_t frame_ring[FRAME_RING];
+static uint64_t frame_seq = 0;          /* records written so far */
+static pthread_mutex_t frame_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void web_map_add_frame(uint64_t timestamp_ns, double frequency, float magnitude,
+                       const char *label, ir_direction_t direction, int sat_id)
+{
+    int type = N_FTYPES;
+    if (label) {
+        type = -1;
+        for (int i = 0; i < N_FTYPES; i++)
+            if (strcmp(label, ftype_names[i]) == 0) { type = i; break; }
+        if (type < 0) return;
+    }
+    pthread_mutex_lock(&frame_lock);
+    frame_rec_t *r = &frame_ring[frame_seq % FRAME_RING];
+    r->seq = ++frame_seq;
+    r->ts_ns = timestamp_ns;
+    r->freq = frequency;
+    r->mag = magnitude;
+    r->type = (int8_t)type;
+    r->dir = direction == DIR_DOWNLINK ? 0 : direction == DIR_UPLINK ? 1 : 2;
+    r->sat = (int16_t)sat_id;
+    pthread_mutex_unlock(&frame_lock);
+}
+
+/* Records after `since`, oldest first, at most FRAMES_PER_POLL. "seq" is the
+ * last one sent (poll again from it); "lost" counts records that left the
+ * ring before this poll asked for them. Times are the frame clock (ms), as
+ * in /api/doppler; wall_ms beside the newest shows its lag. */
+static int build_frames_json(char *buf, int bufsize, uint64_t since)
+{
+    frame_rec_t *snap = malloc(sizeof(frame_rec_t) * FRAMES_PER_POLL);
+    if (!snap)
+        return snprintf(buf, bufsize, "{\"error\":\"out of memory\"}");
+    pthread_mutex_lock(&frame_lock);
+    uint64_t head = frame_seq;
+    uint64_t oldest = head > FRAME_RING ? head - FRAME_RING : 0;
+    uint64_t from = since < oldest ? oldest : since;
+    if (from > head) from = head;
+    int n = 0;
+    for (uint64_t s = from; s < head && n < FRAMES_PER_POLL; s++)
+        snap[n++] = frame_ring[s % FRAME_RING];
+    pthread_mutex_unlock(&frame_lock);
+
+    struct timespec rt;
+    clock_gettime(CLOCK_REALTIME, &rt);
+    int off = snprintf(buf, bufsize,
+        "{\"seq\":%llu,\"head\":%llu,\"lost\":%llu,\"wall_ms\":%llu,\"types\":[",
+        (unsigned long long)(n ? snap[n - 1].seq : from),
+        (unsigned long long)head,
+        (unsigned long long)(since < oldest ? oldest - since : 0),
+        (unsigned long long)(rt.tv_sec * 1000ULL + rt.tv_nsec / 1000000));
+    for (int i = 0; i < N_FTYPES; i++)
+        off += snprintf(buf + off, bufsize - off, "\"%s\",", ftype_names[i]);
+    off += snprintf(buf + off, bufsize - off, "\"FAIL\"],\"f\":[");
+    for (int i = 0; i < n && off < bufsize - 96; i++)
+        off += snprintf(buf + off, bufsize - off, "%s[%llu,%llu,%.0f,%.1f,%d,%d,%d]",
+                        i ? "," : "", (unsigned long long)snap[i].seq,
+                        (unsigned long long)(snap[i].ts_ns / 1000000ULL),
+                        snap[i].freq, snap[i].mag, snap[i].type, snap[i].dir,
+                        snap[i].sat);
+    off += snprintf(buf + off, bufsize - off, "]}");
+    free(snap);
+    return off;
+}
+
 void web_map_count_uw_ambiguous(void)
 {
     pthread_mutex_lock(&state.lock);
@@ -1719,9 +1802,15 @@ static void *client_thread(void *arg)
     char *end = strchr(path, ' ');
     if (end) *end = '\0';
 
-    /* Strip query string — reverse proxies may append ?... parameters */
+    /* Strip query string — reverse proxies may append ?... parameters.
+     * /api/frames reads its since= from it first. */
     char *qs = strchr(path, '?');
-    if (qs) *qs = '\0';
+    uint64_t since = 0;
+    if (qs) {
+        *qs = '\0';
+        char *p = strstr(qs + 1, "since=");
+        if (p) since = strtoull(p + 6, NULL, 10);
+    }
 
     if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         send_response(fd, "200 OK", "text/html",
@@ -1741,6 +1830,16 @@ static void *client_thread(void *arg)
         char *json = malloc(JSON_BUF_SIZE);
         if (json) {
             int jlen = build_json(json, JSON_BUF_SIZE);
+            send_response(fd, "200 OK", "application/json", json, jlen);
+            free(json);
+        }
+        close(fd);
+    } else if (strcmp(path, "/api/frames") == 0) {
+        /* ~70 bytes a record at most */
+        int size = FRAMES_PER_POLL * 72 + 1024;
+        char *json = malloc(size);
+        if (json) {
+            int jlen = build_frames_json(json, size, since);
             send_response(fd, "200 OK", "application/json", json, jlen);
             free(json);
         }

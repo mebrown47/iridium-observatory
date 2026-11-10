@@ -778,8 +778,11 @@ static void *frame_consumer_thread(void *arg) {
              * reaches classify_frame_label(). Count it by direction -- the
              * earliest-stage signal for whether UL bursts are present but being
              * rejected at the demod. */
-            if (web_enabled)
+            if (web_enabled) {
                 web_map_count_uw_fail(frame->direction);
+                web_map_add_frame(frame->timestamp, frame->center_frequency,
+                                  frame->magnitude, NULL, frame->direction, -1);
+            }
             if (archive_enabled)
                 archive_count_uw_fail(frame->direction == DIR_UPLINK);
             if (verbose)
@@ -891,8 +894,13 @@ static void *output_thread_fn(void *arg) {
             if (web_enabled || archive_enabled) {
                 const char *ftype =
                     classify_frame_label(demod, dec, decoded.type, item->ida_ok);
-                if (web_enabled)
+                if (web_enabled) {
                     web_map_count_type(ftype);
+                    web_map_add_frame(demod->timestamp, demod->center_frequency,
+                                      demod->magnitude, ftype, demod->direction,
+                                      (dec && decoded.type == FRAME_IRA) ?
+                                          decoded.ira.sat_id : -1);
+                }
                 if (archive_enabled) {
                     /* Ring alerts only, and only on the ring-alert channel
                      * (S.07, within Doppler of it; the window doppler_pos.c

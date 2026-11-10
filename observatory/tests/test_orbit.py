@@ -103,5 +103,36 @@ check(fix is not None and km < 3.0 and fix["rms_hz"] < 20 and abs(fix["rx_offset
       "%.3f %.3f, %.1f km off, rms %.1f Hz, rx offset %+.0f Hz"
       % (fix["lat"], fix["lon"], km, fix["rms_hz"], fix["rx_offset_hz"]) if fix else "no fix")
 
+check(ra.rx_offset(c, rx) is not None and abs(ra.rx_offset(c, rx) - K_OFF) < 5,
+      "receiver offset from named ring alerts",
+      "%+.0f Hz (true %+.0f)" % (ra.rx_offset(c, rx) or 0, K_OFF))
+
+# Doppler attribution (iridium-analyzer identifyFrame): bursts from every
+# satellite above 5 deg at the same station, on random channels, with the
+# receiver offset and 150 Hz of measurement noise. A confident answer must
+# be right; near closest approach a frame may honestly come back ambiguous.
+import random
+random.seed(7)
+n = right = wrong_sure = ambiguous = 0
+t = T0
+while t < T0 + 600:
+    for v in c.visible(t, rx, 5.0):
+        k = random.randrange(orbit.IR_CHANNELS)
+        f = orbit.channel_center(k) * (1.0 - v["range_rate_kms"] / orbit.C_KMS) + K_OFF + random.gauss(0, 150)
+        r = orbit.identify_frame(c, t, f, rx, K_OFF)
+        n += 1
+        if r is None:
+            continue
+        if r["ambiguous"]:
+            ambiguous += 1
+        elif r["sat"] == v["index"] and r["channel"] == k:
+            right += 1
+        else:
+            wrong_sure += 1
+    t += 7.3
+check(n > 200 and wrong_sure == 0 and right > 0.6 * n,
+      "Doppler attribution names the sending satellite",
+      "%d bursts: %d right, %d ambiguous, %d confidently wrong" % (n, right, ambiguous, wrong_sure))
+
 print("\n%d checks, %d failed" % (checks, fails))
 sys.exit(1 if fails else 0)
