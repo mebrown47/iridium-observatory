@@ -18,7 +18,7 @@ Two services that start at boot, each with a web page:
 | Port | Service | What it shows |
 |---|---|---|
 | 8888 | **Receiver** (`iridium-sniffer`) | Live map of satellite beams, paging and aircraft, with ACARS, Pager and AT1 tabs (AT1 carries ADS-C position reports and CPDLC clearances) and a live count of every frame type heard |
-| 8890 | **Observatory** | **Trends**: the traffic mix over hours and days. **Aviation**: per-aircraft history, CPDLC log and ADS-C contracts. **Doppler**: each satellite pass drawn as a frequency curve, the satellites overhead and their upcoming passes, and your receiver's estimated location. **Coverage**: a sky plot of where the station decodes well, and its effective horizon |
+| 8890 | **Observatory** | **Trends**: the traffic mix over hours and days. **Aviation**: per-aircraft history, CPDLC log and ADS-C contracts. **Doppler**: each satellite pass drawn as a frequency curve, the satellites overhead and their upcoming passes, and your receiver's estimated location. **Coverage**: a sky plot of where the station decodes well, and its effective horizon. **Graph**: which air traffic authorities hand aircraft to which, from CPDLC, and one aircraft's history |
 
 The Observatory only reads the receiver's archive and live feed; it never changes what
 the receiver does.
@@ -152,6 +152,27 @@ at the centre.
 Use it to place an antenna, check an LNA or a gain change, or see whether a weak signal
 is a blocked direction or the whole sky.
 
+## Graph
+
+The Observatory's **Graph** page connects the aircraft messages your station has stored:
+which aircraft talked to which ground stations, and which air traffic authorities handed
+them on to which. It is built from the archive every few minutes, with no setup.
+
+- **Airspace handoffs.** A diagram with the ground stations that sent a handoff on the
+  left and the authority or controller unit they passed the aircraft to on the right.
+  Line width is the number of aircraft; hover for counts. Choose the last 24 hours,
+  7 days, 30 days or all time.
+- **One aircraft.** Type a tail number, or pick one of the most active, to see when it
+  was heard, which ground stations it talked to, the authorities it was handed to, and
+  other aircraft served by the same ground stations at the same times.
+
+**What it can and can't show.** Handoffs come from CPDLC clearances, each read from a
+single message. One station hears a
+given aircraft only now and then, so the diagram shows which authorities pass traffic to
+which, summed over many aircraft, not any one flight's full route. It stays empty until
+CPDLC traffic has been heard; an RTL-SDR, which covers only a narrow slice of the band,
+may hear little or none.
+
 ## Troubleshooting
 
 Run this from the repo folder and look through the report it writes:
@@ -185,8 +206,9 @@ fork adds:
 
 **Dashboards and data**
 - **Pager and AT1 tabs** on the live map, beside the original ACARS panel, and a live frame-type count.
-- **Daily archive** (`--archive`) and the **Observatory**: Trends, Aviation and Doppler pages.
+- **Daily archive** (`--archive`) and the **Observatory**: Trends, Aviation, Doppler, Coverage and Graph pages.
 - **Coverage map:** each burst matched to its satellite by Doppler and plotted where that satellite was, showing decode success across the station's sky and its effective horizon. See [Coverage map](#coverage-map).
+- **Knowledge graph:** the stored aircraft messages linked into aircraft, ground stations, air traffic authorities and the handoffs between them, shown on the Graph page. See [Graph](#graph).
 - **Receiver location from the satellites:** "Your estimated location is" on the Doppler page, fitted against published satellite orbits, typically within a few km and settled within minutes of a restart; a second, independent check on the built-in Doppler solver. Plus the satellites overhead and their passes. Ported from iridium-analyzer; see [Receiver location](#receiver-location).
 
 **Setup**

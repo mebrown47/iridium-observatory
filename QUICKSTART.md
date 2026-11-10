@@ -99,8 +99,9 @@ On this computer you can also use `http://localhost:8888` and `http://localhost:
 
 - **Live map (8888):** satellites, paging, and aircraft, updating every second.
 - **Observatory (8890):** charts of what you've received over time, the **Doppler**
-  page with the satellites overhead, and the **Coverage** page showing where in the
-  sky your station hears them.
+  page with the satellites overhead, the **Coverage** page showing where in the
+  sky your station hears them, and the **Graph** page showing which air traffic
+  authorities hand aircraft to which.
 
 ## Step 8: Give it 20 minutes
 
@@ -111,6 +112,8 @@ On this computer you can also use `http://localhost:8888` and `http://localhost:
   you really are.
 - The **Coverage** page fills in pass by pass; after about a day it shows your whole
   sky, and the dashed line marks where your antenna's view is clear or blocked.
+- The **Graph** page fills in as aircraft CPDLC messages are heard. That can take hours,
+  and with an RTL-SDR it may stay empty.
 
 That's it. The receiver keeps running, and starts again by itself after a reboot.
 
