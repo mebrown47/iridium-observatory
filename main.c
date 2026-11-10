@@ -1578,17 +1578,35 @@ int main(int argc, char **argv) {
         /* Already started above for context auto-detection */
     }
 
-    /* Wait for signal */
+    /* Wait for a signal, checking the radio's stream once a second. This
+     * used to pause() until a signal, so the checks below ran only after one
+     * arrived - never, in practice. libairspy 1.0.10 ends streaming for good,
+     * silently, on a single USB transfer that isn't complete (airspy.c,
+     * airspy_libusb_transfer_callback); on 2026-11-08 the feeder's receiver
+     * then sat with no input for 30 hours. Leave with code 3 instead, so the
+     * service restarts and reopens the radio. hackrf_is_streaming() returns
+     * a negative error, not 0, when stopped, so the old !test never fired
+     * for a HackRF either. */
     while (running) {
 #ifdef HAVE_HACKRF
-        if (live && hackrf != NULL && !hackrf_is_streaming(hackrf))
+        if (live && hackrf != NULL && hackrf_is_streaming(hackrf) != HACKRF_TRUE) {
+            fprintf(stderr, "iridium-sniffer: the HackRF stopped streaming (%s); "
+                    "exiting so the service restarts it\n",
+                    hackrf_error_name(hackrf_is_streaming(hackrf)));
+            stalled = 1;
             break;
+        }
 #endif
 #ifdef HAVE_AIRSPY
-        if (live && airspy != NULL && !airspy_is_streaming(airspy))
+        if (live && airspy != NULL && airspy_is_streaming(airspy) != AIRSPY_TRUE) {
+            fprintf(stderr, "iridium-sniffer: the Airspy stopped streaming (libairspy "
+                    "gives up on a failed USB transfer); exiting so the service "
+                    "restarts it\n");
+            stalled = 1;
             break;
+        }
 #endif
-        pause();
+        sleep(1);
     }
     running = 0;
 
