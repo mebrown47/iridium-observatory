@@ -181,6 +181,17 @@ d = json.load(sys.stdin)
 for k in ("note", "feed_note", "tle", "ring_alerts", "clock_offset_s", "wall_lag_s", "fix", "sniffer_fix", "station", "names"):
     if d.get(k) not in (None, "", {}): print("%s: %s" % (k, d[k]))
 print("satellites visible:", len(d.get("visible", [])), " passes:", len(d.get("passes", [])))'
+  endpoint "http://127.0.0.1:${OBS_PORT}/api/coverage?hours=24" '
+import sys, json
+d = json.load(sys.stdin)
+s = d.get("stats", {}); dl = s.get("frames", 0) - s.get("uplink", 0)
+if d.get("note"): print("note:", d["note"])
+print("coverage, last 24 h: %d bursts placed (%s of downlink), %d ambiguous" % (
+    s.get("attributed", 0), ("%.0f%%" % (100.0 * s["attributed"] / dl)) if dl else "-", s.get("ambiguous", 0)))
+print("sky cells with data: %d (%d with enough bursts)" % (len(d.get("cells", [])),
+    sum(1 for c in d.get("cells", []) if c["n"] >= d.get("min_cell", 30))))
+print("margins: decoded %s Hz, failed %s Hz; receiver offset %s Hz" % (
+    d.get("margin_hz"), d.get("margin_fail_hz"), d.get("rx_offset_hz")))'
 else
   note "curl or python3 missing: endpoints not checked"
 fi

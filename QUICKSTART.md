@@ -98,8 +98,9 @@ Open them in a web browser, on this computer or any other one on your home netwo
 On this computer you can also use `http://localhost:8888` and `http://localhost:8890`.
 
 - **Live map (8888):** satellites, paging, and aircraft, updating every second.
-- **Observatory (8890):** charts of what you've received over time, and the **Doppler**
-  page with the satellites overhead.
+- **Observatory (8890):** charts of what you've received over time, the **Doppler**
+  page with the satellites overhead, and the **Coverage** page showing where in the
+  sky your station hears them.
 
 ## Step 8: Give it 20 minutes
 
@@ -108,6 +109,8 @@ On this computer you can also use `http://localhost:8888` and `http://localhost:
 - On the Observatory's **Doppler** page, "Your estimated location is:" appears within about
   20 minutes and says **Settled** once it's sure. It should be within a few km of where
   you really are.
+- The **Coverage** page fills in pass by pass; after about a day it shows your whole
+  sky, and the dashed line marks where your antenna's view is clear or blocked.
 
 That's it. The receiver keeps running, and starts again by itself after a reboot.
 

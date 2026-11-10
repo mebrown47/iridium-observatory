@@ -18,7 +18,7 @@ Two services that start at boot, each with a web page:
 | Port | Service | What it shows |
 |---|---|---|
 | 8888 | **Receiver** (`iridium-sniffer`) | Live map of satellite beams, paging and aircraft, with ACARS, Pager and AT1 tabs (AT1 carries ADS-C position reports and CPDLC clearances) and a live count of every frame type heard |
-| 8890 | **Observatory** | **Trends**: the traffic mix over hours and days. **Aviation**: per-aircraft history, CPDLC log and ADS-C contracts. **Doppler**: each satellite pass drawn as a frequency curve, the satellites overhead and their upcoming passes, and your receiver's estimated location |
+| 8890 | **Observatory** | **Trends**: the traffic mix over hours and days. **Aviation**: per-aircraft history, CPDLC log and ADS-C contracts. **Doppler**: each satellite pass drawn as a frequency curve, the satellites overhead and their upcoming passes, and your receiver's estimated location. **Coverage**: a sky plot of where the station decodes well, and its effective horizon |
 
 The Observatory only reads the receiver's archive and live feed; it never changes what
 the receiver does.
@@ -131,6 +131,27 @@ question) and internet once a day for orbit data; without it, the page says so i
 guessing. The Observatory can also be given a known location (`--station LAT,LON`), which
 the satellite panel then uses instead of the estimate.
 
+## Coverage map
+
+The Observatory's **Coverage** page shows where in the sky your station hears Iridium: a
+plot of the sky seen from above, north at the top, the horizon at the rim and straight up
+at the centre.
+
+- **Each burst is placed where its satellite was.** The Observatory works out which
+  satellite sent each burst from its Doppler shift (checked against ring alerts, which
+  name their own satellite: 100% right on the home feeder) and counts it in that
+  satellite's patch of sky.
+- **Colour shows decode success:** the share of bursts from that patch that decoded.
+  Switch to signal level or burst count to see why. Patches with too few bursts are grey.
+- **The dashed line is your effective horizon:** for each direction, the lowest elevation
+  that decodes at least half its bursts. Trees, roofs and the mounting show up as a rise.
+- **Give it a day.** Each pass paints a streak; a full sweep of the sky takes about a day.
+  The area straight overhead fills in last and stays the sparsest, because few passes go
+  near the zenith and the patches there are small.
+
+Use it to place an antenna, check an LNA or a gain change, or see whether a weak signal
+is a blocked direction or the whole sky.
+
 ## Troubleshooting
 
 Run this from the repo folder and look through the report it writes:
@@ -165,6 +186,7 @@ fork adds:
 **Dashboards and data**
 - **Pager and AT1 tabs** on the live map, beside the original ACARS panel, and a live frame-type count.
 - **Daily archive** (`--archive`) and the **Observatory**: Trends, Aviation and Doppler pages.
+- **Coverage map:** each burst matched to its satellite by Doppler and plotted where that satellite was, showing decode success across the station's sky and its effective horizon. See [Coverage map](#coverage-map).
 - **Receiver location from the satellites:** "Your estimated location is" on the Doppler page, fitted against published satellite orbits, typically within a few km and settled within minutes of a restart; a second, independent check on the built-in Doppler solver. Plus the satellites overhead and their passes. Ported from iridium-analyzer; see [Receiver location](#receiver-location).
 
 **Setup**
