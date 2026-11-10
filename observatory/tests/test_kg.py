@@ -69,5 +69,18 @@ again = kg_build.build(con)
 check(again["messages"] == 0 and again["cpdlc"] == 0 and again["edges"] == 0,
       "a second build adds nothing", str(again))
 
+# the Graph page's API, on the same graph saved to a file
+import tempfile
+import trends_server  # noqa: E402
+path = os.path.join(tempfile.mkdtemp(), "o.db")
+disk = sqlite3.connect(path)
+con.backup(disk)
+disk.close()
+h = trends_server.build_handoffs(path, 0)
+pairs = {(p["from"], p["to"]): p["aircraft"] for p in h["pairs"]}
+check(pairs == {("NYCODYA", "KUSA"): 1, ("NYCODYA", "JACKSONVILLE center"): 1}
+      and h["senders"] == {"NYCODYA": 1},
+      "handoff API: pairs and distinct aircraft per sender", str(h["senders"]))
+
 print("\n%d checks, %d failed" % (checks, fails))
 sys.exit(1 if fails else 0)

@@ -10,6 +10,8 @@ external assets — it runs happily on a headless feeder with no internet.
 
   GET /              -> the dashboard (self-contained HTML/CSS/JS)
   GET /api/trends    -> JSON aggregates (optional ?hours=N window)
+  GET /graph         -> knowledge graph: airspace handoffs (kg_build.py)
+  GET /api/graph/handoffs -> its data (optional ?days=N, 0 = all)
   GET /coverage      -> sky plot of where the station decodes (sky_coverage.py)
   GET /api/coverage  -> its data (optional ?hours=N)
   GET /api/sky       -> satellites overhead, their passes, and the receiver's
@@ -175,6 +177,41 @@ def build_trends(path, hours=None):
             "active_sats_hours": active,
             "top_sats": top_sats,
         }
+    finally:
+        con.close()
+
+
+def build_handoffs(path, days=0):
+    """Airspace handoffs from the knowledge graph: for each (ground address,
+    named authority or unit) pair, how many messages and distinct aircraft
+    in the window. days=0 means all time."""
+    con = connect_ro(path)
+    if con is None:
+        return {"error": "no observatory database yet"}
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE name='kg_edge'").fetchone():
+            return {"error": "no knowledge graph yet: it is built by the next rollup run"}
+        since = int(time.time()) - days * 86400 if days else 0
+        pairs = [{"from": a, "to": b, "to_kind": k, "messages": n, "aircraft": ac, "last": last}
+                 for a, b, k, n, ac, last in con.execute(
+                     "SELECT a.key, b.label, b.kind, COUNT(*), "
+                     "COUNT(DISTINCT json_extract(e.props,'$.aircraft')), MAX(e.t) "
+                     "FROM kg_edge e JOIN kg_node a ON a.id=e.src JOIN kg_node b ON b.id=e.dst "
+                     "WHERE e.kind='hands_off_to' AND e.t>=? GROUP BY a.id, b.id "
+                     "ORDER BY 5 DESC, 4 DESC", (since,))]
+        # distinct aircraft per name: summing the pairs would count an
+        # aircraft handed to two places twice
+        def distinct(side):
+            return {k: n for k, n in con.execute(
+                "SELECT %s, COUNT(DISTINCT json_extract(e.props,'$.aircraft')) FROM kg_edge e "
+                "JOIN kg_node a ON a.id=e.src JOIN kg_node b ON b.id=e.dst "
+                "WHERE e.kind='hands_off_to' AND e.t>=? GROUP BY %s" % (side, side), (since,))}
+        kinds = dict(con.execute("SELECT kind, COUNT(*) FROM kg_node GROUP BY kind").fetchall())
+        return {"days": days, "pairs": pairs,
+                "senders": distinct("a.key"), "receivers": distinct("b.kind||':'||b.label"),
+                "graph": {"aircraft": kinds.get("aircraft", 0), "messages": kinds.get("msg", 0),
+                          "facility": kinds.get("facility", 0), "unit": kinds.get("unit", 0),
+                          "ground": kinds.get("ground", 0)}}
     finally:
         con.close()
 
@@ -365,6 +402,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: keep the server alive
                 self._send(500, json.dumps({"error": str(e)}),
                            "application/json")
+        elif u.path == "/graph":
+            self._send(200, GRAPH_PAGE, "text/html; charset=utf-8")
+        elif u.path == "/api/graph/handoffs":
+            q = parse_qs(u.query)
+            try:
+                days = max(0, min(3650, int(q.get("days", ["0"])[0])))
+            except ValueError:
+                days = 0
+            try:
+                self._send(200, json.dumps(build_handoffs(self.db_path, days)), "application/json")
+            except Exception as e:  # noqa: keep the server alive
+                self._send(500, json.dumps({"error": str(e)}), "application/json")
         elif u.path == "/coverage":
             self._send(200, COVERAGE_PAGE, "text/html; charset=utf-8")
         elif u.path == "/api/coverage":
@@ -454,7 +503,7 @@ PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/" class="on">Trends</a><a href="/aviation">Aviation</a>
-    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a></nav>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a></nav>
   <span class="sub">constellation activity over time</span>
   <span class="spacer"></span>
   <div class="controls" id="win">
@@ -809,7 +858,7 @@ AVIATION_PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation" class="on">Aviation</a>
-    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a></nav>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a></nav>
   <span class="sub">decoded aircraft traffic — per-tail history &amp; CPDLC log</span>
   <span class="spacer"></span>
   <span class="status" id="status"><span class="dot"></span>loading…</span>
@@ -1124,7 +1173,7 @@ DOPPLER_PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
-    <a href="/doppler" class="on">Doppler</a><a href="/coverage">Coverage</a></nav>
+    <a href="/doppler" class="on">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a></nav>
   <span class="sub">live satellite passes, drawn in radio frequency</span>
   <span class="spacer"></span>
   <span class="status" id="status"><span class="dot"></span>loading…</span>
@@ -1502,7 +1551,7 @@ COVERAGE_PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
-    <a href="/doppler">Doppler</a><a href="/coverage" class="on">Coverage</a></nav>
+    <a href="/doppler">Doppler</a><a href="/coverage" class="on">Coverage</a><a href="/graph">Graph</a></nav>
   <span class="sub">where in the sky this station hears Iridium</span>
   <span class="spacer"></span>
   <span class="status" id="status">loading…</span>
@@ -1613,6 +1662,163 @@ document.getElementById("win").onclick=e=>{const b=e.target.closest("button");if
 document.getElementById("mode").onclick=e=>{const b=e.target.closest("button");if(!b)return;
   MODE=b.dataset.m;[...b.parentNode.children].forEach(x=>x.classList.toggle("on",x===b));if(LAST)draw(LAST);};
 load();setInterval(load,60000);
+</script>
+</body></html>
+"""
+
+
+GRAPH_PAGE = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iridium Observatory — Graph</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232c; --line:#2b333d;
+    --fg:#e6edf3; --dim:#8b98a5; --accent:#4aa8ff; --good:#3fb950;
+    --warn:#d29922; --hot:#f778ba; --grid:#242c36;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+    padding:16px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:18px;margin:0;font-weight:650;letter-spacing:.2px}
+  header .sub{color:var(--dim);font-size:12.5px}
+  header .spacer{flex:1}
+  header .status{color:var(--dim);font-size:12px}
+  .nav{display:flex;gap:4px}
+  .nav a{color:var(--dim);text-decoration:none;font-size:13px;padding:4px 11px;
+    border-radius:6px;border:1px solid transparent}
+  .nav a:hover{color:var(--fg)}
+  .nav a.on{color:var(--fg);background:var(--panel2);border-color:var(--line)}
+  main{padding:18px 22px;max-width:1200px;margin:0 auto}
+  .controls{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
+  .seg{display:flex;gap:4px}
+  .seg button{background:var(--panel);color:var(--dim);border:1px solid var(--line);
+    border-radius:6px;padding:4px 11px;font-size:12.5px;cursor:pointer}
+  .seg button.on{color:var(--fg);background:var(--panel2);border-color:var(--accent)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .card .k{color:var(--dim);font-size:11.5px;text-transform:uppercase;letter-spacing:.6px}
+  .card .v{font-size:22px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+  .card .v small{font-size:12.5px;color:var(--dim);font-weight:400}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+  .panel h2{font-size:14px;margin:0 0 4px;font-weight:600}
+  .panel .meta{color:var(--dim);font-size:12px;margin-bottom:10px}
+  svg{display:block;width:100%;height:auto}
+  .lbl{fill:var(--fg);font-size:13px}
+  .sublbl{fill:var(--dim);font-size:11px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+  th{color:var(--dim);font-weight:500;text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);font-size:11.5px}
+  td{text-align:right;padding:5px 8px;border-bottom:1px solid var(--grid)}
+  th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+  .note{color:var(--dim);font-size:12.5px;line-height:1.55}
+  .note b{color:var(--fg)}
+  .empty{color:var(--dim);padding:30px;text-align:center}
+</style></head>
+<body>
+<header>
+  <h1>Iridium Observatory</h1>
+  <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph" class="on">Graph</a></nav>
+  <span class="sub">who hands aircraft to whom, from CPDLC</span>
+  <span class="spacer"></span>
+  <span class="status" id="status">loading…</span>
+</header>
+<main>
+  <div class="controls">
+    <div class="seg" id="win"><button data-d="1">24h</button><button data-d="7">7d</button>
+      <button data-d="30">30d</button><button data-d="0" class="on">all</button></div>
+  </div>
+  <div class="cards" id="cards"></div>
+  <div class="panel">
+    <h2>Airspace handoffs</h2>
+    <div class="meta">Left: the ground address that sent the handoff. Right: the data authority
+      (NEXT DATA AUTHORITY) or controller unit (CONTACT) it passed the aircraft to.
+      Line width: aircraft. Hover a line or name for counts.</div>
+    <div id="diagram"></div>
+  </div>
+  <div class="panel">
+    <h2>Handoffs, by pair</h2>
+    <div id="table"></div>
+  </div>
+  <div class="panel note">
+    <b>Where this comes from:</b> the Observatory's knowledge graph, built from every stored
+    message. A handoff is read from a single CPDLC message: the ground address it came from
+    (the controlling authority's data link address) and the authority or unit it names next.
+    One station hears a given aircraft's CPDLC only now and then, so this shows which
+    authorities pass traffic to which, summed over many aircraft, rather than one flight's
+    whole route. Codes such as KUSA and KZWY are ICAO facility designators; ground addresses
+    such as NYCODYA are ARINC 622 addresses.
+  </div>
+</main>
+<script>
+const NS="http://www.w3.org/2000/svg";
+let DAYS=0;
+function el(tag,attrs,txt){const e=document.createElementNS(NS,tag);
+  for(const k in attrs)if(attrs[k]!=null)e.setAttribute(k,attrs[k]);if(txt!=null)e.textContent=txt;return e;}
+function esc(s){return (s==null?"":""+s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function card(k,v,sub){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+(sub?' <small>'+sub+'</small>':'')+'</div></div>';}
+function ago(t){return t?new Date(t*1000).toLocaleDateString():"";}
+function diagram(d){
+  const host=document.getElementById("diagram");host.innerHTML="";
+  if(!d.pairs.length){host.innerHTML='<div class="empty">No handoffs in this window yet.</div>';return;}
+  const left=[],right=[],li={},ri={};
+  d.pairs.forEach(p=>{
+    if(!(p.from in li)){li[p.from]=left.length;left.push({k:p.from,ac:0,n:0});}
+    const rk=p.to_kind+":"+p.to;
+    if(!(rk in ri)){ri[rk]=right.length;right.push({k:p.to,kind:p.to_kind,ac:0,n:0});}
+    left[li[p.from]].n+=p.messages;right[ri[rk]].n+=p.messages;});
+  left.forEach(n=>n.ac=d.senders[n.k]||0);right.forEach(n=>n.ac=d.receivers[n.kind+":"+n.k]||0);
+  const order=(arr,idx)=>{const s=arr.map((x,i)=>[x,i]).sort((a,b)=>b[0].ac-a[0].ac);
+    const pos={};s.forEach(([x,i],j)=>pos[i]=j);return pos;};
+  const lp=order(left),rp=order(right);
+  const row=34,top=24,W=900,xl=190,xr=640;
+  const H=top+Math.max(left.length,right.length)*row+10;
+  const svg=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Airspace handoff diagram"});host.appendChild(svg);
+  const yl=i=>top+lp[i]*row+row/2, yr=i=>top+rp[i]*row+row/2;
+  const max=Math.max(...d.pairs.map(p=>p.aircraft));
+  d.pairs.forEach(p=>{
+    const a=li[p.from],b=ri[p.to_kind+":"+p.to],y1=yl(a),y2=yr(b),mx=(xl+xr)/2;
+    const w=1.5+7*Math.sqrt(p.aircraft/max);
+    const path=el("path",{d:"M"+(xl+8)+" "+y1+"C"+mx+" "+y1+" "+mx+" "+y2+" "+(xr-8)+" "+y2,fill:"none",
+      stroke:p.to_kind==="facility"?"var(--accent)":"var(--good)","stroke-opacity":0.55,"stroke-width":w});
+    path.appendChild(el("title",null,p.from+" → "+p.to+(p.to_kind==="unit"?" (contact)":" (next data authority)")+
+      "\n"+p.aircraft+" aircraft, "+p.messages+" messages\nlast "+ago(p.last)));
+    svg.appendChild(path);});
+  left.forEach((n,i)=>{const y=yl(i);svg.appendChild(el("circle",{cx:xl,cy:y,r:6,fill:"var(--fg)"}));
+    const t=el("text",{x:xl-14,y:y+4,"text-anchor":"end",class:"lbl"},n.k);
+    t.appendChild(el("title",null,n.k+": handed off "+n.ac+" aircraft ("+n.n+" messages)"));svg.appendChild(t);
+    svg.appendChild(el("text",{x:xl-14,y:y+17,"text-anchor":"end",class:"sublbl"},n.ac+" aircraft"));});
+  right.forEach((n,i)=>{const y=yr(i);svg.appendChild(el("circle",{cx:xr,cy:y,r:6,
+      fill:n.kind==="facility"?"var(--accent)":"var(--good)"}));
+    const t=el("text",{x:xr+14,y:y+4,class:"lbl"},n.k);
+    t.appendChild(el("title",null,n.k+(n.kind==="unit"?" (controller unit, CONTACT)":" (data authority)")+": received "+n.ac+" aircraft"));
+    svg.appendChild(t);
+    svg.appendChild(el("text",{x:xr+14,y:y+17,class:"sublbl"},(n.kind==="unit"?"contact · ":"authority · ")+n.ac+" aircraft"));});
+}
+function table(d){
+  let h='<table><tr><th>from</th><th>to</th><th>kind</th><th>aircraft</th><th>messages</th><th>last seen</th></tr>';
+  d.pairs.forEach(p=>{h+='<tr><td>'+esc(p.from)+'</td><td>'+esc(p.to)+'</td><td>'+(p.to_kind==="unit"?"contact":"next authority")+
+    '</td><td>'+p.aircraft+'</td><td>'+p.messages+'</td><td>'+ago(p.last)+'</td></tr>';});
+  document.getElementById("table").innerHTML=d.pairs.length?h+'</table>':'<div class="empty">none</div>';
+}
+async function load(){
+  try{
+    const d=await (await fetch("/api/graph/handoffs?days="+DAYS)).json();
+    if(d.error){document.getElementById("diagram").innerHTML='<div class="empty">'+esc(d.error)+'</div>';return;}
+    const g=d.graph;
+    document.getElementById("cards").innerHTML=card("Aircraft",g.aircraft,"in the graph")+
+      card("Messages",g.messages,"content")+card("Handoffs",d.pairs.reduce((a,p)=>a+p.messages,0),"in window")+
+      card("Authorities",g.facility+g.unit,"facilities and units");
+    diagram(d);table(d);
+    document.getElementById("status").textContent="updated "+new Date().toLocaleTimeString();
+  }catch(e){document.getElementById("status").textContent="fetch failed";}
+}
+document.getElementById("win").onclick=e=>{const b=e.target.closest("button");if(!b)return;
+  DAYS=+b.dataset.d;[...b.parentNode.children].forEach(x=>x.classList.toggle("on",x===b));load();};
+load();setInterval(load,300000);
 </script>
 </body></html>
 """
