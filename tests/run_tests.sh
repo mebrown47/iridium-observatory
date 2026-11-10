@@ -107,6 +107,13 @@ else
     bad "observatory/tests/test_coverage.py:"; echo "$out" | grep -E "FAIL|Error" | sed 's/^/    /'
 fi
 
+echo "== Observatory knowledge graph =="
+if out="$("$PY" "$ROOT/observatory/tests/test_kg.py" 2>&1)"; then
+    ok "graph nodes, edges and handoffs from stored messages"
+else
+    bad "observatory/tests/test_kg.py:"; echo "$out" | grep -E "FAIL|Error" | sed 's/^/    /'
+fi
+
 # ---- Tier 2: oracle cross-check vs iridium-parser.py ----
 if [ "${SKIP_ORACLE:-0}" != 1 ]; then
     echo "== oracle cross-check (vs iridium-parser.py) =="

@@ -537,10 +537,22 @@ def main():
         (str(int(time.time())),),
     )
     con.commit()
+    # Knowledge graph: add whatever messages arrived since its last build.
+    # Its own failure must not fail the rollup the dashboards depend on.
+    kg = ""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import kg_build
+        got = kg_build.build(con)
+        con.commit()
+        kg = f"; graph +{got['messages'] + got['cpdlc']} messages, +{got['edges']} edges"
+    except Exception as e:  # noqa: report and carry on
+        con.rollback()
+        kg = f"; graph build failed: {e}"
     con.close()
 
     print(f"rollup: {total} new events from {len(files)} file(s)"
-          + (f", {agg.bad} malformed" if agg.bad else ""))
+          + (f", {agg.bad} malformed" if agg.bad else "") + kg)
     return 0
 
 
