@@ -291,6 +291,12 @@ int time_source = CLOCK_SRC_INTERNAL;
 
 /* Threading state */
 volatile sig_atomic_t running = 1;
+/* Watchdog (stats thread): a live radio that delivers no bursts for this
+ * long has stalled - on the feeder an Airspy went from 671 bursts/s to none
+ * and stayed silent for 30 hours with the process alive and no error. Exit
+ * non-zero so systemd's restart reopens the radio. 0 disables. */
+int stall_exit_s = 300;
+static volatile sig_atomic_t stalled = 0;
 pid_t self_pid;
 
 /* Queues */
@@ -965,6 +971,8 @@ static void *stats_thread_fn(void *arg) {
     unsigned long prev_det = 0, prev_ok = 0, prev_sub = 0;
     unsigned long prev_handled = 0, prev_samples = 0;
     unsigned q_max = 0;
+    double quiet = 0;       /* seconds without a detected burst */
+    unsigned long quiet_samples = 0;    /* samples that arrived meanwhile */
 
     while (running) {
         usleep(1000000);
@@ -999,6 +1007,32 @@ static void *stats_thread_fn(void *arg) {
         /* Track max queue depth */
         unsigned qsz = (unsigned)samples_queue.queue_size;
         if (qsz > q_max) q_max = qsz;
+
+        /* Iridium is never quiet: any working live radio detects bursts
+         * every second, from noise if nothing else. Armed only after the
+         * first burst, so a slow start never trips it. */
+        if (live && stall_exit_s > 0 && det > 0) {
+            if (dd) {
+                quiet = 0;
+                quiet_samples = 0;
+            } else {
+                quiet += dt;
+                quiet_samples += dsamp;
+            }
+            if (quiet >= stall_exit_s) {
+                /* Which half stalled matters for finding the cause: no
+                 * samples = the radio or USB stopped; samples but no
+                 * bursts = the processing stalled. */
+                fprintf(stderr, "iridium-sniffer: no bursts from the radio for %d s "
+                        "(%s); exiting so the service restarts it\n", (int)quiet,
+                        quiet_samples ? "samples still arriving: processing stalled"
+                                      : "no samples either: the radio or USB stopped");
+                stalled = 1;
+                running = 0;
+                kill(getpid(), SIGTERM);    /* wake main() from pause() */
+                break;
+            }
+        }
 
         /* Rates */
         double in_rate     = dd / dt;
@@ -1634,5 +1668,5 @@ int main(int argc, char **argv) {
 
     shutdown_outputs();
     fprintf(stderr, "iridium-sniffer: shutdown complete\n");
-    return 0;
+    return stalled ? 3 : 0;
 }
