@@ -68,9 +68,10 @@ void web_map_add_msg(const msg_data_t *msg, uint64_t timestamp_ns);
 void web_map_update_doppler(uint64_t now_ns);
 
 /* Increment the frame-type histogram for the given type label
- * (e.g. "IRA","IBC","MSG","IDA","IDA_UL_FAIL","ISY","IIP","VOC","ITL",
- * "IU3","IU6","RAW"). Unknown labels are ignored. Thread-safe. */
-void web_map_count_type(const char *label);
+ * (e.g. "IRA","IBC","MSG","IDA","ISY","IIP","VOC","ITL","IU3","IU6",
+ * "RAW") and, unless it is RAW, the decoded-frame counter for its
+ * direction. Unknown labels are ignored. Thread-safe. */
+void web_map_count_type(const char *label, ir_direction_t direction);
 
 /* Increment the unique-word-failure counter for the given direction.
  * These bursts demodulated but matched no UW, so they never reach

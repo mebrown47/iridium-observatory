@@ -895,7 +895,7 @@ static void *output_thread_fn(void *arg) {
                 const char *ftype =
                     classify_frame_label(demod, dec, decoded.type, item->ida_ok);
                 if (web_enabled) {
-                    web_map_count_type(ftype);
+                    web_map_count_type(ftype, demod->direction);
                     web_map_add_frame(demod->timestamp, demod->center_frequency,
                                       demod->magnitude, ftype, demod->direction,
                                       (dec && decoded.type == FRAME_IRA) ?

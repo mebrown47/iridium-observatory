@@ -198,6 +198,7 @@ static struct {
     unsigned long total_msg;       /* decoded pager (MSG) messages */
     unsigned long type_counts[16]; /* per-frame-type histogram (see ftype_names) */
     unsigned long uw_fail[3];      /* UW-check failures by dir: [0]=DL [1]=UL [2]=other */
+    unsigned long decoded[3];      /* frames of a known type (not RAW) by dir, same index */
     unsigned long uw_ambiguous;    /* hard UW check matched BOTH DL and UL (direction tie) */
     /* Doppler positioning receiver estimate */
     double rx_lat, rx_lon;
@@ -637,15 +638,19 @@ static const char *ftype_names[] = {
 };
 #define N_FTYPES ((int)(sizeof(ftype_names) / sizeof(ftype_names[0])))
 
-void web_map_count_type(const char *label)
+void web_map_count_type(const char *label, ir_direction_t direction)
 {
     if (!label) return;
     int idx = -1;
     for (int i = 0; i < N_FTYPES; i++)
         if (strcmp(label, ftype_names[i]) == 0) { idx = i; break; }
     if (idx < 0) return;
+    int d = (direction == DIR_DOWNLINK) ? 0 :
+            (direction == DIR_UPLINK)   ? 1 : 2;
     pthread_mutex_lock(&state.lock);
     state.type_counts[idx]++;
+    if (strcmp(label, "RAW") != 0)
+        state.decoded[d]++;
     pthread_mutex_unlock(&state.lock);
 }
 void web_map_count_uw_fail(ir_direction_t direction)
@@ -1023,6 +1028,9 @@ static int build_json(char *buf, int bufsize)
     off += snprintf(buf + off, bufsize - off,
         ",\"uw_fail\":{\"DL\":%lu,\"UL\":%lu,\"other\":%lu},\"uw_ambiguous\":%lu",
         state.uw_fail[0], state.uw_fail[1], state.uw_fail[2], state.uw_ambiguous);
+    off += snprintf(buf + off, bufsize - off,
+        ",\"decoded\":{\"DL\":%lu,\"UL\":%lu,\"other\":%lu}",
+        state.decoded[0], state.decoded[1], state.decoded[2]);
 
     off += snprintf(buf + off, bufsize - off, "}");
 
@@ -1374,18 +1382,21 @@ static const char HTML_PAGE[] =
 "  box.innerHTML=html;\n"
 "}\n"
 "\n"
-"function renderFtypes(ft,uw){\n"
+"function renderFtypes(ft,uw,dec){\n"
 "  var box=document.getElementById('ftypes');\n"
 "  if(!ft){return;}\n"
 "  var keys=Object.keys(ft);\n"
 "  var total=0; keys.forEach(function(k){total+=ft[k];});\n"
 "  var html='';\n"
+"  if(dec){\n"
+"    html+='<div class=\"legend-row\" title=\"frames identified as a known type (everything below except RAW), by direction: DL satellite to ground, UL handset or aircraft to satellite\">'+\n"
+"      '<span>Decoded DL/UL</span><span class=\"ftc\" style=\"color:#38bdf8\">'+\n"
+"      (dec.DL||0)+'/'+(dec.UL||0)+'</span></div>';\n"
+"  }\n"
 "  if(uw){\n"
-"    var ulc=(uw.UL>0)?'#f87171':'#64748b';\n"
 "    html+='<div class=\"legend-row\" title=\"bursts demodulated but no unique word matched (pre-classification)\">'+\n"
-"      '<span>UW-fail DL/UL</span><span class=\"ftc\">'+\n"
-"      '<span style=\"color:#64748b\">'+(uw.DL||0)+'</span>/'+\n"
-"      '<span style=\"color:'+ulc+'\">'+(uw.UL||0)+'</span></span></div>';\n"
+"      '<span>UW-fail DL/UL</span><span class=\"ftc\" style=\"color:#64748b\">'+\n"
+"      (uw.DL||0)+'/'+(uw.UL||0)+'</span></div>';\n"
 "  }\n"
 "  keys.forEach(function(k){\n"
 "    if(ft[k]>0){\n"
@@ -1498,7 +1509,7 @@ static const char HTML_PAGE[] =
 "  renderAcars(d.acars||[]);\n"
 "  renderMsg(d.msg||[]);\n"
 "  renderPremium(d.premium||[]);\n"
-"  renderFtypes(d.ftypes,d.uw_fail);\n"
+"  renderFtypes(d.ftypes,d.uw_fail,d.decoded);\n"
 "\n"
 "  if(popupOpen)return;\n"
 "\n"
