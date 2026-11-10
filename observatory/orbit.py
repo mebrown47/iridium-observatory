@@ -329,14 +329,18 @@ def channel_center(k):
     return IR_BASE + (k + 0.5) * IR_CHAN_W
 
 
-def identify_frame(c, t, freq, st, rx_offset, candidates=None):
+def identify_frame(c, t, freq, st, rx_offset, candidates=None,
+                   margin_hz=AMBIGUOUS_HZ, max_residual_hz=None):
     """Which satellite sent a downlink burst heard at true time t (Unix s)
     and frequency freq (Hz), from station st, with the receiver this far off
     (Hz, measured - true). iridium-analyzer's identify.cpp matchAll: each
     satellite above -2 deg names the channel it would have to be sending on
     to put the burst there; the one whose Doppler then lands nearest wins.
-    candidates = satellite indices to try (default all). Returns dict(sat,
-    channel, residual_hz, runner_up_hz, ambiguous, el, az) or None."""
+    candidates = satellite indices to try (default all). margin_hz: the
+    runner-up must be at least this much further off, or the answer is
+    ambiguous; max_residual_hz: a best match further off than this is too
+    (see AdaptiveMargin). Returns dict(sat, channel, residual_hz,
+    runner_up_hz, ambiguous, el, az) or None."""
     best = second = None
     for i in (candidates if candidates is not None else range(len(c.sats))):
         v = c.view(i, t, st)
@@ -357,9 +361,39 @@ def identify_frame(c, t, freq, st, rx_offset, candidates=None):
     if best is None:
         return None
     runner = second[0] if second else float("inf")
+    ambiguous = runner - best[0] < margin_hz or (
+        max_residual_hz is not None and best[0] > max_residual_hz)
     return {"sat": best[1], "channel": best[2], "residual_hz": best[3],
-            "runner_up_hz": runner, "ambiguous": runner - best[0] < AMBIGUOUS_HZ,
+            "runner_up_hz": runner, "ambiguous": ambiguous,
             "el": best[4]["el"], "az": best[4]["az"]}
+
+
+class AdaptiveMargin:
+    """The ambiguity margin for one station, from its own precision. A clean
+    outdoor Airspy matches bursts to a few tens of Hz, an indoor HackRF to
+    several hundred; the fixed 1,500 Hz of identify.h suits the second and
+    throws away about half the first's bursts, because with many satellites
+    in view another one often lands within 1,500 Hz by chance. The margin is
+    K times the median |residual| of recently decided bursts, clamped to
+    [LO, HI]; the same figure caps the best match's own residual, which
+    removed the HackRF's wrong answers (all >1.2 kHz off). HI until enough
+    bursts have been decided."""
+
+    K, LO, HI, KEEP, MIN = 8.0, 200.0, AMBIGUOUS_HZ, 4000, 300
+
+    def __init__(self):
+        import collections
+        self.res = collections.deque(maxlen=self.KEEP)
+
+    def margin(self):
+        if len(self.res) < self.MIN:
+            return self.HI
+        return min(self.HI, max(self.LO, self.K * _median(self.res)))
+
+    def add(self, r):
+        """Feed back an identify_frame result that was decided."""
+        if r is not None and not r["ambiguous"]:
+            self.res.append(abs(r["residual_hz"]))
 
 
 class RingAlerts:

@@ -134,5 +134,38 @@ check(n > 200 and wrong_sure == 0 and right > 0.6 * n,
       "Doppler attribution names the sending satellite",
       "%d bursts: %d right, %d ambiguous, %d confidently wrong" % (n, right, ambiguous, wrong_sure))
 
+# Adaptive margin: a precise receiver (40 Hz noise) decides far more bursts
+# with no mistakes; a noisy one (500 Hz) keeps the wide margin, and the cap
+# turns its big-residual near misses into "ambiguous" instead of wrong.
+def run(noise, adaptive):
+    random.seed(11)
+    am = orbit.AdaptiveMargin()
+    n = right = wrong = 0
+    t = T0
+    while t < T0 + 1800:
+        for v in c.visible(t, rx, 0.0):
+            k = random.randrange(orbit.IR_CHANNELS)
+            f = orbit.channel_center(k) * (1.0 - v["range_rate_kms"] / orbit.C_KMS) + K_OFF + random.gauss(0, noise)
+            m = am.margin() if adaptive else orbit.AMBIGUOUS_HZ
+            r = orbit.identify_frame(c, t, f, rx, K_OFF, margin_hz=m, max_residual_hz=m if adaptive else None)
+            am.add(r)
+            n += 1
+            if r and not r["ambiguous"]:
+                if r["sat"] == v["index"]:
+                    right += 1
+                else:
+                    wrong += 1
+        t += 3.1
+    return n, right, wrong, am.margin()
+n, r_fix, w_fix, _ = run(40, False)
+n2, r_ad, w_ad, m_ad = run(40, True)
+check(w_ad == 0 and r_ad > r_fix * 1.15 and m_ad < 600,
+      "adaptive margin decides more bursts on a precise receiver",
+      "fixed 1500 Hz: %d of %d decided; adaptive (%.0f Hz): %d, wrong %d" % (r_fix + w_fix, n, m_ad, r_ad + w_ad, w_ad))
+n3, r_no, w_no, m_no = run(500, True)
+check(w_no <= max(1, n3 // 1000) and m_no > 1000,
+      "a noisy receiver keeps a wide margin and stays right",
+      "%d bursts, %d right, %d wrong, margin %.0f Hz" % (n3, r_no, w_no, m_no))
+
 print("\n%d checks, %d failed" % (checks, fails))
 sys.exit(1 if fails else 0)

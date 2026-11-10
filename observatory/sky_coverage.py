@@ -64,6 +64,7 @@ class CoverageCollector:
         self.stats = {}         # hour -> [frames, attributed, ambiguous, unplaced, uplink]
         self.note = "starting"
         self.lost = 0
+        self.margin = orbit.AdaptiveMargin()
         con = sqlite3.connect(db_path)
         con.executescript(SCHEMA)
         con.execute("PRAGMA journal_mode=WAL")
@@ -99,7 +100,9 @@ class CoverageCollector:
             b = int(t // 10)
             if b not in cand:
                 cand[b] = [v["index"] for v in c.visible(b * 10 + 5, st, -4.0)]
-            r = orbit.identify_frame(c, t, f, st, rx, cand[b])
+            m = self.margin.margin()
+            r = orbit.identify_frame(c, t, f, st, rx, cand[b], margin_hz=m, max_residual_hz=m)
+            self.margin.add(r)
             if r is None:
                 stv[3] += 1
                 continue
@@ -203,5 +206,6 @@ class CoverageCollector:
             "rx_offset_hz": sh["rx_offset"], "clock_offset_s": sh["clock"],
             # rounded: enough to say which region, not which house
             "station": {"lat": round(station[0], 1), "lon": round(station[1], 1)} if station else None,
+            "margin_hz": round(self.margin.margin()),
             "note": self.note, "lost": self.lost,
         }

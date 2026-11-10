@@ -64,6 +64,7 @@ def main():
     types = collections.defaultdict(collections.Counter)
     resid = []
     wrong_examples = []
+    margin = orbit.AdaptiveMargin()      # the rule the coverage collector uses
     lost = 0
     t_end = time.time() + args.minutes * 60
     first = True
@@ -121,7 +122,9 @@ def main():
             b = int(t // 10)
             if b not in cand_cache:
                 cand_cache[b] = [v["index"] for v in c.visible(b * 10 + 5, st, -4.0)]
-            r = orbit.identify_frame(c, t, f, st, rx, cand_cache[b])
+            m = margin.margin()
+            r = orbit.identify_frame(c, t, f, st, rx, cand_cache[b], margin_hz=m, max_residual_hz=m)
+            margin.add(r)
             label = tnames[ty] if 0 <= ty < len(tnames) else "?"
             types[label]["frames"] += 1
             if r is None:
@@ -148,8 +151,8 @@ def main():
                         wrong_examples.append((c.sats[want].name, c.sats[r["sat"]].name,
                                                round(r["residual_hz"]), round(r["runner_up_hz"])))
         decided = truth["right"] + truth["wrong"]
-        print("%s  rx %+6.0f Hz  named IRAs: %d right, %d wrong, %d ambiguous, %d none%s" % (
-            time.strftime("%H:%M:%S"), rx, truth["right"], truth["wrong"], truth["ambiguous"],
+        print("%s  margin %4.0f Hz  rx %+6.0f Hz  named IRAs: %d right, %d wrong, %d ambiguous, %d none%s" % (
+            time.strftime("%H:%M:%S"), margin.margin(), rx, truth["right"], truth["wrong"], truth["ambiguous"],
             truth["none"], ("  (%.1f%% right when decided)" % (100.0 * truth["right"] / decided)) if decided else ""))
         time.sleep(args.poll)
 
