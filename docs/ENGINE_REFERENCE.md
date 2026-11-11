@@ -72,6 +72,8 @@ CMake output shows what was detected:
 
 ### Low-Power Hardware (N100, Pi 5, ARM)
 
+**A Raspberry Pi 4 is not supported.** On a Pi 4 (4 GB) with an Airspy R2 at 10 MS/s the receiver used all four cores, its frame clock fell almost four hours behind real time, memory grew to 3 GB plus swap, and few bursts decoded into messages. Burst detection and downmixing over the full band are the cost; the Pi 5 is the smallest ARM board that keeps up. The installer warns and asks before continuing on a Pi 4 or older.
+
 The downmix worker count auto-scales based on CPU cores: 4 workers on 8+ cores, 2 on 4 cores, 1 on 2 cores. On low-power CPUs like the Intel N100 (4 cores), this prevents 100% CPU saturation that occurs when 4 workers compete for 4 cores. Override with `--workers=N` if needed.
 
 The Pi 5's VideoCore VII GPU passes basic Vulkan compute tests but cannot sustain the throughput needed for real-time FFT batch processing. Build CPU-only and use `--no-gpu`:

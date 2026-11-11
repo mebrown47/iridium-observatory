@@ -111,6 +111,21 @@ fi
 RUN_USER="$(id -un)"
 ok "user: $RUN_USER   arch: $(uname -m)   $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown OS}")"
 
+# A Raspberry Pi 4 (or 400, 3, Zero, CM4) can't keep up with a full-band SDR:
+# on a Pi 4 with an Airspy R2 the receiver used every core, fell hours behind
+# and filled memory, and the message tabs stayed nearly empty. A Pi 5 or an
+# Intel N100-class mini PC is the minimum.
+PI_MODEL="$( { tr -d '\0' < /proc/device-tree/model; } 2>/dev/null || true)"
+if [ "$MODE" != uninstall ] && printf '%s' "$PI_MODEL" | grep -qE '^Raspberry Pi ([1-4]|Zero|Model|Compute Module [1-4])'; then
+  warn "$PI_MODEL is not supported: it is too slow to decode Iridium in real time."
+  warn "Use a Raspberry Pi 5 or an Intel N100-class mini PC instead."
+  if [ "$ASSUME_YES" -eq 1 ] || [ ! -r /dev/tty ]; then
+    warn "continuing anyway (--yes)"
+  else
+    yes_no "Continue anyway?" n || die "stopped: unsupported hardware"
+  fi
+fi
+
 # ---- uninstall --------------------------------------------------------------
 if [ "$MODE" = uninstall ]; then
   info "Removing services and program files"

@@ -11,6 +11,7 @@ and sets it up to start by itself every time the computer starts.
 You need:
 
 - **A computer** running Ubuntu, Debian, Raspberry Pi OS or DragonOS, connected to the internet.
+  A Raspberry Pi 5 or an Intel N100 mini PC is fast enough; a **Raspberry Pi 4 is not**.
 - **An SDR radio** plugged into a USB port, such as an Airspy R2 or a HackRF One.
 - **An Iridium antenna** connected to the radio, outdoors or in a window with a view of the sky.
 - **Your password** for this computer. The installer will ask for it.
