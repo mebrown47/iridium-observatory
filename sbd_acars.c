@@ -599,11 +599,11 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
 
     la_acars_msg *msg = (la_acars_msg *)acars_node->data;
 
-    /* Skip in-progress reassembly (multi-block ACARS) */
-    if (msg->reasm_status == LA_REASM_IN_PROGRESS) {
-        la_proto_tree_destroy(tree);
-        return;
-    }
+    /* Blocks of a multi-block message come back as LA_REASM_IN_PROGRESS
+     * carrying their own text.  Emit them as they arrive, like dumpvdl2 and
+     * dumphfdl; when the last block completes the chain, libacars returns
+     * the reassembled message and that is emitted too.  Holding them back
+     * meant one lost block discarded every good block before it. */
 
     stat_acars_total++;
     if (msg->err)
