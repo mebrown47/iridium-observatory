@@ -261,6 +261,11 @@ ok "$(grep '^RESULT' "$BUILD_DIR/tests.log")"
 # (group plugdev, default mode 664). On 22.04 it only grants an ACL to whoever
 # is logged in at the screen: the Airspy works while someone is logged in and
 # fails after a reboot. The rule below covers both (and distros like DragonOS).
+# It assigns with := so no later rule can change the group or mode. Ubuntu
+# 26.04's libhydrasdr0 ships 60-libhydrasdr0.rules, which claims the same USB
+# ID (the HydraSDR RFOne shares it) and sets group users, mode 0664. That ran
+# after ours and won, so the service could open the Airspy only if its user
+# happened to be in the users group.
 info "Device access"
 SDR_RULE=/etc/udev/rules.d/52-iridium-observatory-sdr.rules
 LIST_AS=()
@@ -268,8 +273,10 @@ if getent group plugdev >/dev/null 2>&1; then
   root_write "$SDR_RULE" 0644 <<'RULE'
 # Written by iridium-observatory install.sh: let the plugdev group (the
 # iridium-sniffer service's) open these SDRs, logged in at the screen or not.
+# ":=" makes the group and mode final, so later rules (e.g. 60-libhydrasdr0,
+# which claims the same USB ID) can't change them.
 # Airspy R2 / Mini
-SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="60a1", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="60a1", MODE:="0660", GROUP:="plugdev"
 RULE
   as_root udevadm control --reload-rules
   as_root udevadm trigger --subsystem-match=usb --attr-match=idVendor=1d50 --attr-match=idProduct=60a1
