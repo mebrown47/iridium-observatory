@@ -59,6 +59,7 @@ extern int verbose;
 #define RC_NTAPS            51
 #define RRC_ALPHA           0.4f
 #define START_THRESHOLD     0.45f
+#define RETRY_START_THRESHOLD 0.28f  /* gr-iridium's value; used for late-sync retries */
 #define PRE_START_US        100  /* microseconds before burst start */
 
 /* ---- Internal state ---- */
@@ -110,6 +111,7 @@ struct _burst_downmix {
     /* Working buffers (sized for max burst) */
     float complex *work_a;
     float complex *work_b;
+    float complex *dec_save;     /* decimated burst, kept for a late-sync retry */
     float complex *work_frac;   /* intermediate for fractional-rate inputs */
     float *mag_f;
     float *mag_filtered_f;
@@ -381,6 +383,7 @@ burst_downmix_t *burst_downmix_create(downmix_config_t *config) {
     dm->work_size = 2 * 1024 * 1024;  /* 2M samples max */
     dm->work_a = aligned_alloc_32(sizeof(float complex) * dm->work_size);
     dm->work_b = aligned_alloc_32(sizeof(float complex) * dm->work_size);
+    dm->dec_save = aligned_alloc_32(sizeof(float complex) * dm->work_size);
     dm->mag_f = aligned_alloc_32(sizeof(float) * dm->work_size);
     dm->mag_filtered_f = aligned_alloc_32(sizeof(float) * dm->work_size);
 
@@ -421,6 +424,7 @@ void burst_downmix_destroy(burst_downmix_t *dm) {
 
     free(dm->work_a);
     free(dm->work_b);
+    free(dm->dec_save);
     free(dm->work_frac);
     free(dm->mag_f);
     free(dm->mag_filtered_f);
@@ -507,7 +511,7 @@ static int decimate_burst(burst_downmix_t *dm, const float complex *in, int in_l
 /* ---- Step 3: Find burst start ---- */
 
 static int find_burst_start(burst_downmix_t *dm, const float complex *frame,
-                             int frame_len) {
+                             int frame_len, float start_threshold) {
     int search = dm->search_depth;
     if (search > frame_len) search = frame_len;
 
@@ -529,7 +533,7 @@ static int find_burst_start(burst_downmix_t *dm, const float complex *frame,
     float max_val = simd_max_float(dm->mag_filtered_f, filtered_len);
 
     /* Find first sample above threshold */
-    float threshold = START_THRESHOLD * max_val;
+    float threshold = start_threshold * max_val;
     int start = 0;
     for (start = 0; start < filtered_len; start++) {
         if (dm->mag_filtered_f[start] >= threshold)
@@ -771,48 +775,85 @@ int burst_downmix_process(burst_downmix_t *dm, burst_data_t *burst,
     }
 
     /* Step 3: Find burst start */
-    int start = find_burst_start(dm, dm->work_a, dec_len);
+    int start = find_burst_start(dm, dm->work_a, dec_len, START_THRESHOLD);
     if (start >= dec_len - 100) {
         *frames_out = NULL;
         return 0;
     }
 
-    int frame_len = dec_len - start;
+    /* Late-sync retry.  The 0.45 start threshold suits downlink, but on some
+     * uplink bursts the sync correlation then locks onto a point deep inside
+     * the burst (as downlink) and the frame fails its UW check.  When the UW
+     * lands later than a short preamble allows, start again from the 0.28
+     * start and keep that attempt if its UW lands where expected.
+     * Attempts: 0 = normal, 1 = retry from the earlier start,
+     *           2 = retry failed too, redo the normal one. */
+    int late_uw = (int)((IR_PREAMBLE_LENGTH_SHORT + 8) * dm->samples_per_symbol)
+                  + dm->pre_start_samples;
+    int start0 = start;
+    double cf_coarse = center_frequency;
+    memcpy(dm->dec_save, dm->work_a, dec_len * sizeof(float complex));
 
-    /* Step 4: Fine CFO estimation */
-    float center_offset = estimate_fine_cfo(dm, &dm->work_a[start], frame_len);
-
-    /* Step 5: Fine CFO correction */
-    {
-        rotator_t r;
-        rotator_init(&r);
-        float phase_inc = -2.0f * (float)M_PI * center_offset;
-        rotator_set_phase_incr(&r, cexpf(phase_inc * I));
-        rotator_rotate_n(&r, dm->work_b, &dm->work_a[start], frame_len);
-        center_frequency += center_offset * dm->output_sample_rate;
-    }
-
-    /* Step 6: RRC matched filtering */
-    {
-        int half_rrc = (dm->rrc_fir->ntaps - 1) / 2;
-        int pad_len = frame_len + dm->rrc_fir->ntaps - 1;
-        if (pad_len > dm->work_size) pad_len = dm->work_size;
-
-        /* Zero-pad for same-length convolution */
-        memset(dm->work_a, 0, pad_len * sizeof(float complex));
-        memcpy(&dm->work_a[half_rrc], dm->work_b,
-               frame_len * sizeof(float complex));
-
-        fir_filter_ccf(dm->rrc_fir, dm->work_b, dm->work_a, frame_len);
-    }
-
-    /* Step 7: Sync word correlation */
+    int frame_len;
     ir_direction_t direction;
     float uw_start_correction;
     float complex corr_result;
-    int uw_start = correlate_sync(dm, dm->work_b, frame_len,
-                                   &direction, &uw_start_correction,
-                                   &corr_result);
+    int uw_start;
+    for (int attempt = 0; ; attempt++) {
+        if (attempt > 0) {
+            memcpy(dm->work_a, dm->dec_save, dec_len * sizeof(float complex));
+            center_frequency = cf_coarse;
+        }
+        frame_len = dec_len - start;
+
+        /* Step 4: Fine CFO estimation */
+        float center_offset = estimate_fine_cfo(dm, &dm->work_a[start], frame_len);
+
+        /* Step 5: Fine CFO correction */
+        {
+            rotator_t r;
+            rotator_init(&r);
+            float phase_inc = -2.0f * (float)M_PI * center_offset;
+            rotator_set_phase_incr(&r, cexpf(phase_inc * I));
+            rotator_rotate_n(&r, dm->work_b, &dm->work_a[start], frame_len);
+            center_frequency += center_offset * dm->output_sample_rate;
+        }
+
+        /* Step 6: RRC matched filtering */
+        {
+            int half_rrc = (dm->rrc_fir->ntaps - 1) / 2;
+            int pad_len = frame_len + dm->rrc_fir->ntaps - 1;
+            if (pad_len > dm->work_size) pad_len = dm->work_size;
+
+            /* Zero-pad for same-length convolution */
+            memset(dm->work_a, 0, pad_len * sizeof(float complex));
+            memcpy(&dm->work_a[half_rrc], dm->work_b,
+                   frame_len * sizeof(float complex));
+
+            fir_filter_ccf(dm->rrc_fir, dm->work_b, dm->work_a, frame_len);
+        }
+
+        /* Step 7: Sync word correlation */
+        uw_start = correlate_sync(dm, dm->work_b, frame_len,
+                                  &direction, &uw_start_correction,
+                                  &corr_result);
+
+        if (attempt == 2)
+            break;
+        if (attempt == 0) {
+            if (uw_start <= late_uw)
+                break;
+            int s2 = find_burst_start(dm, dm->dec_save, dec_len, RETRY_START_THRESHOLD);
+            if (start - s2 < (int)dm->samples_per_symbol)
+                break;                  /* no earlier start to try */
+            start = s2;
+            continue;
+        }
+        /* attempt 1 */
+        if (uw_start <= late_uw)
+            break;
+        start = start0;
+    }
 
     if (uw_start < 0 || uw_start >= frame_len) {
         *frames_out = NULL;
