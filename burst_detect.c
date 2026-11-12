@@ -716,10 +716,55 @@ static void create_new_bursts(burst_detector_t *d) {
         if (d->burst_mask[p->bin] == 0.0f)
             continue;
 
+        /* An uplink burst's preamble alternates s1/s0, which puts its energy
+         * in two lines at +-12.5 kHz (half the symbol rate) instead of on the
+         * carrier. The strongest bin is then a sideband, and the other line,
+         * 25 kHz away, lies outside burst_width/2 and opens a second burst.
+         * Both get the wrong coarse frequency, so the burst is decoded twice
+         * or not at all. Real channels are 41.667 kHz apart, so two peaks
+         * ~25 kHz apart in one FFT frame are one uplink burst: centre it
+         * between them. */
+        int center = p->bin;
+        {
+            double bin_hz = (double)d->sample_rate / d->fft_size;
+            int lo = (int)(23000.0 / bin_hz), hi = (int)(27000.0 / bin_hz + 0.999);
+            int best = -1;
+            float best_mag = 0.0f;
+            for (int dist = lo; dist <= hi; dist++) {
+                for (int sgn = -1; sgn <= 1; sgn += 2) {
+                    int q = p->bin + sgn * dist;
+                    if (q < 0 || q >= d->fft_size || d->burst_mask[q] == 0.0f)
+                        continue;
+                    /* the partner must be of similar strength (within
+                     * 6 dB) -- a downlink carrier with a weaker skirt bin
+                     * 25 kHz away must not pair */
+                    if (d->relative_magnitude[q] > d->threshold &&
+                        d->relative_magnitude[q] >= 0.25f * p->relative_magnitude &&
+                        d->relative_magnitude[q] > best_mag) {
+                        best_mag = d->relative_magnitude[q];
+                        best = q;
+                    }
+                }
+            }
+            if (best >= 0) {
+                /* and the carrier between them must be a dip: an uplink
+                 * preamble has no energy on the carrier itself */
+                int mid = (p->bin + best) / 2;
+                float lo_peak = best_mag < p->relative_magnitude ? best_mag : p->relative_magnitude;
+                float mid_mag = 0.0f;
+                for (int k = mid - 1; k <= mid + 1; k++)
+                    if (d->relative_magnitude[k] > mid_mag) mid_mag = d->relative_magnitude[k];
+                if (mid_mag >= 0.5f * lo_peak)
+                    best = -1;
+            }
+            if (best >= 0)
+                center = (p->bin + best) / 2;
+        }
+
         active_burst_t b;
         memset(&b, 0, sizeof(b));
         b.id = d->burst_id;
-        b.center_bin = p->bin;
+        b.center_bin = center;
         d->burst_id += 10;  /* leave room for sub-IDs downstream */
 
         /* Normalize relative magnitude for SNR estimate */

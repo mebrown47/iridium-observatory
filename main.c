@@ -597,12 +597,50 @@ static void messages_emit(const char *line, void *ctx)
     frame_output_print_text(line);
 }
 
+/* gr-iridium's frame_sorter rule: a frame within 1 ms and 10 kHz of one
+ * already handled is the same transmission seen twice (two detector bins,
+ * e.g. both sidebands of an uplink preamble), so drop it. First copy wins;
+ * gr-iridium keeps the higher-confidence one, which needs a delay buffer. */
+#define DEDUP_RING 1024
+static struct { uint64_t t; double f; int dir; } dedup_ring[DEDUP_RING];
+static int dedup_pos;
+static pthread_mutex_t dedup_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int is_duplicate_frame(const demod_frame_t *d)
+{
+    int dup = 0;
+    pthread_mutex_lock(&dedup_lock);
+    for (int i = 0; i < DEDUP_RING; i++) {
+        if (dedup_ring[i].t == 0 || dedup_ring[i].dir != (int)d->direction) continue;
+        int64_t dt = (int64_t)(dedup_ring[i].t - d->timestamp);
+        if (dt < 1000000 && dt > -1000000 &&
+            fabs(dedup_ring[i].f - d->center_frequency) < 10000.0) {
+            dup = 1;
+            break;
+        }
+    }
+    if (!dup) {
+        dedup_ring[dedup_pos].t = d->timestamp;
+        dedup_ring[dedup_pos].f = d->center_frequency;
+        dedup_ring[dedup_pos].dir = (int)d->direction;
+        dedup_pos = (dedup_pos + 1) % DEDUP_RING;
+    }
+    pthread_mutex_unlock(&dedup_lock);
+    return dup;
+}
+
 /* A demodulated frame: IDA decode, the stdout line, and the hand-off to the
  * output thread (web map, positioning, ACARS, GSMTAP, archive). Takes
  * ownership of demod, its bits and llr. Shared by the live pipeline and
  * --replay-raw, so both run the same output stage. */
 static void handle_demod_frame(demod_frame_t *demod)
 {
+    if (is_duplicate_frame(demod)) {
+        free(demod->bits);
+        free(demod->llr);
+        free(demod);
+        return;
+    }
     atomic_fetch_add(&stat_n_ok_bursts, 1);
     atomic_fetch_add(&stat_n_ok_sub, 1);
 
