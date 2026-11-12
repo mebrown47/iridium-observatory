@@ -113,7 +113,7 @@ note "group plugdev and group-writable (or world-writable)."
 run "lsusb 2>/dev/null | grep -Ei '1d50:|0bda:283|2cf0:|1df7:|2500:|3923:' || echo 'no known SDR on USB'"
 {
   printf '\n$ (SDR device nodes)\n'
-  found=0
+  found=0; SDR_NODES=()
   for d in /sys/bus/usb/devices/*; do
     [ -r "$d/idVendor" ] || continue
     id="$(<"$d/idVendor"):$(<"$d/idProduct")"
@@ -122,6 +122,7 @@ run "lsusb 2>/dev/null | grep -Ei '1d50:|0bda:283|2cf0:|1df7:|2500:|3923:' || ec
     node="$(printf '/dev/bus/usb/%03d/%03d' "$(<"$d/busnum")" "$(<"$d/devnum")")"
     g="$(stat -c %G "$node" 2>/dev/null)"; m="$(stat -c %a "$node" 2>/dev/null)"
     if { [ "$g" = plugdev ] && (( 8#${m:-0} & 8#020 )); } || (( 8#${m:-0} & 8#002 )); then v=OK; else v="PROBLEM: the service can't open it"; fi
+    SDR_NODES+=("$node")
     printf '%s  %s  group %s mode %s  %s  [%s]\n' "$id" "$node" "$g" "$m" "$v" "$(cat "$d/product" 2>/dev/null)"
     command -v getfacl >/dev/null && getfacl -p "$node" 2>/dev/null | grep '^user:[^:]' | sed 's/^/    acl /'
   done
@@ -135,6 +136,24 @@ note ""
 note "iridium-sniffer --list (as $(id -un)). A radio the running service already"
 note "holds open can show as missing or 'busy' here; that is expected."
 run "'$SNIFFER_BIN' --list 2>&1 | head -30"
+note ""
+note "Programs that might hold an SDR, with their state: D (uninterruptible) or"
+note "Z (zombie) on an iridium-sniffer means a process stuck on its way out,"
+note "which can block USB until a reboot."
+run "ps -eo pid,stat,etime,wchan:24,cmd | awk 'NR==1 || /iridium|sniffer|airspy|hackrf|rtl_|extractor|gnuradio|soapy|sdrplay|dump1090|readsb/' | grep -v -e awk -e diagnose.sh | cut -c1-200"
+note ""
+note "Which processes have the SDR device nodes open. Without root this sees"
+note "only your own processes, so it uses sudo when that needs no password."
+if [ ${#SDR_NODES[@]} -eq 0 ]; then
+  note "(no SDR device nodes to check)"
+elif ! have fuser; then
+  note "fuser is not installed (package psmisc)"
+else
+  if [ "$(id -u)" = 0 ]; then FUSER=fuser
+  elif sudo -n true 2>/dev/null; then FUSER="sudo -n fuser"
+  else FUSER=fuser; note "(sudo needs a password: for the full list run  sudo fuser -v ${SDR_NODES[*]}  yourself)"; fi
+  run "$FUSER -v ${SDR_NODES[*]} 2>&1 || echo 'no process has them open'"
+fi
 
 section "Services"
 for u in iridium-sniffer.service observatory-trends.service observatory-rollup.service observatory-rollup.timer; do
@@ -212,7 +231,7 @@ note "or run: sudo journalctl -u iridium-sniffer -n 120"
 run "journalctl -u iridium-sniffer -n 120 --no-pager 2>&1"
 run "journalctl -u observatory-trends -n 40 --no-pager 2>&1"
 run "journalctl -u observatory-rollup -n 20 --no-pager 2>&1"
-run "dmesg 2>/dev/null | grep -Ei 'usb.*(1d50|0bda|airspy|hackrf|rtl)|usb.*(error|disconnect|reset)' | tail -20 || echo 'dmesg not readable as this user'"
+run "dmesg 2>/dev/null | grep -Ei 'usb.*(1d50|0bda|airspy|hackrf|rtl)|usb.*(error|disconnect|reset)|hung_task|blocked for more than' | tail -20 || echo 'dmesg not readable as this user'"
 
 echo
 echo "Done: $OUT ($(wc -l < "$OUT") lines)"
