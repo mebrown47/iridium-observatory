@@ -192,6 +192,27 @@ library copies the program really loads, whether the service can open each SDR, 
 and port status, the live pages' state, and recent logs, into one file. The report
 includes your settings and estimated location, so check it before posting it publicly.
 
+**No satellites on the Doppler page: "TLE download failed".** The Observatory needs orbit
+data (TLEs) from CelesTrak about once a day. It asks at most once every 2 hours, and after
+repeated failures it waits longer, up to a day; the page shows the error and the time of
+the next try. CelesTrak blocks addresses that download too often, and some networks can't
+reach it at all. The Observatory recovers on its own once a download succeeds.
+
+To fill the gap by hand, put a TLE file in `~/iridium-tle` of the user the services run as
+(`RUN_USER` in `/etc/iridium-observatory.conf`); the Observatory checks that folder too.
+Run as that user:
+
+```bash
+mkdir -p ~/iridium-tle && f=~/iridium-tle/iridium-$(date -u +%Y%m%d).tle && \
+curl -fsSL https://raw.githubusercontent.com/caelo-works/tle-mirror/main/tle/iridium-NEXT.tle -o "$f.tmp" && \
+grep -q '^1 ' "$f.tmp" && mv "$f.tmp" "$f"
+```
+
+That mirror is a third-party copy of CelesTrak's data, refreshed every 8 hours; it isn't
+part of this project. A copy of CelesTrak's `iridium-NEXT` group from anywhere else works
+the same way. The checks only let a real TLE file land: a failed download leaves nothing
+behind.
+
 ## How it differs from iridium-sniffer
 
 The receiver engine (burst detection, downmix, demodulation) is iridium-sniffer's. This
