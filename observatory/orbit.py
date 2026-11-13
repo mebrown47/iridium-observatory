@@ -20,6 +20,7 @@ Copyright (c) 2026 Mike Brown
 SPDX-License-Identifier: GPL-3.0-or-later
 """
 
+import json
 import math
 import os
 import time
@@ -49,6 +50,11 @@ KEEP_S = 600.0                          # ring alerts used for a fix (IraAnchor 
 
 TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=iridium-NEXT&FORMAT=tle"
 TLE_MAX_AGE_S = 24 * 3600
+# CelesTrak asks for no more than one download every couple of hours and
+# blocks addresses that ask more often. Every attempt, failed or not, counts,
+# and failures back off from here up to TLE_MAX_AGE_S.
+TLE_MIN_RETRY_S = 2 * 3600
+TLE_STAMP = ".last-download"            # in the cache dir: survives restarts
 
 
 # ---------------------------------------------------------------- geometry
@@ -265,10 +271,45 @@ def newest_tle_in(directory):
     return os.path.join(directory, names[-1]) if names else None
 
 
-def refresh_tles(cache_dir, url=TLE_URL, max_age_s=TLE_MAX_AGE_S, timeout=20):
+_attempts = {}                          # cache_dir -> stamp, if it cannot be saved
+
+
+def _read_stamp(cache_dir):
+    try:
+        with open(os.path.join(cache_dir, TLE_STAMP)) as f:
+            d = json.load(f)
+        return {"t": float(d["t"]), "fails": int(d.get("fails", 0)), "error": str(d.get("error", ""))}
+    except (OSError, ValueError, KeyError, TypeError):
+        return _attempts.get(cache_dir, {"t": 0.0, "fails": 0, "error": ""})
+
+
+def _write_stamp(cache_dir, d):
+    _attempts[cache_dir] = d
+    path = os.path.join(cache_dir, TLE_STAMP)
+    try:
+        with open(path + ".tmp", "w") as f:
+            json.dump(d, f)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass                            # the in-process copy still rate-limits
+
+
+def next_download_at(stamp, min_retry_s=TLE_MIN_RETRY_S, max_wait_s=TLE_MAX_AGE_S):
+    """Earliest time another download may start: TLE_MIN_RETRY_S after the
+    last attempt, doubling with each consecutive failure up to a day."""
+    if not stamp["t"]:
+        return 0.0
+    wait = min(min_retry_s * 2 ** max(stamp["fails"] - 1, 0), max_wait_s)
+    return stamp["t"] + max(wait, min_retry_s)
+
+
+def refresh_tles(cache_dir, url=TLE_URL, max_age_s=TLE_MAX_AGE_S, timeout=20,
+                 min_retry_s=TLE_MIN_RETRY_S):
     """Keep <cache_dir>/iridium-YYYYMMDD.tle no older than max_age_s, fetched
-    from CelesTrak (whose guidance is to fetch at most every couple of
-    hours). Returns (path or None, note). A failed fetch keeps the old file."""
+    from CelesTrak. Safe to call as often as you like: it goes to the network
+    at most once per min_retry_s (longer after failures), remembered in
+    <cache_dir>/.last-download so restarts do not reset it. Returns
+    (path or None, note). A failed fetch keeps the old file."""
     try:
         os.makedirs(cache_dir, exist_ok=True)
     except OSError as e:
@@ -276,19 +317,31 @@ def refresh_tles(cache_dir, url=TLE_URL, max_age_s=TLE_MAX_AGE_S, timeout=20):
     cur = newest_tle_in(cache_dir)
     if cur and time.time() - os.path.getmtime(cur) < max_age_s:
         return cur, ""
+    stamp = _read_stamp(cache_dir)
+    now = time.time()
+    at = next_download_at(stamp, min_retry_s, max_age_s)
+    if now < at and stamp["t"] <= now:  # (a stamp from the future: clock went back)
+        when = time.strftime("%H:%M UTC", time.gmtime(at))
+        why = ("TLE download failed (%s); next try after %s" % (stamp["error"], when)
+               if stamp["error"] else "next TLE download after %s" % when)
+        return cur, why + ("; using " + os.path.basename(cur) if cur else "")
+    # Stamp before going out, so even a crash mid-download counts.
+    _write_stamp(cache_dir, {"t": now, "fails": stamp["fails"] + 1, "error": "interrupted"})
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "iridium-observatory"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             text = r.read().decode("ascii", "replace")
         if text.count("\n1 ") < 10:
-            raise ValueError("response has no TLEs")
+            raise ValueError("response has no TLEs: %r" % text.strip()[:120])
         path = os.path.join(cache_dir, time.strftime("iridium-%Y%m%d.tle", time.gmtime()))
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             f.write(text)
         os.replace(tmp, path)
+        _write_stamp(cache_dir, {"t": now, "fails": 0, "error": ""})
         return path, ""
     except Exception as e:
+        _write_stamp(cache_dir, {"t": now, "fails": stamp["fails"] + 1, "error": str(e)})
         return cur, "TLE download failed (%s)%s" % (e, "; using " + os.path.basename(cur) if cur else "")
 
 
