@@ -58,6 +58,9 @@ class SkyTracker:
 
     # ---- inputs
     def _tles(self):
+        # With no TLEs yet this runs every poll, to pick up a *.tle dropped
+        # into a folder promptly. That is only local file checks:
+        # refresh_tles itself keeps CelesTrak to one try per couple of hours.
         if time.time() - self.tle_checked < 3600 and self.c.sats:
             return
         self.tle_checked = time.time()
