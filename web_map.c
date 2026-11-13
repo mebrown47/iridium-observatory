@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include "web_map.h"
+#include "version.h"
 #include "ida_decode.h"
 #include "doppler_pos.h"
 
@@ -1175,7 +1176,11 @@ static const char HTML_PAGE[] =
 ".leaflet-control-layers{background:rgba(15,23,42,0.92)!important;\n"
 "  color:#e2e8f0!important;border:1px solid #334155!important}\n"
 ".leaflet-control-layers label{color:#e2e8f0}\n"
-"#main{display:flex;width:100vw;height:calc(100vh - 44px)}\n"
+"#main{display:flex;width:100vw;height:calc(100vh - 62px)}\n"
+"#foot{height:18px;line-height:17px;padding:0 12px;background:#1e293b;box-sizing:border-box;\n"
+"  border-top:1px solid #334155;color:#64748b;font-size:11px;text-align:right}\n"
+"#foot a{color:inherit;text-decoration:none}\n"
+"#foot a:hover{text-decoration:underline}\n"
 "#map{flex:1;height:100%;width:auto;position:relative}\n"
 "#acars-side{width:380px;height:100%;background:#0f172a;\n"
 "  border-left:1px solid #334155;overflow-y:auto;color:#e2e8f0;\n"
@@ -1217,6 +1222,7 @@ static const char HTML_PAGE[] =
 "html.light #bar{background:#ffffff;color:#1e293b;\n"
 "  border-bottom-color:#cbd5e1}\n"
 "html.light #bar .title{color:#0f172a}\n"
+"html.light #foot{background:#ffffff;border-color:#cbd5e1;color:#94a3b8}\n"
 "html.light .stat{color:#475569}\n"
 "html.light .val{color:#0284c7}\n"
 "html.light .leaflet-container{background:#f8fafc}\n"
@@ -1320,6 +1326,8 @@ static const char HTML_PAGE[] =
 "    </div>\n"
 "  </div>\n"
 "</div>\n"
+"<div id=\"foot\"><a href=\"https://github.com/mebrown47/iridium-observatory/releases\"\n"
+"  target=\"_blank\" rel=\"noopener\">iridium-observatory " IRIDIUM_VERSION "</a></div>\n"
 "<script>\n"
 "var map=L.map('map',{zoomControl:true}).setView([20,0],2);\n"
 "var tileLayer=null;\n"

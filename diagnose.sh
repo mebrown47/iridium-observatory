@@ -90,6 +90,7 @@ run "timedatectl 2>/dev/null | grep -Ei 'synchron|NTP|time zone' || true"
 
 section "Install"
 run "cat $PREFIX/VERSION 2>/dev/null || echo 'no $PREFIX/VERSION (not installed by install.sh?)'"
+run "$PREFIX/bin/iridium-sniffer --version 2>/dev/null || echo 'installed binary has no --version (a build from before --version was added after v1.1, or missing)'"
 run "git -C '$REPO_ROOT' describe --always --dirty --tags; git -C '$REPO_ROOT' log --oneline -3; git -C '$REPO_ROOT' status --short | head -20"
 run "cat $CONF 2>/dev/null || echo 'no $CONF'"
 run "ls -la $PREFIX $PREFIX/bin $PREFIX/observatory 2>/dev/null | head -40"

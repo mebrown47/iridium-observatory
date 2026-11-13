@@ -192,6 +192,10 @@ library copies the program really loads, whether the service can open each SDR, 
 and port status, the live pages' state, and recent logs, into one file. The report
 includes your settings and estimated location, so check it before posting it publicly.
 
+**Which version am I running?** It's at the foot of every page, and
+`iridium-sniffer --version` prints it. A release shows as `v1.1`; a build from later
+commits on main shows as, for example, `v1.1-3-g4f31b44` (3 commits after v1.1).
+
 **No satellites on the Doppler page: "TLE download failed".** The Observatory needs orbit
 data (TLEs) from CelesTrak about once a day. It asks at most once every 2 hours, and after
 repeated failures it waits longer, up to a day; the page shows the error and the time of

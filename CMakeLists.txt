@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.9)
-project(iridium-sniffer C)
+# The release version: bump it with each release tag. Builds from a git
+# checkout report `git describe` instead (cmake/version.cmake).
+project(iridium-sniffer VERSION 1.1 LANGUAGES C)
 
 set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/Modules" ${CMAKE_MODULE_PATH})
 
@@ -237,6 +239,17 @@ endif()
 
 add_executable(iridium-sniffer ${SOURCES})
 
+# version.h: regenerated on every build, so a git pull + make picks up the new
+# version without re-running cmake.
+add_custom_target(version_header
+    COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR}
+            -DOUT=${PROJECT_BINARY_DIR}/version.h
+            -DFALLBACK=${PROJECT_VERSION}
+            -P ${PROJECT_SOURCE_DIR}/cmake/version.cmake
+    BYPRODUCTS ${PROJECT_BINARY_DIR}/version.h
+    COMMENT "Checking the program version")
+add_dependencies(iridium-sniffer version_header)
+
 # Link required libraries
 target_link_libraries(iridium-sniffer PRIVATE
     Threads::Threads
@@ -399,8 +412,8 @@ install(TARGETS iridium-sniffer DESTINATION bin)
 set(CPACK_PACKAGE_NAME "iridium-sniffer")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Iridium burst detector and demodulator")
 set(CPACK_PACKAGE_VENDOR "CEMAXECUTER LLC")
-set(CPACK_PACKAGE_VERSION_MAJOR "1")
-set(CPACK_PACKAGE_VERSION_MINOR "0")
+set(CPACK_PACKAGE_VERSION_MAJOR "${PROJECT_VERSION_MAJOR}")
+set(CPACK_PACKAGE_VERSION_MINOR "${PROJECT_VERSION_MINOR}")
 set(CPACK_PACKAGE_VERSION_PATCH "0")
 set(CPACK_GENERATOR "DEB;TGZ")
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "CEMAXECUTER LLC")

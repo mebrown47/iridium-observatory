@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "aircraft_db.h"
+#include "version.h"
 #include "sdr.h"
 #include "sigmf.h"
 #include "simd_kernels.h"
@@ -151,6 +152,7 @@ extern int clock_source;
 extern int time_source;
 
 static void usage(int exitcode) {
+    fprintf(stderr, "iridium-observatory " IRIDIUM_VERSION "\n\n");
     fprintf(stderr,
 "Usage: iridium-sniffer <-f FILE | -i IFACE> [options]\n"
 "Standalone Iridium satellite burst detector and demodulator.\n"
@@ -283,6 +285,7 @@ static void usage(int exitcode) {
 "\n"
 "    -v, --verbose           verbose output to stderr\n"
 "    -h, --help              show this help\n"
+"    --version               show the version and exit\n"
 "    --list                  list available SDR interfaces\n"
 "\n"
 "The output format is compatible with iridium-toolkit. Pipe to iridium-parser.py:\n"
@@ -325,6 +328,7 @@ void parse_options(int argc, char **argv) {
 
     enum {
         OPT_HACKRF_LNA = 0x100,
+        OPT_VERSION,
         OPT_HACKRF_VGA,
         OPT_HACKRF_AMP,
         OPT_BLADERF_GAIN,
@@ -394,6 +398,7 @@ void parse_options(int argc, char **argv) {
         { "format",         required_argument, NULL, OPT_FORMAT },
         { "verbose",        no_argument,       NULL, 'v' },
         { "help",           no_argument,       NULL, 'h' },
+        { "version",        no_argument,       NULL, OPT_VERSION },
         { "list",           no_argument,       NULL, OPT_LIST },
         { "hackrf-lna",     required_argument, NULL, OPT_HACKRF_LNA },
         { "hackrf-vga",     required_argument, NULL, OPT_HACKRF_VGA },
@@ -955,6 +960,10 @@ void parse_options(int argc, char **argv) {
             case 'h':
                 usage(0);
                 break;
+
+            case OPT_VERSION:
+                printf("iridium-observatory %s\n", IRIDIUM_VERSION);
+                exit(0);
 
             case '?':
             default:

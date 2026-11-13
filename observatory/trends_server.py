@@ -26,10 +26,12 @@ engine or the live map. Run rollup.py on a timer to keep it current.
 """
 
 import argparse
+import html
 import json
 import os
 import sys
 import sqlite3
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -52,6 +54,35 @@ MIN_SAT_FRAMES = 50
 # Kept in sync with rollup.FRAME_TYPES; drives legend order + colors.
 FRAME_TYPES = ["IRA", "IBC", "MSG", "IDA", "VOC", "IIP", "IU3", "ISY",
                "IU6", "IDA_UL_FAIL", "ITL", "RAW"]
+
+
+def running_version():
+    """The version of the code this server runs: the VERSION file install.sh
+    writes beside observatory/, else `git describe` of the checkout it runs
+    from (as the receiver reports it), else "unknown"."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        with open(os.path.join(here, "..", "VERSION")) as f:
+            v = f.read().strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    try:
+        v = subprocess.run(["git", "-C", here, "describe", "--tags", "--always", "--dirty"],
+                           capture_output=True, text=True, timeout=5).stdout.strip()
+        if v:
+            return v
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+VERSION = running_version()   # read once: the version of the code now running
+FOOTER = ('<footer style="color:var(--dim,#8b98a5);font-size:11.5px;text-align:center;'
+          'margin:18px 0 22px"><a href="https://github.com/mebrown47/iridium-observatory/releases" '
+          'target="_blank" rel="noopener" style="color:inherit;text-decoration:none">'
+          'iridium-observatory ' + html.escape(VERSION) + '</a></footer>\n')
 
 
 def connect_ro(path):
@@ -450,6 +481,10 @@ class Handler(BaseHTTPRequestHandler):
         pass  # quiet; systemd/journald captures what matters
 
     def _send(self, code, body, ctype):
+        if isinstance(body, str) and ctype.startswith("text/html"):
+            head, sep, tail = body.rpartition("</body>")
+            if sep:
+                body = head + FOOTER + sep + tail
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(code)

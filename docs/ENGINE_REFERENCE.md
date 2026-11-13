@@ -978,6 +978,7 @@ Output options:
 
     -v, --verbose           verbose output to stderr
     -h, --help              show this help
+    --version               show the version and exit
     --list                  list available SDR interfaces
 
 The output format is compatible with iridium-toolkit. Pipe to iridium-parser.py:

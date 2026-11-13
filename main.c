@@ -55,6 +55,7 @@
 #include "bits_parser.h"
 #include "frame_decode.h"
 #include "web_map.h"
+#include "version.h"
 #include "archive.h"
 #include "vita49.h"
 #include "ida_decode.h"
@@ -1278,6 +1279,7 @@ int main(int argc, char **argv) {
     self_pid = getpid();
 
     parse_options(argc, argv);
+    fprintf(stderr, "iridium-observatory %s\n", IRIDIUM_VERSION);
 
     /* Initialize SIMD dispatch (must be before any DSP) */
     simd_init(simd_mode);
