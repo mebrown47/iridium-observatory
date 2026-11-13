@@ -7,9 +7,9 @@ worked out from the satellites alone, typically to within a few km. It keeps a d
 long-run dashboards, and it can feed aircraft messages and positions to aggregators
 such as airframes.io.
 
-> **Latest release: [v1.0](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.0)** (10 November 2026).
-> Already installed? Run `./install.sh --update`: installs from before v1.0 don't decode
-> uplink (handset and aircraft to satellite) bursts.
+> **Latest release: [v1.1](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.1)** (13 November 2026).
+> Already installed? Run `./install.sh --update`: installs from before v1.1 decode far
+> fewer uplink (aircraft and handset to satellite) messages.
 
 It is a fork of [iridium-sniffer](https://github.com/alphafox02/iridium-sniffer) and keeps
 that project's receiver engine at its core. [How it differs](#how-it-differs-from-iridium-sniffer)
