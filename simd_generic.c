@@ -60,7 +60,7 @@ static void set_neon(void) {
     simd_mag_squared     = neon_mag_squared;
     simd_max_float       = neon_max_float;
     simd_csquare_window  = neon_csquare_window;
-    simd_rotate          = generic_rotate;
+    simd_rotate          = neon_rotate;
     fprintf(stderr, "iridium-sniffer: using NEON SIMD kernels\n");
 }
 #endif

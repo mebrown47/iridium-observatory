@@ -412,4 +412,64 @@ void neon_csquare_window(const float complex *in, const float *window,
     }
 }
 
+/* ---- Frequency rotation ----
+ *
+ * As avx2_rotate: eight phasors (phase * incr^l), each advanced by incr^8
+ * per block, so no multiply waits on the previous one's result. vld2q/vst2q
+ * deinterleave re/im on the way in and out, so the complex multiply is four
+ * plain FMAs with no shuffles. Renormalised every 512 blocks. */
+void neon_rotate(const float complex *in, float complex *out, int n,
+                 float complex *phase, float complex incr) {
+    float complex ph = *phase;
+    int i = 0;
+    if (n >= 16) {
+        float lre[8], lim[8];
+        double complex pd = ph, st = 1.0;
+        for (int l = 0; l < 8; l++) {
+            lre[l] = (float)creal(pd);
+            lim[l] = (float)cimag(pd);
+            pd *= incr;
+            st *= incr;
+        }
+        float32x4_t pr0 = vld1q_f32(&lre[0]), pi0 = vld1q_f32(&lim[0]);
+        float32x4_t pr1 = vld1q_f32(&lre[4]), pi1 = vld1q_f32(&lim[4]);
+        const float32x4_t sr = vdupq_n_f32((float)creal(st));
+        const float32x4_t si = vdupq_n_f32((float)cimag(st));
+        const float *x = (const float *)in;
+        float *y = (float *)out;
+        int nblk = n / 8;
+        for (int b = 0; b < nblk; b++, i += 8) {
+            float32x4x2_t d0 = vld2q_f32(&x[2 * i]);
+            float32x4x2_t d1 = vld2q_f32(&x[2 * i + 8]);
+            float32x4x2_t o0, o1;
+            o0.val[0] = vfmsq_f32(vmulq_f32(d0.val[0], pr0), d0.val[1], pi0);
+            o0.val[1] = vfmaq_f32(vmulq_f32(d0.val[0], pi0), d0.val[1], pr0);
+            o1.val[0] = vfmsq_f32(vmulq_f32(d1.val[0], pr1), d1.val[1], pi1);
+            o1.val[1] = vfmaq_f32(vmulq_f32(d1.val[0], pi1), d1.val[1], pr1);
+            vst2q_f32(&y[2 * i], o0);
+            vst2q_f32(&y[2 * i + 8], o1);
+
+            float32x4_t t0 = vfmsq_f32(vmulq_f32(pr0, sr), pi0, si);
+            pi0 = vfmaq_f32(vmulq_f32(pr0, si), pi0, sr);
+            pr0 = t0;
+            float32x4_t t1 = vfmsq_f32(vmulq_f32(pr1, sr), pi1, si);
+            pi1 = vfmaq_f32(vmulq_f32(pr1, si), pi1, sr);
+            pr1 = t1;
+
+            if (b % 512 == 511) {
+                float32x4_t m0 = vsqrtq_f32(vfmaq_f32(vmulq_f32(pr0, pr0), pi0, pi0));
+                float32x4_t m1 = vsqrtq_f32(vfmaq_f32(vmulq_f32(pr1, pr1), pi1, pi1));
+                pr0 = vdivq_f32(pr0, m0); pi0 = vdivq_f32(pi0, m0);
+                pr1 = vdivq_f32(pr1, m1); pi1 = vdivq_f32(pi1, m1);
+            }
+        }
+        ph = vgetq_lane_f32(pr0, 0) + vgetq_lane_f32(pi0, 0) * I;
+    }
+    for (; i < n; i++) {
+        out[i] = in[i] * ph;
+        ph *= incr;
+    }
+    *phase = ph;
+}
+
 #endif /* __aarch64__ || _M_ARM64 */

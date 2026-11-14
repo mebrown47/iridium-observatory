@@ -165,6 +165,8 @@ void neon_mag_squared(const float complex *in, float *out, int n);
 float neon_max_float(const float *in, int n);
 void neon_csquare_window(const float complex *in, const float *window,
                          float complex *out, int n);
+void neon_rotate(const float complex *in, float complex *out, int n,
+                 float complex *phase, float complex incr);
 
 #endif /* __aarch64__ || _M_ARM64 */
 
