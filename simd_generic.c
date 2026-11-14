@@ -27,6 +27,7 @@ simd_convert_i8_cf_fn  simd_convert_i8_cf  = NULL;
 simd_mag_squared_fn    simd_mag_squared    = NULL;
 simd_max_float_fn      simd_max_float      = NULL;
 simd_csquare_window_fn simd_csquare_window = NULL;
+simd_rotate_fn         simd_rotate         = NULL;
 
 /* ---- Runtime dispatch ---- */
 
@@ -42,6 +43,7 @@ static void set_scalar(void) {
     simd_mag_squared    = generic_mag_squared;
     simd_max_float      = generic_max_float;
     simd_csquare_window = generic_csquare_window;
+    simd_rotate         = generic_rotate;
     fprintf(stderr, "iridium-sniffer: using scalar kernels\n");
 }
 
@@ -58,6 +60,7 @@ static void set_neon(void) {
     simd_mag_squared     = neon_mag_squared;
     simd_max_float       = neon_max_float;
     simd_csquare_window  = neon_csquare_window;
+    simd_rotate          = generic_rotate;
     fprintf(stderr, "iridium-sniffer: using NEON SIMD kernels\n");
 }
 #endif
@@ -75,6 +78,7 @@ static void set_sse42(void) {
     simd_mag_squared    = sse42_mag_squared;
     simd_max_float      = sse42_max_float;
     simd_csquare_window = sse42_csquare_window;
+    simd_rotate         = generic_rotate;
     fprintf(stderr, "iridium-sniffer: using SSE4.2 SIMD kernels\n");
 }
 
@@ -90,6 +94,7 @@ static void set_avx2(void) {
     simd_mag_squared    = avx2_mag_squared;
     simd_max_float      = avx2_max_float;
     simd_csquare_window = avx2_csquare_window;
+    simd_rotate         = avx2_rotate;
     fprintf(stderr, "iridium-sniffer: using AVX2+FMA SIMD kernels\n");
 }
 
@@ -246,4 +251,44 @@ void generic_csquare_window(const float complex *in, const float *window,
         float complex s = in[i];
         out[i] = s * s * window[i];
     }
+}
+
+/* Frequency rotation. One running phasor makes every multiply wait for the
+ * previous one; eight phasors (phase * incr^l, each stepping by incr^8) are
+ * independent, which lets the compiler overlap them. The lanes are
+ * renormalised every ROTATE_RENORM blocks so that float rounding in the step
+ * can't grow their magnitude over a long burst. */
+#define ROTATE_LANES  8
+#define ROTATE_RENORM 512
+
+void generic_rotate(const float complex *in, float complex *out, int n,
+                    float complex *phase, float complex incr) {
+    float complex ph = *phase;
+    int i = 0;
+    if (n >= 2 * ROTATE_LANES) {
+        float complex p[ROTATE_LANES];
+        double complex pd = ph, st = 1.0;
+        for (int l = 0; l < ROTATE_LANES; l++) {
+            p[l] = (float complex)pd;
+            pd *= incr;
+            st *= incr;
+        }
+        const float complex s = (float complex)st;
+        int nblk = n / ROTATE_LANES;
+        for (int b = 0; b < nblk; b++, i += ROTATE_LANES) {
+            for (int l = 0; l < ROTATE_LANES; l++) {
+                out[i + l] = in[i + l] * p[l];
+                p[l] *= s;
+            }
+            if (b % ROTATE_RENORM == ROTATE_RENORM - 1)
+                for (int l = 0; l < ROTATE_LANES; l++)
+                    p[l] /= cabsf(p[l]);
+        }
+        ph = p[0];
+    }
+    for (; i < n; i++) {
+        out[i] = in[i] * ph;
+        ph *= incr;
+    }
+    *phase = ph;
 }

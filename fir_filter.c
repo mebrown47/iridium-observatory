@@ -181,6 +181,50 @@ float *lpf_taps(int *ntaps_out, float gain, float sample_rate,
     return taps;
 }
 
+/* ---- Low-pass filter taps (windowed sinc with Kaiser, explicit edges) ---- */
+
+/* Zeroth-order modified Bessel function of the first kind (power series). */
+static double bessel_i0(double x) {
+    double sum = 1.0, term = 1.0, q = x * x / 4.0;
+    for (int k = 1; k < 64; k++) {
+        term *= q / ((double)k * k);
+        sum += term;
+        if (term < sum * 1e-12) break;
+    }
+    return sum;
+}
+
+float *kaiser_lpf_taps(int *ntaps_out, float sample_rate, float pass_edge,
+                       float stop_edge, float atten_db) {
+    /* Kaiser's estimates for length and beta (Oppenheim & Schafer 7.6). */
+    double dw = 2.0 * M_PI * (stop_edge - pass_edge) / sample_rate;
+    int ntaps = (int)ceil((atten_db - 8.0) / (2.285 * dw));
+    ntaps |= 1;
+    double beta = atten_db > 50 ? 0.1102 * (atten_db - 8.7)
+                : atten_db >= 21 ? 0.5842 * pow(atten_db - 21, 0.4)
+                                   + 0.07886 * (atten_db - 21)
+                : 0.0;
+    *ntaps_out = ntaps;
+
+    float *taps = malloc(sizeof(float) * ntaps);
+    int center = ntaps / 2;
+    double omega_c = M_PI * (pass_edge + stop_edge) / sample_rate;
+    double i0_beta = bessel_i0(beta);
+    double sum = 0;
+    for (int i = 0; i < ntaps; i++) {
+        int n = i - center;
+        double h = n == 0 ? omega_c / M_PI : sin(omega_c * n) / (M_PI * n);
+        double r = (double)n / center;
+        double w = bessel_i0(beta * sqrt(1.0 - r * r)) / i0_beta;
+        taps[i] = (float)(h * w);
+        sum += taps[i];
+    }
+    /* Unity DC gain */
+    for (int i = 0; i < ntaps; i++)
+        taps[i] = (float)(taps[i] / sum);
+    return taps;
+}
+
 /* ---- Box (averaging) filter taps ---- */
 
 float *box_taps(int *ntaps_out, int length) {

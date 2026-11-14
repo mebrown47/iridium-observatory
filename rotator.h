@@ -13,6 +13,9 @@
 #define __ROTATOR_H__
 
 #include <complex.h>
+#include <math.h>
+
+#include "simd_kernels.h"
 
 typedef struct {
     float complex phase;
@@ -32,13 +35,16 @@ static inline void rotator_set_phase_incr(rotator_t *r, float complex incr) {
     r->phase_incr = incr;
 }
 
-/* Rotate n samples: out[i] = in[i] * phase; phase *= phase_incr */
+/* Rotate n samples: out[i] = in[i] * phase; phase *= phase_incr.
+ * in may equal out. The work is simd_rotate (simd_kernels.h): lane-parallel
+ * phasors, since a single running one is latency-bound (it was 3.4 ns a
+ * sample, over a quarter of the downmix, for the full-rate coarse CFO). */
 static inline void rotator_rotate_n(rotator_t *r, float complex *out,
                                      const float complex *in, int n) {
-    for (int i = 0; i < n; i++) {
-        out[i] = in[i] * r->phase;
-        r->phase *= r->phase_incr;
-    }
+    if (simd_rotate)
+        simd_rotate(in, out, n, &r->phase, r->phase_incr);
+    else
+        generic_rotate(in, out, n, &r->phase, r->phase_incr);
     /* Re-normalize phase to prevent drift */
     float mag = cabsf(r->phase);
     if (mag > 0)
