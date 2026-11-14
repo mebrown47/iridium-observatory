@@ -7,7 +7,7 @@
  *   D  decimation, in_rate / out_rate (40 at 10 MS/s -> 250 kS/s)
  *   M  output bins per block, OS_CHAN_M (1024: 244 Hz bins)
  *   N  block FFT size, M * D (40960 at 10 MS/s)
- *   L  new input samples per block, 3N/4; V = N - L overlap
+ *   L  new input samples per block, 15N/16; V = N - L overlap
  *
  * Block b transforms input [bL - V, bL + L). With the filter's taps h[0..P)
  * zero-padded to N, the circular convolution of that block with h is the
@@ -37,7 +37,7 @@
 #endif
 
 #define OS_CHAN_M      1024
-/* Cached block FFTs: 64 blocks of 3.07 ms (at 10 MS/s) span ~200 ms, well
+/* Cached block FFTs: 64 blocks of 3.84 ms (at 10 MS/s) span ~245 ms, well
  * past how far apart in time the bursts of one emission batch start. A miss
  * costs only a recompute. */
 #define OS_CHAN_SLOTS  64
@@ -76,7 +76,10 @@ os_chan_t *os_chan_create(int in_rate, int out_rate,
     c->D = D;
     c->M = OS_CHAN_M;
     c->N = c->M * D;
-    c->V = c->N / 4;
+    /* The overlap only has to hold the filter (V >= ntaps - 1: 2560 against
+     * 801 at 10 MS/s, and 64D against ~20D at any rate), and every sample of
+     * overlap is transformed twice, so keep it small. */
+    c->V = c->N / 16;
     c->L = c->N - c->V;
     c->read = read;
     c->read_ctx = read_ctx;
