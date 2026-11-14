@@ -114,6 +114,13 @@ else
     bad "observatory/tests/test_kg.py:"; echo "$out" | grep -E "FAIL|Error" | sed 's/^/    /'
 fi
 
+echo "== Observatory search =="
+if out="$("$PY" "$ROOT/observatory/tests/test_search.py" 2>&1)"; then
+    ok "Search tab filters, paging and CSV export"
+else
+    bad "observatory/tests/test_search.py:"; echo "$out" | grep -E "FAIL|Error" | sed 's/^/    /'
+fi
+
 # ---- Tier 2: oracle cross-check vs iridium-parser.py ----
 if [ "${SKIP_ORACLE:-0}" != 1 ]; then
     echo "== oracle cross-check (vs iridium-parser.py) =="

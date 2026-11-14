@@ -402,6 +402,159 @@ def build_aviation(path, tail=None, limit=200):
         con.close()
 
 
+
+# ---- Search tab ---------------------------------------------------------------
+# Filters over the messages table. Every value goes in as a bound parameter;
+# the only SQL built from text is the fixed list of clauses below.
+
+SEARCH_LIMIT_MAX = 1000       # rows per page
+SEARCH_CSV_MAX = 100000       # rows in one CSV export
+SEARCH_TIME_LIMIT_S = 5.0     # abandon a query that runs longer (protects the receiver's CPU)
+
+
+def _like(text):
+    """A LIKE pattern matching `text` anywhere, with % and _ taken literally."""
+    return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _day_start(s):
+    """Epoch seconds at 00:00 UTC of a YYYY-MM-DD date, or None."""
+    import calendar
+    try:
+        return calendar.timegm(time.strptime(s.strip(), "%Y-%m-%d"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def search_filters(q):
+    """(WHERE clause, args, cleaned filters) from the query-string dict."""
+    def one(k):
+        return (q.get(k, [""])[0] or "").strip()
+    f = {"ac": one("ac").upper().lstrip("."), "q": one("q"), "lbl": one("lbl"),
+         "dir": one("dir").upper(), "kind": one("kind").lower(),
+         "from": one("from"), "to": one("to"), "hb": one("hb") in ("1", "true", "on")}
+    where, args = [], []
+    if not f["hb"]:
+        where.append("lbl != '_d'")
+    if f["ac"]:
+        where.append("(reg LIKE ? ESCAPE '\\' OR flt LIKE ? ESCAPE '\\')")
+        args += [_like(f["ac"])] * 2
+    if f["q"]:
+        where.append("txt LIKE ? ESCAPE '\\'")
+        args.append(_like(f["q"]))
+    if f["lbl"]:
+        where.append("lbl = ?")
+        args.append(f["lbl"])
+    if f["dir"] in ("DL", "UL"):
+        where.append("dir = ?")
+        args.append(f["dir"])
+    else:
+        f["dir"] = ""
+    if f["kind"] == "cpdlc":
+        where.append("has_cpdlc = 1")
+    elif f["kind"] == "adsc":
+        where.append("has_adsc = 1")
+    else:
+        f["kind"] = ""
+    a, b = _day_start(f["from"]), _day_start(f["to"])
+    if a is not None:
+        where.append("t >= ?")
+        args.append(a)
+    else:
+        f["from"] = ""
+    if b is not None:
+        where.append("t < ?")
+        args.append(b + 86400)      # the To day is included
+    else:
+        f["to"] = ""
+    return ("WHERE " + " AND ".join(where)) if where else "", args, f
+
+
+def _search_con(path):
+    con = connect_ro(path)
+    if con is None:
+        return None
+    deadline = time.monotonic() + SEARCH_TIME_LIMIT_S
+    # Returning non-zero aborts the running statement (sqlite3.OperationalError).
+    con.set_progress_handler(lambda: time.monotonic() > deadline, 20000)
+    return con
+
+
+def build_search(path, q):
+    """One page of matching messages, the total, and the per-day, per-label
+    and per-aircraft breakdown of all matches."""
+    con = _search_con(path)
+    if con is None:
+        return {"error": "no database yet: run rollup.py first"}
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE name='messages'").fetchone():
+            return {"error": "no messages table yet: run rollup.py first"}
+        where, args, f = search_filters(q)
+
+        def num(k, default, lo, hi):
+            try:
+                return max(lo, min(hi, int(q.get(k, [default])[0])))
+            except ValueError:
+                return int(default)
+        limit = num("limit", "200", 1, SEARCH_LIMIT_MAX)
+        offset = num("offset", "0", 0, 10 ** 9)
+        order = "ASC" if (q.get("sort", [""])[0] == "oldest") else "DESC"
+
+        rows = [{"t": t, "reg": reg, "flt": flt, "dir": d, "lbl": lbl, "freq": fr, "txt": txt,
+                 "cpdlc": bool(hc), "adsc": bool(ha), "summary": summ}
+                for t, reg, flt, d, lbl, fr, txt, hc, ha, summ in con.execute(
+                    "SELECT t, reg, flt, dir, lbl, freq, txt, has_cpdlc, has_adsc, "
+                    "CASE WHEN has_cpdlc=1 THEN (SELECT summary FROM cpdlc_log c "
+                    "  WHERE c.t=m.t AND c.reg=m.reg LIMIT 1) "
+                    "WHEN has_adsc=1 THEN (SELECT summary FROM adsc_log a "
+                    "  WHERE a.t=m.t AND a.reg=m.reg LIMIT 1) END "
+                    "FROM messages m " + where +
+                    " ORDER BY t %s, id %s LIMIT ? OFFSET ?" % (order, order),
+                    args + [limit, offset])]
+        days = con.execute("SELECT date(t,'unixepoch'), COUNT(*) FROM messages " + where +
+                           " GROUP BY 1 ORDER BY 1", args).fetchall()
+        total = sum(n for _, n in days)     # one scan fewer than a separate COUNT(*)
+        labels = con.execute("SELECT lbl, COUNT(*) FROM messages " + where +
+                             " GROUP BY lbl ORDER BY 2 DESC LIMIT 15", args).fetchall()
+        aircraft = con.execute("SELECT reg, COUNT(*) FROM messages " + where +
+                               (" AND " if where else "WHERE ") + "reg != ''"
+                               " GROUP BY reg ORDER BY 2 DESC LIMIT 15", args).fetchall()
+        span = con.execute("SELECT MIN(t), MAX(t) FROM messages").fetchone()
+        return {"filters": f, "total": total, "offset": offset, "limit": limit,
+                "sort": "oldest" if order == "ASC" else "newest", "rows": rows,
+                "days": days, "labels": labels, "aircraft": aircraft,
+                "span": {"first": span[0], "last": span[1]}}
+    except sqlite3.OperationalError as e:
+        if "interrupt" in str(e):
+            return {"error": "the search took longer than %d s and was stopped: "
+                             "narrow it with a date range or an aircraft" % SEARCH_TIME_LIMIT_S}
+        raise
+    finally:
+        con.close()
+
+
+def search_csv(path, q):
+    """All matching messages (up to SEARCH_CSV_MAX) as CSV text."""
+    import csv
+    import io
+    con = _search_con(path)
+    if con is None:
+        return "error\nno database yet\n"
+    try:
+        where, args, _ = search_filters(q)
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["time_utc", "reg", "flight", "dir", "label", "freq_hz", "cpdlc", "adsc", "text"])
+        for t, reg, flt, d, lbl, fr, txt, hc, ha in con.execute(
+                "SELECT t, reg, flt, dir, lbl, freq, txt, has_cpdlc, has_adsc FROM messages " + where +
+                " ORDER BY t, id LIMIT ?", args + [SEARCH_CSV_MAX]):
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t)), reg, flt, d, lbl,
+                        fr, int(bool(hc)), int(bool(ha)), txt])
+        return out.getvalue()
+    finally:
+        con.close()
+
+
 def assign_channel(freq):
     """Nearest Iridium channel centre to a measured frequency. Mirrors
     assign_channel_freq() in doppler_pos.c."""
@@ -523,6 +676,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: keep the server alive
                 self._send(500, json.dumps({"error": str(e)}),
                            "application/json")
+        elif u.path == "/search":
+            self._send(200, SEARCH_PAGE, "text/html; charset=utf-8")
+        elif u.path == "/api/search":
+            try:
+                data = build_search(self.db_path, parse_qs(u.query))
+                self._send(200, json.dumps(data), "application/json")
+            except Exception as e:  # noqa: keep the server alive
+                self._send(500, json.dumps({"error": str(e)}), "application/json")
+        elif u.path == "/api/search.csv":
+            try:
+                body = search_csv(self.db_path, parse_qs(u.query))
+            except Exception as e:  # noqa: keep the server alive
+                self._send(500, "error\n%s\n" % e, "text/csv; charset=utf-8")
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition",
+                                 'attachment; filename="iridium-messages-%s.csv"'
+                                 % time.strftime("%Y%m%d-%H%M", time.gmtime()))
+                b = body.encode("utf-8")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(b)
         elif u.path == "/doppler":
             self._send(200, DOPPLER_PAGE, "text/html; charset=utf-8")
         elif u.path == "/api/doppler":
@@ -645,7 +822,8 @@ PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/" class="on">Trends</a><a href="/aviation">Aviation</a>
-    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a></nav>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a>
+    <a href="/search">Search</a></nav>
   <span class="sub">constellation activity over time</span>
   <span class="spacer"></span>
   <div class="controls" id="win">
@@ -1000,7 +1178,8 @@ AVIATION_PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation" class="on">Aviation</a>
-    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a></nav>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a>
+    <a href="/search">Search</a></nav>
   <span class="sub">decoded aircraft traffic — per-tail history &amp; CPDLC log</span>
   <span class="spacer"></span>
   <span class="status" id="status"><span class="dot"></span>loading…</span>
@@ -1315,7 +1494,8 @@ DOPPLER_PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
-    <a href="/doppler" class="on">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a></nav>
+    <a href="/doppler" class="on">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a>
+    <a href="/search">Search</a></nav>
   <span class="sub">live satellite passes, drawn in radio frequency</span>
   <span class="spacer"></span>
   <span class="status" id="status"><span class="dot"></span>loading…</span>
@@ -1693,7 +1873,8 @@ COVERAGE_PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
-    <a href="/doppler">Doppler</a><a href="/coverage" class="on">Coverage</a><a href="/graph">Graph</a></nav>
+    <a href="/doppler">Doppler</a><a href="/coverage" class="on">Coverage</a><a href="/graph">Graph</a>
+    <a href="/search">Search</a></nav>
   <span class="sub">where in the sky this station hears Iridium</span>
   <span class="spacer"></span>
   <span class="status" id="status">loading…</span>
@@ -1871,7 +2052,8 @@ GRAPH_PAGE = r"""<!doctype html>
 <header>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
-    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph" class="on">Graph</a></nav>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph" class="on">Graph</a>
+    <a href="/search">Search</a></nav>
   <span class="sub">who hands aircraft to whom, from CPDLC</span>
   <span class="spacer"></span>
   <span class="status" id="status">loading…</span>
@@ -2035,6 +2217,295 @@ document.getElementById("tail").onkeydown=e=>{if(e.key==="Enter")showAircraft(e.
 document.getElementById("win").onclick=e=>{const b=e.target.closest("button");if(!b)return;
   DAYS=+b.dataset.d;[...b.parentNode.children].forEach(x=>x.classList.toggle("on",x===b));load();};
 load();setInterval(load,300000);
+</script>
+</body></html>
+"""
+
+
+SEARCH_PAGE = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iridium Observatory — Search</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232c; --line:#2b333d;
+    --fg:#e6edf3; --dim:#8b98a5; --accent:#4aa8ff; --good:#3fb950;
+    --warn:#d29922; --hot:#f778ba;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+    padding:16px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:18px;margin:0;font-weight:650;letter-spacing:.2px}
+  header .sub{color:var(--dim);font-size:12.5px}
+  header .spacer{flex:1}
+  header .status{color:var(--dim);font-size:12px}
+  .nav{display:flex;gap:4px;flex-wrap:wrap}
+  .nav a{color:var(--dim);text-decoration:none;font-size:13px;padding:4px 11px;
+    border-radius:6px;border:1px solid transparent}
+  .nav a:hover{color:var(--fg)}
+  .nav a.on{color:var(--fg);background:var(--panel2);border-color:var(--line)}
+  main{padding:18px 22px;max-width:1400px;margin:0 auto}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:14px 16px;margin-bottom:14px}
+  .panel h2{font-size:13px;margin:0 0 10px;font-weight:600;
+    display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .panel h2 .hint{color:var(--dim);font-weight:400;font-size:11.5px}
+  form.filters{display:grid;gap:10px 12px;align-items:end;
+    grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  form.filters label{display:flex;flex-direction:column;gap:4px;color:var(--dim);
+    font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  form.filters label.wide{grid-column:span 2}
+  @media(max-width:520px){form.filters label.wide{grid-column:auto}}
+  input,select{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+    border-radius:7px;padding:7px 9px;font-size:13px;font-family:inherit;
+    text-transform:none;letter-spacing:0;width:100%;min-width:0}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  label.check{flex-direction:row!important;align-items:center;gap:7px!important;
+    padding-bottom:8px;text-transform:none!important;letter-spacing:0!important;
+    font-size:12.5px!important}
+  label.check input{width:auto}
+  .btns{display:flex;gap:8px}
+  button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    padding:7px 14px;border-radius:7px;cursor:pointer;font-size:13px;font-family:inherit}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:#16324f;border-color:var(--accent)}
+  button:disabled{opacity:.4;cursor:default}
+  .quick{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;align-items:center}
+  .quick span{color:var(--dim);font-size:12px;margin-right:2px}
+  .quick button{padding:4px 10px;font-size:12px;color:var(--dim)}
+  .quick button:hover{color:var(--fg)}
+  .summary{display:flex;gap:18px;flex-wrap:wrap;align-items:baseline;margin-bottom:10px}
+  .summary .big{font-size:22px;font-weight:600}
+  .summary .dim{color:var(--dim);font-size:12.5px}
+  .summary .spacer{flex:1}
+  .summary a{color:var(--accent);font-size:12.5px;text-decoration:none}
+  .grid{display:grid;grid-template-columns:1fr 260px 260px;gap:14px;align-items:start}
+  @media(max-width:1000px){.grid{grid-template-columns:1fr 1fr}.grid .days{grid-column:1/-1}}
+  @media(max-width:620px){.grid{grid-template-columns:1fr}}
+  svg{display:block;width:100%;height:110px}
+  .bar{fill:var(--accent);opacity:.8}
+  .bar:hover{opacity:1}
+  .axis{display:flex;justify-content:space-between;color:var(--dim);font-size:10.5px;margin-top:4px}
+  .facet{display:flex;justify-content:space-between;gap:8px;padding:4px 7px;
+    border-radius:6px;cursor:pointer;font-size:12.5px}
+  .facet:hover{background:var(--panel2)}
+  .facet .k{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .facet .n{color:var(--dim);font-variant-numeric:tabular-nums}
+  .tbl-wrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;color:var(--dim);font-weight:500;font-size:11px;
+    text-transform:uppercase;letter-spacing:.5px;padding:6px 8px;
+    border-bottom:1px solid var(--line)}
+  td{padding:6px 8px;border-bottom:1px solid #1b2129;vertical-align:top}
+  tr:hover td{background:var(--panel2)}
+  td.ts{white-space:nowrap;color:var(--dim);font-variant-numeric:tabular-nums}
+  td.reg{white-space:nowrap}
+  td.reg a{color:var(--fg);font-weight:600;text-decoration:none}
+  td.reg a:hover{color:var(--accent)}
+  td.reg .flt{color:var(--accent);font-size:11.5px}
+  td.lbl{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
+  td.txt{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+    white-space:pre-wrap;word-break:break-word;min-width:260px}
+  td.txt .more{color:var(--accent);cursor:pointer;font-family:inherit}
+  td.txt .sum{color:#e6d7ef;margin-top:4px}
+  .dir{font-size:10px;padding:1px 5px;border-radius:4px}
+  .dir.DL{background:#12261a;color:var(--good)}
+  .dir.UL{background:#241a2e;color:#a371f7}
+  .badge{font-size:10px;padding:1px 6px;border-radius:20px;margin-left:4px;white-space:nowrap}
+  .badge.cp{background:#3d1f33;color:var(--hot)}
+  .badge.ad{background:#3a3020;color:var(--warn)}
+  .empty{color:var(--dim);padding:26px;text-align:center;font-size:13px}
+  .err{color:#ff7b72}
+  .pager{display:flex;gap:10px;align-items:center;justify-content:flex-end;margin-top:10px;
+    color:var(--dim);font-size:12.5px}
+  mark{background:#4a3b0b;color:inherit;border-radius:2px}
+</style></head>
+<body>
+<header>
+  <h1>Iridium Observatory</h1>
+  <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a>
+    <a href="/search" class="on">Search</a></nav>
+  <span class="sub">every stored ACARS message, by aircraft, text, label and date</span>
+  <span class="spacer"></span>
+  <span class="status" id="status">loading…</span>
+</header>
+<main>
+  <div class="panel">
+    <form class="filters" id="f" autocomplete="off">
+      <label>Aircraft<input name="ac" placeholder="registration or flight"></label>
+      <label class="wide">Text contains<input name="q" placeholder="e.g. LOADSHEET"></label>
+      <label>Label<input name="lbl" list="lbls" placeholder="any"></label>
+      <label>Direction<select name="dir"><option value="">any</option>
+        <option value="DL">DL: to aircraft</option><option value="UL">UL: from aircraft</option></select></label>
+      <label>Type<select name="kind"><option value="">any</option>
+        <option value="cpdlc">CPDLC</option><option value="adsc">ADS-C</option></select></label>
+      <label>From (UTC)<input name="from" type="date"></label>
+      <label>To (UTC)<input name="to" type="date"></label>
+      <label>Order<select name="sort"><option value="newest">newest first</option>
+        <option value="oldest">oldest first</option></select></label>
+      <label class="check"><input type="checkbox" name="hb" value="1"> include heartbeats (_d)</label>
+      <div class="btns"><button class="primary" type="submit">Search</button>
+        <button type="button" id="reset">Reset</button></div>
+    </form>
+    <datalist id="lbls"></datalist>
+    <div class="quick"><span>Quick:</span>
+      <button type="button" data-q="dir=UL&amp;from=@today&amp;to=@today">Uplink today</button>
+      <button type="button" data-q="dir=UL">All uplink</button>
+      <button type="button" data-q="kind=cpdlc&amp;from=@week">CPDLC this week</button>
+      <button type="button" data-q="kind=adsc">ADS-C</button>
+      <button type="button" data-q="q=LOADSHEET">Loadsheets</button>
+      <button type="button" data-q="from=@today&amp;to=@today">Everything today</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel days"><h2>Matches per day <span class="hint" id="dayhint"></span></h2>
+      <div id="days"><div class="empty">…</div></div></div>
+    <div class="panel"><h2>Labels <span class="hint">click to filter</span></h2>
+      <div id="labels"></div></div>
+    <div class="panel"><h2>Aircraft <span class="hint">click to filter</span></h2>
+      <div id="aircraft"></div></div>
+  </div>
+
+  <div class="panel">
+    <div class="summary"><span class="big" id="total">–</span><span class="dim" id="range"></span>
+      <span class="spacer"></span><a id="csv" href="#">Download CSV</a></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Time (UTC)</th><th>Aircraft</th><th>Dir</th><th>Label</th><th>Text</th></tr></thead>
+      <tbody id="rows"></tbody></table></div>
+    <div class="pager"><span id="pageinfo"></span>
+      <button type="button" id="prev">‹ Newer</button><button type="button" id="next">Older ›</button></div>
+  </div>
+</main>
+<script>
+const F=document.getElementById("f"), PAGE=200;
+let OFFSET=0, LAST=null, SEQ=0;
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt=n=>n.toLocaleString("en-US");
+const utc=t=>new Date(t*1000).toISOString().replace("T"," ").slice(0,19);
+const day=d=>d.toISOString().slice(0,10);
+
+function params(){
+  const p=new URLSearchParams();
+  for(const el of F.elements){
+    if(!el.name) continue;
+    if(el.type==="checkbox"){ if(el.checked) p.set(el.name,"1"); }
+    else if(el.value.trim()) p.set(el.name,el.value.trim());
+  }
+  if(p.get("sort")==="newest") p.delete("sort");
+  return p;
+}
+function fill(p){
+  for(const el of F.elements){
+    if(!el.name) continue;
+    if(el.type==="checkbox") el.checked=p.get(el.name)==="1";
+    else el.value=p.get(el.name)||(el.name==="sort"?"newest":"");
+  }
+}
+function setField(name,val){ F.elements[name].value=val; OFFSET=0; run(); }
+
+function highlight(txt,q){
+  const e=esc(txt);
+  if(!q) return e;
+  const qe=esc(q).replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  return e.replace(new RegExp(qe,"gi"),m=>"<mark>"+m+"</mark>");
+}
+function textCell(r,q){
+  const t=r.txt||"", lim=400;
+  let h;
+  if(!t) h='<span style="color:var(--dim)">(no text)</span>';
+  else if(t.length>lim) h='<span class="short">'+highlight(t.slice(0,lim),q)+
+    '… <span class="more">more</span></span><span class="full" hidden>'+highlight(t,q)+'</span>';
+  else h=highlight(t,q);
+  if(r.summary) h+='<div class="sum">'+esc(r.summary)+'</div>';
+  return h;
+}
+
+function drawDays(days){
+  const box=document.getElementById("days");
+  if(!days.length){ box.innerHTML='<div class="empty">no matches</div>'; document.getElementById("dayhint").textContent=""; return; }
+  // fill missing days with zero so the axis is true time
+  const m=new Map(days), start=new Date(days[0][0]+"T00:00:00Z"), end=new Date(days[days.length-1][0]+"T00:00:00Z");
+  const all=[];
+  for(let d=new Date(start); d<=end; d.setUTCDate(d.getUTCDate()+1)){ const k=day(d); all.push([k,m.get(k)||0]); }
+  const W=900,H=110,pad=0, max=Math.max(...all.map(x=>x[1])), bw=W/all.length;
+  let s='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">';
+  all.forEach(([k,n],i)=>{
+    const h=max?(n/max)*(H-pad-4):0;
+    s+='<rect class="bar" data-day="'+k+'" x="'+(i*bw+0.5)+'" y="'+(H-pad-h)+'" width="'+Math.max(1,bw-1)+'" height="'+h+'"><title>'+k+": "+fmt(n)+'</title></rect>';
+  });
+  s+='</svg><div class="axis"><span>'+all[0][0]+'</span><span>'+all[all.length-1][0]+'</span></div>';
+  box.innerHTML=s;
+  document.getElementById("dayhint").textContent="peak "+fmt(max)+" · click a day to pick it";
+  box.querySelectorAll(".bar").forEach(b=>b.onclick=()=>{ F.elements.from.value=F.elements.to.value=b.dataset.day; OFFSET=0; run(); });
+}
+function drawFacet(id,items,field){
+  const box=document.getElementById(id);
+  box.innerHTML=items.length?items.map(([k,n])=>'<div class="facet" data-v="'+esc(k)+'"><span class="k">'+
+    esc(k||"(none)")+'</span><span class="n">'+fmt(n)+'</span></div>').join(""):'<div class="empty">–</div>';
+  box.querySelectorAll(".facet").forEach(el=>el.onclick=()=>setField(field,el.dataset.v));
+}
+
+function render(d){
+  const st=document.getElementById("status");
+  if(d.error){ st.innerHTML='<span class="err">'+esc(d.error)+'</span>';
+    document.getElementById("rows").innerHTML='<tr><td colspan="5" class="empty err">'+esc(d.error)+'</td></tr>'; return; }
+  LAST=d;
+  st.textContent=d.span.first?"archive "+utc(d.span.first).slice(0,10)+" → "+utc(d.span.last).slice(0,10):"empty database";
+  document.getElementById("total").textContent=fmt(d.total)+(d.total===1?" message":" messages");
+  document.getElementById("range").textContent=d.filters.hb?"heartbeats included":"heartbeats hidden";
+  drawDays(d.days); drawFacet("labels",d.labels,"lbl"); drawFacet("aircraft",d.aircraft,"ac");
+  const dl=document.getElementById("lbls");
+  if(!dl.children.length) dl.innerHTML=d.labels.map(([k])=>'<option value="'+esc(k)+'">').join("");
+  const q=d.filters.q;
+  document.getElementById("rows").innerHTML=d.rows.length?d.rows.map(r=>{
+    const reg=(r.reg||"").replace(/^\./,"");
+    const badges=(r.cpdlc?'<span class="badge cp">CPDLC</span>':"")+(r.adsc?'<span class="badge ad">ADS-C</span>':"");
+    return '<tr><td class="ts">'+utc(r.t)+'</td><td class="reg">'+
+      (reg?'<a href="/graph#aircraft='+encodeURIComponent(reg)+'" title="aircraft history">'+esc(reg)+'</a>':'–')+
+      (r.flt?'<div class="flt">'+esc(r.flt)+'</div>':'')+'</td><td><span class="dir '+esc(r.dir)+'">'+esc(r.dir)+
+      '</span></td><td class="lbl">'+esc(r.lbl)+badges+'</td><td class="txt">'+textCell(r,q)+'</td></tr>';
+  }).join(""):'<tr><td colspan="5" class="empty">No messages match. Try fewer filters, or include heartbeats.</td></tr>';
+  document.querySelectorAll("td.txt .more").forEach(m=>m.onclick=()=>{
+    const td=m.closest("td"); td.querySelector(".short").hidden=true; td.querySelector(".full").hidden=false; });
+  const a=d.total?d.offset+1:0, b=Math.min(d.offset+d.rows.length,d.total);
+  document.getElementById("pageinfo").textContent=d.total?fmt(a)+"–"+fmt(b)+" of "+fmt(d.total):"";
+  const newest=d.sort!=="oldest";
+  document.getElementById("prev").textContent=newest?"‹ Newer":"‹ Older";
+  document.getElementById("next").textContent=newest?"Older ›":"Newer ›";
+  document.getElementById("prev").disabled=d.offset<=0;
+  document.getElementById("next").disabled=b>=d.total;
+}
+
+async function run(){
+  const p=params();
+  history.replaceState(null,"",p.toString()?"?"+p:location.pathname);
+  document.getElementById("csv").href="/api/search.csv?"+p;
+  p.set("offset",OFFSET); p.set("limit",PAGE);
+  const seq=++SEQ;
+  document.getElementById("status").textContent="searching…";
+  try{
+    const r=await fetch("/api/search?"+p), d=await r.json();
+    if(seq===SEQ) render(d);
+  }catch(e){ if(seq===SEQ) render({error:"request failed: "+e}); }
+}
+
+F.addEventListener("submit",e=>{ e.preventDefault(); OFFSET=0; run(); });
+for(const n of ["dir","kind","sort","from","to","hb"]) F.elements[n].addEventListener("change",()=>{ OFFSET=0; run(); });
+document.getElementById("reset").onclick=()=>{ fill(new URLSearchParams()); OFFSET=0; run(); };
+document.getElementById("prev").onclick=()=>{ OFFSET=Math.max(0,OFFSET-PAGE); run(); window.scrollTo(0,0); };
+document.getElementById("next").onclick=()=>{ OFFSET+=PAGE; run(); window.scrollTo(0,0); };
+document.querySelectorAll(".quick button").forEach(b=>b.onclick=()=>{
+  const now=new Date(), wk=new Date(now.getTime()-6*86400000);
+  const q=b.dataset.q.replace(/@today/g,day(now)).replace(/@week/g,day(wk));
+  fill(new URLSearchParams(q)); OFFSET=0; run();
+});
+fill(new URLSearchParams(location.search));
+run();
 </script>
 </body></html>
 """
