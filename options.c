@@ -100,6 +100,7 @@ extern int bias_tee;
 extern int use_gpu;
 extern int stall_exit_s;
 extern int full_burst_window;
+extern int legacy_frontend;
 extern int simd_mode;
 extern int use_chase;
 extern char *save_bursts_dir;
@@ -199,6 +200,8 @@ static void usage(int exitcode) {
 "    --no-gpu                disable GPU acceleration (use CPU FFTW)\n"
 "    --full-burst-window     demodulate each burst's whole 16 ms hold-open tail,\n"
 "                             as gr-iridium does (default: cut it to the frame)\n"
+"    --legacy-frontend       shift and decimate each burst on its own in the\n"
+"                             downmix (default: one shared overlap-save FFT)\n"
 "    --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar\n"
 "    --no-simd               alias for --simd=scalar\n"
 "    --workers=N             downmix worker threads (1-32, default: auto from CPU cores)\n"
@@ -340,6 +343,7 @@ void parse_options(int argc, char **argv) {
         OPT_LIST,
         OPT_NO_GPU,
         OPT_FULL_BURST_WINDOW,
+        OPT_LEGACY_FRONTEND,
         OPT_NO_SIMD,
         OPT_SIMD,
         OPT_CHASE,
@@ -408,6 +412,7 @@ void parse_options(int argc, char **argv) {
         { "soapy-gain",     required_argument, NULL, OPT_SOAPY_GAIN },
         { "no-gpu",         no_argument,       NULL, OPT_NO_GPU },
         { "full-burst-window", no_argument,    NULL, OPT_FULL_BURST_WINDOW },
+        { "legacy-frontend", no_argument,      NULL, OPT_LEGACY_FRONTEND },
         { "no-simd",        no_argument,       NULL, OPT_NO_SIMD },
         { "simd",           required_argument, NULL, OPT_SIMD },
         { "chase",          optional_argument, NULL, OPT_CHASE },
@@ -617,6 +622,7 @@ void parse_options(int argc, char **argv) {
 #endif
             case OPT_NO_GPU:      use_gpu = 0;                       break;
             case OPT_FULL_BURST_WINDOW: full_burst_window = 1;       break;
+            case OPT_LEGACY_FRONTEND: legacy_frontend = 1;           break;
             case OPT_NO_SIMD:     simd_mode = SIMD_SCALAR;           break;
             case OPT_SIMD:
                 if (strcmp(optarg, "auto") == 0)

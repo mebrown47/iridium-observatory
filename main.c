@@ -177,6 +177,7 @@ int gsmtap_port = GSMTAP_DEFAULT_PORT;
 /* GPU acceleration: enabled by default, loaded via dlopen plugin at runtime */
 int use_gpu = 1;
 int full_burst_window = 0;  /* --full-burst-window */
+int legacy_frontend = 0;    /* --legacy-frontend */
 
 int simd_mode = 0;  /* SIMD_AUTO */
 char *save_bursts_dir = NULL;
@@ -1481,6 +1482,10 @@ int main(int argc, char **argv) {
         .history_size = IR_DEFAULT_HISTORY_SIZE,
         .use_gpu = use_gpu,
         .full_window = full_burst_window,
+        /* Must match the downmix's output rate (dm_config leaves it at the
+         * default); the downmix drops bursts decimated to another rate. */
+        .output_rate = legacy_frontend ? 0
+                       : IR_DEFAULT_SPS * IR_SYMBOLS_PER_SECOND,
     };
     burst_detector_t *det = burst_detector_create(&det_config);
     global_detector = det;

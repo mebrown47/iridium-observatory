@@ -165,6 +165,7 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/burst_downmix.c
     ${PROJECT_SOURCE_DIR}/qpsk_demod.c
     ${PROJECT_SOURCE_DIR}/fir_filter.c
+    ${PROJECT_SOURCE_DIR}/os_chan.c
     ${PROJECT_SOURCE_DIR}/frame_output.c
     ${PROJECT_SOURCE_DIR}/bits_parser.c
     ${PROJECT_SOURCE_DIR}/tk_rs.c
