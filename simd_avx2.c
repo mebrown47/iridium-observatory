@@ -31,7 +31,24 @@ void avx2_fir_ccf(const float *taps, int ntaps,
     float *outp = (float *)out;
 
     int i = 0;
-    /* Process 4 complex outputs per iteration */
+    /* 16 complex outputs per iteration as four independent vectors of 4
+     * (see avx2_fir_fff); same per-output summation order as before. */
+    for (; i + 15 < n; i += 16) {
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        for (int k = 0; k < ntaps; k++) {
+            __m256 coeff = _mm256_set1_ps(taps[k]);
+            const float *p = &inp[(i + k) * 2];
+            a0 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(p),      a0);
+            a1 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(p + 8),  a1);
+            a2 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(p + 16), a2);
+            a3 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(p + 24), a3);
+        }
+        _mm256_storeu_ps(&outp[i * 2],      a0);
+        _mm256_storeu_ps(&outp[i * 2 + 8],  a1);
+        _mm256_storeu_ps(&outp[i * 2 + 16], a2);
+        _mm256_storeu_ps(&outp[i * 2 + 24], a3);
+    }
     for (; i + 3 < n; i += 4) {
         __m256 acc = _mm256_setzero_ps();
         for (int k = 0; k < ntaps; k++) {
@@ -237,7 +254,25 @@ void avx2_rotate(const float complex *in, float complex *out, int n,
 void avx2_fir_fff(const float *taps, int ntaps,
                    const float *in, float *out, int n) {
     int i = 0;
-    /* Process 8 outputs per iteration */
+    /* 32 outputs per iteration as four independent vectors of 8: one vector
+     * alone makes every FMA wait for the last (latency ~4 cycles against
+     * two issued per cycle). Each output's sum runs in the same order as
+     * before, so results are unchanged. */
+    for (; i + 31 < n; i += 32) {
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        for (int k = 0; k < ntaps; k++) {
+            __m256 coeff = _mm256_set1_ps(taps[k]);
+            a0 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(&in[i + k]),      a0);
+            a1 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(&in[i + k + 8]),  a1);
+            a2 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(&in[i + k + 16]), a2);
+            a3 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(&in[i + k + 24]), a3);
+        }
+        _mm256_storeu_ps(&out[i],      a0);
+        _mm256_storeu_ps(&out[i + 8],  a1);
+        _mm256_storeu_ps(&out[i + 16], a2);
+        _mm256_storeu_ps(&out[i + 24], a3);
+    }
     for (; i + 7 < n; i += 8) {
         __m256 acc = _mm256_setzero_ps();
         for (int k = 0; k < ntaps; k++) {

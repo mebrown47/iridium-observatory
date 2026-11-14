@@ -45,6 +45,25 @@ void neon_fir_ccf(const float *taps, int ntaps,
     float *outp = (float *)out;
     int i = 0;
 
+    /* 8 complex outputs per iteration as four independent vectors: one
+     * vector alone makes every FMA wait for the previous one's result.
+     * Per-output summation order is unchanged, so results are too. */
+    for (; i + 7 < n; i += 8) {
+        float32x4_t a0 = vdupq_n_f32(0.0f), a1 = vdupq_n_f32(0.0f);
+        float32x4_t a2 = vdupq_n_f32(0.0f), a3 = vdupq_n_f32(0.0f);
+        for (int k = 0; k < ntaps; k++) {
+            float32x4_t coeff = vdupq_n_f32(taps[k]);
+            const float *p = &inp[(i + k) * 2];
+            a0 = vfmaq_f32(a0, coeff, vld1q_f32(p));
+            a1 = vfmaq_f32(a1, coeff, vld1q_f32(p + 4));
+            a2 = vfmaq_f32(a2, coeff, vld1q_f32(p + 8));
+            a3 = vfmaq_f32(a3, coeff, vld1q_f32(p + 12));
+        }
+        vst1q_f32(&outp[i * 2],      a0);
+        vst1q_f32(&outp[i * 2 + 4],  a1);
+        vst1q_f32(&outp[i * 2 + 8],  a2);
+        vst1q_f32(&outp[i * 2 + 12], a3);
+    }
     for (; i + 1 < n; i += 2) {
         float32x4_t acc = vdupq_n_f32(0.0f);
         for (int k = 0; k < ntaps; k++) {
@@ -135,6 +154,23 @@ void neon_fir_fff(const float *taps, int ntaps,
                   const float *in, float *out, int n) {
     int i = 0;
 
+    /* 16 outputs per iteration as four independent vectors (see
+     * neon_fir_ccf); same per-output summation order. */
+    for (; i + 15 < n; i += 16) {
+        float32x4_t a0 = vdupq_n_f32(0.0f), a1 = vdupq_n_f32(0.0f);
+        float32x4_t a2 = vdupq_n_f32(0.0f), a3 = vdupq_n_f32(0.0f);
+        for (int k = 0; k < ntaps; k++) {
+            float32x4_t coeff = vdupq_n_f32(taps[k]);
+            a0 = vfmaq_f32(a0, coeff, vld1q_f32(&in[i + k]));
+            a1 = vfmaq_f32(a1, coeff, vld1q_f32(&in[i + k + 4]));
+            a2 = vfmaq_f32(a2, coeff, vld1q_f32(&in[i + k + 8]));
+            a3 = vfmaq_f32(a3, coeff, vld1q_f32(&in[i + k + 12]));
+        }
+        vst1q_f32(&out[i],      a0);
+        vst1q_f32(&out[i + 4],  a1);
+        vst1q_f32(&out[i + 8],  a2);
+        vst1q_f32(&out[i + 12], a3);
+    }
     for (; i + 3 < n; i += 4) {
         float32x4_t acc = vdupq_n_f32(0.0f);
         for (int k = 0; k < ntaps; k++) {
