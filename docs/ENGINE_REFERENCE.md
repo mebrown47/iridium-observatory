@@ -74,6 +74,8 @@ CMake output shows what was detected:
 
 **A Raspberry Pi 4 is not supported.** On a Pi 4 (4 GB) with an Airspy R2 at 10 MS/s the receiver used all four cores, its frame clock fell almost four hours behind real time, memory grew to 3 GB plus swap, and few bursts decoded into messages. Burst detection and downmixing over the full band are the cost; the Pi 5 is the smallest ARM board that keeps up. The installer warns and asks before continuing on a Pi 4 or older.
 
+`--sync-gate=0.2` saves CPU on boxes that are short of it. Most burst detections are false positives that the demodulator rejects after doing all its work; the gate stops downlink bursts with no unique word in their sync correlation before the demodulator runs. On a 30-minute recording with an Airspy R2 at 10 MS/s it gated 43% of detections and cut total CPU by 4.3%, for 0.01-0.02% of decodable frames (marginal ones, around 50% confidence) and no lost ACARS or pager messages. Higher thresholds save little more (the saving levels off near 7%) and cost real frames at a fast-rising rate; stay at or below 0.25. Uplink bursts are never gated. Off by default so that decoding matches upstream.
+
 The downmix worker count auto-scales based on CPU cores: 4 workers on 8+ cores, 2 on 4 cores, 1 on 2 cores. On low-power CPUs like the Intel N100 (4 cores), this prevents 100% CPU saturation that occurs when 4 workers compete for 4 cores. Override with `--workers=N` if needed.
 
 The Pi 5's VideoCore VII GPU passes basic Vulkan compute tests but cannot sustain the throughput needed for real-time FFT batch processing. Build CPU-only and use `--no-gpu`:
@@ -929,6 +931,10 @@ Output options:
     --save-bursts=DIR       save IQ samples of decoded bursts to directory
     --diagnostic            setup verification mode (suppresses RAW output)
     --no-gardner           disable Gardner timing recovery (enabled by default)
+    --sync-gate=T          skip demodulating downlink bursts whose normalised
+                           sync correlation is below T (0..1): most detector
+                           false positives score < 0.3, real bursts ~0.9
+                           (default 0 = off; 0.2 is conservative)
     --uw-reject=T          drop UW-fail bursts with sync score < T as false
                            positives (default 0.70; 0 disables). Does not
                            affect decoding, only the UW-fail count.
@@ -994,6 +1000,7 @@ Everything else above is inherited from iridium-sniffer.
 | `--airspy-sensitivity`, `--airspy-linearity`, `--airspy-lna`, `--airspy-mixer`, `--airspy-vga`, `--airspy-no-packing` | Native Airspy R2 / Mini gain and transfer settings; `-i airspy-SERIAL` selects the radio |
 | `--archive[=DIR]` | Append-only daily JSONL archive of frame-type counts and decoded messages, read by the Observatory |
 | `--uw-reject=T` | Drop burst-detector false positives by unique-word sync score (default 0.70) |
+| `--sync-gate=T` | Off by default. Skip demodulating downlink bursts whose sync correlation is below T; saves CPU on false positives at a small cost in marginal frames (see Low-Power Hardware) |
 | `--file-start=TIME` | Time of a recording's first sample, so frame times follow the recording's clock |
 | `--parsed=full` | Every frame as iridium-parser.py prints it (native port) |
 | `--reassemble=MODE[,ARG,...]` | Reassemble as iridium-toolkit's reassembler.py does (ida, sbd, acars) |
