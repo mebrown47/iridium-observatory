@@ -187,6 +187,7 @@ int use_gardner = 1;
  * Calibrated offline (tests/uw_replay.c): 0.70 keeps 100% of real DL bursts
  * while removing ~73% of false positives. 0 disables the filter. */
 float uw_reject_threshold = 0.70f;
+float sync_gate_threshold = 0.0f;   /* --sync-gate: 0 = off */
 int parsed_mode = 0;
 int reassemble_mode = 0;
 int parse_harder = 0;
@@ -336,6 +337,7 @@ atomic_ulong stat_n_dropped = 0;
 atomic_ulong stat_n_frame_drops = 0;
 atomic_ulong stat_n_output_drops = 0;
 atomic_ulong stat_n_uw_reject = 0;   /* weak-sync false positives filtered out */
+atomic_ulong stat_n_sync_gated = 0;  /* stopped by --sync-gate before demod */
 atomic_ulong stat_sample_count = 0;
 
 /* Global detector pointer for diagnostic stats (set by detector thread) */
@@ -1145,6 +1147,9 @@ static void *stats_thread_fn(void *arg) {
                 unsigned long rej = atomic_load(&stat_n_uw_reject);
                 if (rej > 0)
                     fprintf(stderr, " | rej: %lu", rej);
+                unsigned long gated = atomic_load(&stat_n_sync_gated);
+                if (gated > 0)
+                    fprintf(stderr, " | gate: %lu", gated);
             }
             fprintf(stderr, "\n");
         }

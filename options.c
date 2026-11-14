@@ -113,6 +113,7 @@ extern int gsmtap_port;
 extern int diagnostic_mode;
 extern int use_gardner;
 extern float uw_reject_threshold;
+extern float sync_gate_threshold;
 extern int parsed_mode;
 extern char *replay_raw_path;
 extern int reassemble_mode;
@@ -234,6 +235,10 @@ static void usage(int exitcode) {
 "    --save-bursts=DIR       save IQ samples of decoded bursts to directory\n"
 "    --diagnostic            setup verification mode (suppresses RAW output)\n"
 "    --no-gardner           disable Gardner timing recovery (enabled by default)\n"
+"    --sync-gate=T          skip demodulating downlink bursts whose normalised\n"
+"                           sync correlation is below T (0..1): most detector\n"
+"                           false positives score < 0.3, real bursts ~0.9\n"
+"                           (default 0 = off; 0.2 is conservative)\n"
 "    --uw-reject=T          drop UW-fail bursts with sync score < T as false\n"
 "                           positives (default 0.70; 0 disables). Does not\n"
 "                           affect decoding, only the UW-fail count.\n"
@@ -351,6 +356,7 @@ void parse_options(int argc, char **argv) {
         OPT_GARDNER,
         OPT_NO_GARDNER,
         OPT_UW_REJECT,
+        OPT_SYNC_GATE,
         OPT_PARSED,
         OPT_REPLAY_RAW,
         OPT_REASSEMBLE,
@@ -419,6 +425,7 @@ void parse_options(int argc, char **argv) {
         { "gardner",        no_argument,       NULL, OPT_GARDNER },
         { "no-gardner",     no_argument,       NULL, OPT_NO_GARDNER },
         { "uw-reject",      required_argument, NULL, OPT_UW_REJECT },
+        { "sync-gate",      required_argument, NULL, OPT_SYNC_GATE },
         { "parsed",         optional_argument, NULL, OPT_PARSED },
         { "replay-raw",     required_argument, NULL, OPT_REPLAY_RAW },
         { "reassemble",     required_argument, NULL, OPT_REASSEMBLE },
@@ -677,6 +684,12 @@ void parse_options(int argc, char **argv) {
 
             case OPT_NO_GARDNER:
                 use_gardner = 0;
+                break;
+
+            case OPT_SYNC_GATE:
+                sync_gate_threshold = (float)atof(optarg);
+                if (sync_gate_threshold < 0.0f) sync_gate_threshold = 0.0f;
+                if (sync_gate_threshold > 1.0f) sync_gate_threshold = 1.0f;
                 break;
 
             case OPT_UW_REJECT:
