@@ -46,6 +46,7 @@
 #endif
 
 #include "sdr.h"
+#include "airspy_conv.h"
 #include "iridium.h"
 #include "burst_detect.h"
 #include "burst_downmix.h"
@@ -104,6 +105,7 @@ typedef enum {
     FMT_CI8 = 0,   /* interleaved int8 (default, SDR native) */
     FMT_CI16,       /* interleaved int16 */
     FMT_CF32,       /* interleaved float32 */
+    FMT_U16R,       /* raw Airspy real samples (uint16, 2x rate) */
 } iq_format_t;
 
 /* ---- Global configuration ---- */
@@ -165,6 +167,7 @@ int airspy_vga_gain = -1;
 int airspy_linearity_gain = -1;
 int airspy_sensitivity_gain = 12;
 int airspy_packing = 1;
+int airspy_libiq = 0;       /* --airspy-libiq: libairspy's FLOAT32_IQ */
 int bias_tee = 0;
 int web_enabled = 0;
 int web_port = 8888;
@@ -376,6 +379,8 @@ static inline int8_t clamp8(float v) {
 static void *spewer_thread(void *arg) {
     FILE *f = (FILE *)arg;
     size_t block = 32768;  /* samples per read (each sample = I + Q) */
+    airspy_conv_t *u16_conv = NULL;    /* FMT_U16R */
+    uint16_t *u16_buf = NULL;
     int first_block = 1;   /* carries --file-start, like a hardware timestamp */
 
     while (running) {
@@ -413,6 +418,21 @@ static void *spewer_thread(void *arg) {
             break;
         }
 
+        case FMT_U16R: {
+            /* Raw Airspy real samples: 2 per IQ sample, converted exactly as
+             * the live Airspy path does (airspy_conv.c) */
+            if (!u16_conv)
+                u16_conv = airspy_conv_create();
+            s = malloc(sizeof(*s) + block * 8);
+            s->format = SAMPLE_FMT_FLOAT;
+            if (!u16_buf)
+                u16_buf = malloc(block * 2 * sizeof(uint16_t));
+            size_t got = fread(u16_buf, sizeof(uint16_t), block * 2, f);
+            r = airspy_conv_process(u16_conv, u16_buf, got & ~(size_t)1,
+                                    (float complex *)s->samples);
+            break;
+        }
+
         default:
             s = malloc(sizeof(*s));
             s->format = SAMPLE_FMT_INT8;
@@ -432,6 +452,9 @@ static void *spewer_thread(void *arg) {
             break;
         }
     }
+
+    airspy_conv_destroy(u16_conv);
+    free(u16_buf);
 
     /* Wait for queue to drain */
     while (running && samples_queue.queue_size > 0)

@@ -48,6 +48,7 @@ typedef enum {
     FMT_CI8 = 0,
     FMT_CI16,
     FMT_CF32,
+    FMT_U16R,
 } iq_format_t;
 
 extern double samp_rate;
@@ -72,6 +73,7 @@ extern char *airspy_serial;
 extern int airspy_selected;
 extern int airspy_lna_gain, airspy_mixer_gain, airspy_vga_gain;
 extern int airspy_linearity_gain, airspy_sensitivity_gain, airspy_packing;
+extern int airspy_libiq;
 #endif
 #ifdef HAVE_SOAPYSDR
 extern int soapy_num;
@@ -161,7 +163,9 @@ static void usage(int exitcode) {
 "Input (one required):\n"
 "    -f, --file=FILE         read IQ samples from file\n"
 "    -l, --live              capture live from SDR (implied by -i)\n"
-"    --format=FMT            IQ file format: ci8 (default), ci16, cf32\n"
+"    --format=FMT            IQ file format: ci8 (default), ci16, cf32, or u16r\n"
+"                             (raw Airspy real samples, airspy_rx -t 4, at twice\n"
+"                             the -r rate; converted to IQ as live)\n"
 "\n"
 "SDR options:\n"
 "    -i, --interface=IFACE   SDR to use (see --list for available devices):\n"
@@ -185,6 +189,8 @@ static void usage(int exitcode) {
 "    --airspy-sensitivity=N  Airspy R2/Mini sensitivity preset 0-21 (default: 12)\n"
 "    --airspy-linearity=N    Airspy linearity preset 0-21, for strong nearby signals\n"
 "                             (overrides sensitivity)\n"
+"    --airspy-libiq          let libairspy convert to IQ (default: our own\n"
+"                             SIMD converter, which is several times faster)\n"
 "    --airspy-lna=N --airspy-mixer=N --airspy-vga=N\n"
 "                             Airspy manual stage gains 0-15 (override both presets)\n"
 "    --soapy-gain-element=NAME:VAL  set SoapySDR per-element gain (repeatable)\n"
@@ -376,6 +382,7 @@ void parse_options(int argc, char **argv) {
         OPT_AIRSPY_LINEARITY,
         OPT_AIRSPY_SENSITIVITY,
         OPT_AIRSPY_NO_PACKING,
+        OPT_AIRSPY_LIBIQ,
         OPT_VITA49,
         OPT_BASESTATION,
         OPT_BASESTATION_BEAM,
@@ -444,6 +451,7 @@ void parse_options(int argc, char **argv) {
         { "airspy-linearity",   required_argument, NULL, OPT_AIRSPY_LINEARITY },
         { "airspy-sensitivity", required_argument, NULL, OPT_AIRSPY_SENSITIVITY },
         { "airspy-no-packing",  no_argument,   NULL, OPT_AIRSPY_NO_PACKING },
+        { "airspy-libiq",       no_argument,   NULL, OPT_AIRSPY_LIBIQ },
         { "vita49",         optional_argument, NULL, OPT_VITA49 },
         { "basestation",    optional_argument, NULL, OPT_BASESTATION },
         { "basestation-beam", no_argument,     NULL, OPT_BASESTATION_BEAM },
@@ -592,8 +600,10 @@ void parse_options(int argc, char **argv) {
                     iq_format = FMT_CI16;
                 else if (strcmp(optarg, "cf32") == 0)
                     iq_format = FMT_CF32;
+                else if (strcmp(optarg, "u16r") == 0)
+                    iq_format = FMT_U16R;
                 else
-                    errx(1, "Unknown format '%s'. Use ci8, ci16, or cf32.", optarg);
+                    errx(1, "Unknown format '%s'. Use ci8, ci16, cf32 or u16r.", optarg);
                 break;
 
             case OPT_LIST:
@@ -614,6 +624,7 @@ void parse_options(int argc, char **argv) {
             case OPT_AIRSPY_LINEARITY:   airspy_linearity_gain = atoi(optarg);   break;
             case OPT_AIRSPY_SENSITIVITY: airspy_sensitivity_gain = atoi(optarg); break;
             case OPT_AIRSPY_NO_PACKING:  airspy_packing = 0;         break;
+            case OPT_AIRSPY_LIBIQ:       airspy_libiq = 1;           break;
 #endif
             case OPT_NO_GPU:      use_gpu = 0;                       break;
             case OPT_FULL_BURST_WINDOW: full_burst_window = 1;       break;

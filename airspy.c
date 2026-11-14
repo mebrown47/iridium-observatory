@@ -20,6 +20,7 @@
 #include <libairspy/airspy.h>
 
 #include "sdr.h"
+#include "airspy_conv.h"
 
 extern double samp_rate;
 extern double center_freq;
@@ -32,6 +33,11 @@ extern int airspy_vga_gain;
 extern int airspy_linearity_gain;
 extern int airspy_sensitivity_gain;
 extern int airspy_packing;
+extern int airspy_libiq;
+
+/* Our own real-to-IQ conversion (airspy_conv.c) unless --airspy-libiq.
+ * Only touched from libairspy's callback thread once streaming. */
+static airspy_conv_t *airspy_conv = NULL;
 extern int bias_tee;
 
 /* Reported once rather than per callback: at 10 MSPS a stuck consumer would
@@ -92,7 +98,15 @@ struct airspy_device *airspy_setup(void) {
     /* Before set_samplerate, which is the order airspy_rx.c uses and not
      * merely a convention: the sample type selects the conversion path the
      * rate is then applied to. */
-    if ((r = airspy_set_sample_type(dev, AIRSPY_SAMPLE_FLOAT32_IQ)) != AIRSPY_SUCCESS)
+    /* UINT16_REAL: the raw 12-bit samples at twice the IQ rate (unpacked by
+     * libairspy when packing is on), converted to IQ in airspy_rx_cb by
+     * airspy_conv. libairspy's own FLOAT32_IQ conversion cost several times
+     * as much CPU; --airspy-libiq keeps it. */
+    if (!airspy_libiq)
+        airspy_conv = airspy_conv_create();
+    if ((r = airspy_set_sample_type(dev, airspy_libiq ? AIRSPY_SAMPLE_FLOAT32_IQ
+                                                      : AIRSPY_SAMPLE_UINT16_REAL))
+        != AIRSPY_SUCCESS)
         errx(1, "Unable to set Airspy sample type: %s", airspy_error_name(r));
 
     /* set_samplerate takes either an index into the board's list or a value
@@ -187,16 +201,25 @@ int airspy_rx_cb(airspy_transfer *t) {
         }
     }
 
-    /* FLOAT32_IQ: sample_count counts IQ pairs, and samples is a float*
-     * holding 2 per pair. sample_buf_t::num is likewise pairs, matching
-     * hackrf_rx_cb. */
-    bytes = (size_t)t->sample_count * 2 * sizeof(float);
-    if ((s = malloc(sizeof(*s) + bytes)) == NULL)
-        return 0;                       /* drop this block, keep streaming */
+    if (airspy_conv) {
+        /* UINT16_REAL: sample_count counts real samples, two per IQ pair */
+        size_t pairs = (size_t)t->sample_count / 2;
+        if ((s = malloc(sizeof(*s) + pairs * 2 * sizeof(float))) == NULL)
+            return 0;
+        s->num = airspy_conv_process(airspy_conv, (const uint16_t *)t->samples,
+                                     pairs * 2, (float complex *)s->samples);
+    } else {
+        /* FLOAT32_IQ: sample_count counts IQ pairs, and samples is a float*
+         * holding 2 per pair. sample_buf_t::num is likewise pairs, matching
+         * hackrf_rx_cb. */
+        bytes = (size_t)t->sample_count * 2 * sizeof(float);
+        if ((s = malloc(sizeof(*s) + bytes)) == NULL)
+            return 0;                       /* drop this block, keep streaming */
+        s->num = t->sample_count;
+        memcpy(s->samples, t->samples, bytes);
+    }
     s->format = SAMPLE_FMT_FLOAT;
     s->hw_timestamp_ns = 0;
-    s->num = t->sample_count;
-    memcpy(s->samples, t->samples, bytes);
 
     if (running)
         push_samples(s);
