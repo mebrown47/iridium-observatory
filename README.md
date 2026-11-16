@@ -7,9 +7,10 @@ worked out from the satellites alone, typically to within a few km. It keeps a d
 long-run dashboards, and it can feed aircraft messages and positions to aggregators
 such as airframes.io.
 
-> **Latest release: [v1.1](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.1)** (13 November 2026).
-> Already installed? Run `./install.sh --update`: installs from before v1.1 decode far
-> fewer uplink (aircraft and handset to satellite) messages.
+> **Latest release: [v1.2](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.2)** (15 November 2026).
+> Already installed? Run `./install.sh --update`: v1.2 does the same decoding for about a
+> quarter of the CPU, and installs from before v1.1 decode far fewer uplink (aircraft and
+> handset to satellite) messages.
 
 It is a fork of [iridium-sniffer](https://github.com/alphafox02/iridium-sniffer) and keeps
 that project's receiver engine at its core. [How it differs](#how-it-differs-from-iridium-sniffer)
@@ -193,8 +194,8 @@ and port status, the live pages' state, and recent logs, into one file. The repo
 includes your settings and estimated location, so check it before posting it publicly.
 
 **Which version am I running?** It's at the foot of every page, and
-`iridium-sniffer --version` prints it. A release shows as `v1.1`; a build from later
-commits on main shows as, for example, `v1.1-3-g4f31b44` (3 commits after v1.1).
+`iridium-sniffer --version` prints it. A release shows as `v1.2`; a build from later
+commits on main shows as, for example, `v1.2-3-g1a2b3c4` (3 commits after v1.2).
 
 **No satellites on the Doppler page: "TLE download failed".** The Observatory needs orbit
 data (TLEs) from CelesTrak about once a day. It asks at most once every 2 hours, and after

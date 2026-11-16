@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.9)
 # The release version: bump it with each release tag. Builds from a git
 # checkout report `git describe` instead (cmake/version.cmake).
-project(iridium-sniffer VERSION 1.1 LANGUAGES C)
+project(iridium-sniffer VERSION 1.2 LANGUAGES C)
 
 set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/Modules" ${CMAKE_MODULE_PATH})
 
