@@ -32,7 +32,25 @@ void sse42_fir_ccf(const float *taps, int ntaps,
     float *outp = (float *)out;
 
     int i = 0;
-    /* Process 2 complex outputs per iteration */
+    /* 8 complex outputs per iteration as four independent vectors: one
+     * vector alone makes every add wait for the previous one. Per-output
+     * summation order is unchanged, so results are too. */
+    for (; i + 7 < n; i += 8) {
+        __m128 a0 = _mm_setzero_ps(), a1 = _mm_setzero_ps();
+        __m128 a2 = _mm_setzero_ps(), a3 = _mm_setzero_ps();
+        for (int k = 0; k < ntaps; k++) {
+            __m128 coeff = _mm_set1_ps(taps[k]);
+            const float *p = &inp[(i + k) * 2];
+            a0 = _mm_add_ps(a0, _mm_mul_ps(coeff, _mm_loadu_ps(p)));
+            a1 = _mm_add_ps(a1, _mm_mul_ps(coeff, _mm_loadu_ps(p + 4)));
+            a2 = _mm_add_ps(a2, _mm_mul_ps(coeff, _mm_loadu_ps(p + 8)));
+            a3 = _mm_add_ps(a3, _mm_mul_ps(coeff, _mm_loadu_ps(p + 12)));
+        }
+        _mm_storeu_ps(&outp[i * 2],      a0);
+        _mm_storeu_ps(&outp[i * 2 + 4],  a1);
+        _mm_storeu_ps(&outp[i * 2 + 8],  a2);
+        _mm_storeu_ps(&outp[i * 2 + 12], a3);
+    }
     for (; i + 1 < n; i += 2) {
         __m128 acc = _mm_setzero_ps();
         for (int k = 0; k < ntaps; k++) {
@@ -108,7 +126,23 @@ void sse42_fir_ccf_dec(const float *taps, int ntaps,
 void sse42_fir_fff(const float *taps, int ntaps,
                    const float *in, float *out, int n) {
     int i = 0;
-    /* Process 4 outputs per iteration */
+    /* 16 outputs per iteration as four independent vectors (see
+     * sse42_fir_ccf); same per-output summation order. */
+    for (; i + 15 < n; i += 16) {
+        __m128 a0 = _mm_setzero_ps(), a1 = _mm_setzero_ps();
+        __m128 a2 = _mm_setzero_ps(), a3 = _mm_setzero_ps();
+        for (int k = 0; k < ntaps; k++) {
+            __m128 coeff = _mm_set1_ps(taps[k]);
+            a0 = _mm_add_ps(a0, _mm_mul_ps(coeff, _mm_loadu_ps(&in[i + k])));
+            a1 = _mm_add_ps(a1, _mm_mul_ps(coeff, _mm_loadu_ps(&in[i + k + 4])));
+            a2 = _mm_add_ps(a2, _mm_mul_ps(coeff, _mm_loadu_ps(&in[i + k + 8])));
+            a3 = _mm_add_ps(a3, _mm_mul_ps(coeff, _mm_loadu_ps(&in[i + k + 12])));
+        }
+        _mm_storeu_ps(&out[i],      a0);
+        _mm_storeu_ps(&out[i + 4],  a1);
+        _mm_storeu_ps(&out[i + 8],  a2);
+        _mm_storeu_ps(&out[i + 12], a3);
+    }
     for (; i + 3 < n; i += 4) {
         __m128 acc = _mm_setzero_ps();
         for (int k = 0; k < ntaps; k++) {

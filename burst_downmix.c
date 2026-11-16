@@ -72,8 +72,11 @@ struct _burst_downmix {
     float samples_per_symbol;
 
     /* Filters */
-    fir_filter_t *input_fir;    /* anti-alias LPF for decimation */
-    int input_fir_rate;         /* input rate input_fir was designed for */
+    fir_filter_t *input_fir;    /* anti-alias LPF for decimation (stage 1) */
+    fir_filter_t *input_fir2;   /* stage 2 of a two-stage decimation, or NULL */
+    int input_fir_rate;         /* input rate the input filters were designed for */
+    int input_decimation;       /* total integer decimation */
+    int input_dec1;             /* stage 1 factor (== input_decimation if single) */
     fir_filter_t *noise_fir;    /* noise-limiting LPF after decimation */
     fir_filter_t *start_fir;    /* magnitude smoothing */
     fir_filter_t *rrc_fir;      /* root-raised-cosine matched filter */
@@ -113,6 +116,7 @@ struct _burst_downmix {
     float complex *work_b;
     float complex *dec_save;     /* decimated burst, kept for a late-sync retry */
     float complex *work_frac;   /* intermediate for fractional-rate inputs */
+    float complex *work_mid;    /* stage 1 output of a two-stage decimation */
     float *mag_f;
     float *mag_filtered_f;
     int work_size;
@@ -233,6 +237,8 @@ static void generate_sync_word(burst_downmix_t *dm, const int *uw, int uw_len,
 
 /* ---- Create downmix context ---- */
 
+static void design_input_filters(burst_downmix_t *dm, int in_sample_rate);
+
 burst_downmix_t *burst_downmix_create(downmix_config_t *config) {
     burst_downmix_t *dm = calloc(1, sizeof(*dm));
 
@@ -261,18 +267,9 @@ burst_downmix_t *burst_downmix_create(downmix_config_t *config) {
     }
 
     /* ---- Input anti-alias LPF ---- */
-    {
-        float cutoff = dm->output_sample_rate * 0.4f;
-        float transition = dm->output_sample_rate * 0.2f;
-        /* Use a reasonable input sample rate for tap design.
-         * The actual decimation ratio depends on the burst's input rate.
-         * We design for a generic 10 MHz input. */
-        int ntaps;
-        float *taps = lpf_taps(&ntaps, 1.0f, 10000000.0f, cutoff, transition);
-        dm->input_fir = fir_filter_create(taps, ntaps);
-        dm->input_fir_rate = 10000000;
-        free(taps);
-    }
+    /* Designed for a generic 10 MHz input; decimate_burst redesigns it when
+     * a burst arrives at another rate. */
+    design_input_filters(dm, 10000000);
 
     /* ---- Noise-limiting LPF (applied after decimation) ---- */
     {
@@ -394,6 +391,7 @@ void burst_downmix_destroy(burst_downmix_t *dm) {
     if (!dm) return;
 
     fir_filter_destroy(dm->input_fir);
+    fir_filter_destroy(dm->input_fir2);
     fir_filter_destroy(dm->noise_fir);
     fir_filter_destroy(dm->start_fir);
     fir_filter_destroy(dm->rrc_fir);
@@ -426,6 +424,7 @@ void burst_downmix_destroy(burst_downmix_t *dm) {
     free(dm->work_b);
     free(dm->dec_save);
     free(dm->work_frac);
+    free(dm->work_mid);
     free(dm->mag_f);
     free(dm->mag_filtered_f);
 
@@ -455,6 +454,63 @@ static int resample_cubic(const float complex *in, int n_in, double step,
     return n_out > 0 ? n_out : 0;
 }
 
+/* Anti-alias filtering for the decimation to output_sample_rate (or, when
+ * the input isn't a multiple of it, to at least twice that, the cubic
+ * resampler doing the rest).
+ *
+ * One filter at the input rate needs a 50 kHz transition at 10 MS/s: 801
+ * taps, run over every input sample of every burst, which was half of the
+ * downmix's CPU time. Where the decimation factors, it is split in two:
+ * stage 1 brings the rate down to about 4x the output rate with a short
+ * Kaiser filter whose only job is to keep what will alias into the band
+ * below 100 kHz out of it (wide transition, so ~81 taps at 10 MS/s ->
+ * 1 MS/s), and stage 2 is the original windowed-sinc design at the lower
+ * rate (81 taps at 1 MS/s), so the passband is unchanged. Alias rejection
+ * into |f| < 60 kHz is about -99 dB against -112 dB for the single filter,
+ * well below the 12-bit ADC floor; MACs per input sample go from 20 to 10. */
+#define DEC_STAGE1_ATTEN_DB  100.0f
+#define DEC_STAGE1_PASS_HZ   100000.0f   /* protected band after stage 2 */
+
+static void design_input_filters(burst_downmix_t *dm, int in_sample_rate) {
+    int out_rate = dm->output_sample_rate;
+    int exact = in_sample_rate % out_rate == 0;
+    int decimation = exact ? in_sample_rate / out_rate
+                           : in_sample_rate / (2 * out_rate);
+    if (decimation < 1) decimation = 1;
+
+    /* Largest stage 1 factor leaving at least 4x the output rate. */
+    int dec1 = 1;
+    for (int d = 2; d <= decimation; d++)
+        if (decimation % d == 0 && (double)in_sample_rate / d >= 4.0 * out_rate)
+            dec1 = d;
+
+    fir_filter_destroy(dm->input_fir);
+    fir_filter_destroy(dm->input_fir2);
+    dm->input_fir2 = NULL;
+
+    int ntaps;
+    float *taps;
+    if (dec1 >= 2 && dec1 < decimation) {
+        float mid_rate = (float)in_sample_rate / dec1;
+        taps = kaiser_lpf_taps(&ntaps, (float)in_sample_rate, DEC_STAGE1_PASS_HZ,
+                               mid_rate - DEC_STAGE1_PASS_HZ, DEC_STAGE1_ATTEN_DB);
+        dm->input_fir = fir_filter_create(taps, ntaps);
+        free(taps);
+        taps = lpf_taps(&ntaps, 1.0f, mid_rate, out_rate * 0.4f, out_rate * 0.2f);
+        dm->input_fir2 = fir_filter_create(taps, ntaps);
+        free(taps);
+    } else {
+        dec1 = decimation;
+        taps = lpf_taps(&ntaps, 1.0f, (float)in_sample_rate,
+                        out_rate * 0.4f, out_rate * 0.2f);
+        dm->input_fir = fir_filter_create(taps, ntaps);
+        free(taps);
+    }
+    dm->input_fir_rate = in_sample_rate;
+    dm->input_decimation = decimation;
+    dm->input_dec1 = dec1;
+}
+
 static int decimate_burst(burst_downmix_t *dm, const float complex *in, int in_len,
                            float complex *out, int in_sample_rate,
                            uint64_t *timestamp) {
@@ -463,47 +519,57 @@ static int decimate_burst(burst_downmix_t *dm, const float complex *in, int in_l
      * output rate and interpolate onto the exact grid: rounding the ratio
      * instead left e.g. 2.4 MS/s at 240 kS/s, a 4% symbol-timing error. */
     int exact = in_sample_rate % dm->output_sample_rate == 0;
-    int decimation = exact ? in_sample_rate / dm->output_sample_rate
-                           : in_sample_rate / (2 * dm->output_sample_rate);
-    if (decimation < 1) decimation = 1;
 
     /* The taps are in normalized frequency: redesign them for this input
      * rate, or the 100 kHz cutoff scales down with it (5 kHz at 500 kS/s). */
-    if (in_sample_rate != dm->input_fir_rate) {
-        int ntaps;
-        float *taps = lpf_taps(&ntaps, 1.0f, (float)in_sample_rate,
-                               dm->output_sample_rate * 0.4f,
-                               dm->output_sample_rate * 0.2f);
-        fir_filter_destroy(dm->input_fir);
-        dm->input_fir = fir_filter_create(taps, ntaps);
-        dm->input_fir_rate = in_sample_rate;
-        free(taps);
-    }
+    if (in_sample_rate != dm->input_fir_rate)
+        design_input_filters(dm, in_sample_rate);
 
-    int n_out = (in_len - dm->input_fir->ntaps + 1) / decimation;
-    if (n_out <= 0) return 0;
-    if (n_out > dm->work_size) n_out = dm->work_size;
-
-    if (exact) {
-        fir_filter_ccf_dec(dm->input_fir, out, in, n_out, decimation);
-    } else {
-        /* The input LPF's stopband starts near 125 kHz, the output Nyquist,
-         * so the interpolation needs no filter of its own. */
+    float complex *dst = out;
+    if (!exact) {
         if (!dm->work_frac)
             dm->work_frac = aligned_alloc_32(sizeof(float complex) * dm->work_size);
         if (!dm->work_frac) return 0;
-        fir_filter_ccf_dec(dm->input_fir, dm->work_frac, in, n_out, decimation);
-        double step = (double)in_sample_rate / decimation / dm->output_sample_rate;
+        dst = dm->work_frac;
+    }
+
+    int n_out;
+    double delay_s;
+    if (dm->input_fir2) {
+        int dec1 = dm->input_dec1;
+        int dec2 = dm->input_decimation / dec1;
+        int n_mid = (in_len - dm->input_fir->ntaps + 1) / dec1;
+        if (n_mid <= 0) return 0;
+        if (n_mid > dm->work_size) n_mid = dm->work_size;
+        n_out = (n_mid - dm->input_fir2->ntaps + 1) / dec2;
+        if (n_out <= 0) return 0;
+        if (!dm->work_mid)
+            dm->work_mid = aligned_alloc_32(sizeof(float complex) * dm->work_size);
+        if (!dm->work_mid) return 0;
+        fir_filter_ccf_dec(dm->input_fir, dm->work_mid, in, n_mid, dec1);
+        fir_filter_ccf_dec(dm->input_fir2, dst, dm->work_mid, n_out, dec2);
+        delay_s = (double)(dm->input_fir->ntaps / 2) / in_sample_rate
+                + (double)(dm->input_fir2->ntaps / 2) * dec1 / in_sample_rate;
+    } else {
+        n_out = (in_len - dm->input_fir->ntaps + 1) / dm->input_decimation;
+        if (n_out <= 0) return 0;
+        if (n_out > dm->work_size) n_out = dm->work_size;
+        fir_filter_ccf_dec(dm->input_fir, dst, in, n_out, dm->input_decimation);
+        delay_s = (double)(dm->input_fir->ntaps / 2) / in_sample_rate;
+    }
+
+    if (!exact) {
+        /* The input LPF's stopband starts near 125 kHz, the output Nyquist,
+         * so the interpolation needs no filter of its own. */
+        double step = (double)in_sample_rate / dm->input_decimation
+                      / dm->output_sample_rate;
         n_out = resample_cubic(dm->work_frac, n_out, step, out, dm->work_size);
         if (n_out <= 0) return 0;
     }
 
     /* Adjust timestamp for filter delay */
-    if (timestamp) {
-        uint64_t delay_ns = (uint64_t)((dm->input_fir->ntaps / 2) *
-                            1000000000ULL / in_sample_rate);
-        *timestamp += delay_ns;
-    }
+    if (timestamp)
+        *timestamp += (uint64_t)(delay_s * 1e9);
 
     return n_out;
 }
@@ -727,9 +793,6 @@ int burst_downmix_process(burst_downmix_t *dm, burst_data_t *burst,
     int n = (int)burst->num_samples;
     if (n > dm->work_size) n = dm->work_size;
 
-    /* Copy burst samples to working buffer */
-    memcpy(dm->work_a, burst->samples, n * sizeof(float complex));
-
     double center_frequency = burst->center_frequency;
     int in_sample_rate = burst->sample_rate;
     /* Compute absolute timestamp: wall clock base + sample offset */
@@ -744,7 +807,8 @@ int burst_downmix_process(burst_downmix_t *dm, burst_data_t *burst,
         rotator_init(&r);
         float phase_inc = -2.0f * (float)M_PI * relative_freq;
         rotator_set_phase_incr(&r, cexpf(phase_inc * I));
-        rotator_rotate_n(&r, dm->work_a, dm->work_a, n);
+        /* Out of place: this is also the copy into the work buffer. */
+        rotator_rotate_n(&r, dm->work_a, burst->samples, n);
         center_frequency += relative_freq * in_sample_rate;
     }
 

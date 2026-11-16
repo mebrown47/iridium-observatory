@@ -90,6 +90,12 @@ typedef void (*simd_csquare_window_fn)(const float complex *in,
                                         const float *window,
                                         float complex *out, int n);
 
+/* Frequency rotation: out[i] = in[i] * phase * incr^i; *phase is left at
+ * the phase for sample n (not renormalised). in may equal out. */
+typedef void (*simd_rotate_fn)(const float complex *in, float complex *out,
+                                int n, float complex *phase,
+                                float complex incr);
+
 /* ---- Global function pointers (set by simd_init) ---- */
 
 extern simd_fir_ccf_fn        simd_fir_ccf;
@@ -103,6 +109,7 @@ extern simd_convert_i8_cf_fn  simd_convert_i8_cf;
 extern simd_mag_squared_fn    simd_mag_squared;
 extern simd_max_float_fn      simd_max_float;
 extern simd_csquare_window_fn simd_csquare_window;
+extern simd_rotate_fn         simd_rotate;
 
 /* ---- Initialization ---- */
 
@@ -132,6 +139,8 @@ void generic_mag_squared(const float complex *in, float *out, int n);
 float generic_max_float(const float *in, int n);
 void generic_csquare_window(const float complex *in, const float *window,
                             float complex *out, int n);
+void generic_rotate(const float complex *in, float complex *out, int n,
+                    float complex *phase, float complex incr);
 
 /* ---- ARM NEON implementations (AArch64 only) ---- */
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -156,6 +165,8 @@ void neon_mag_squared(const float complex *in, float *out, int n);
 float neon_max_float(const float *in, int n);
 void neon_csquare_window(const float complex *in, const float *window,
                          float complex *out, int n);
+void neon_rotate(const float complex *in, float complex *out, int n,
+                 float complex *phase, float complex incr);
 
 #endif /* __aarch64__ || _M_ARM64 */
 
@@ -194,6 +205,8 @@ void sse42_csquare_window(const float complex *in, const float *window,
 
 /* ---- AVX2 implementations (x86 only) ---- */
 
+void avx2_rotate(const float complex *in, float complex *out, int n,
+                 float complex *phase, float complex incr);
 void avx2_fir_ccf(const float *taps, int ntaps,
                    const float complex *in, float complex *out, int n);
 void avx2_fir_ccf_dec(const float *taps, int ntaps,

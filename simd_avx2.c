@@ -31,7 +31,24 @@ void avx2_fir_ccf(const float *taps, int ntaps,
     float *outp = (float *)out;
 
     int i = 0;
-    /* Process 4 complex outputs per iteration */
+    /* 16 complex outputs per iteration as four independent vectors of 4
+     * (see avx2_fir_fff); same per-output summation order as before. */
+    for (; i + 15 < n; i += 16) {
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        for (int k = 0; k < ntaps; k++) {
+            __m256 coeff = _mm256_set1_ps(taps[k]);
+            const float *p = &inp[(i + k) * 2];
+            a0 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(p),      a0);
+            a1 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(p + 8),  a1);
+            a2 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(p + 16), a2);
+            a3 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(p + 24), a3);
+        }
+        _mm256_storeu_ps(&outp[i * 2],      a0);
+        _mm256_storeu_ps(&outp[i * 2 + 8],  a1);
+        _mm256_storeu_ps(&outp[i * 2 + 16], a2);
+        _mm256_storeu_ps(&outp[i * 2 + 24], a3);
+    }
     for (; i + 3 < n; i += 4) {
         __m256 acc = _mm256_setzero_ps();
         for (int k = 0; k < ntaps; k++) {
@@ -59,9 +76,9 @@ void avx2_fir_ccf(const float *taps, int ntaps,
  * Can't batch outputs easily due to stride, so vectorize inner tap loop.
  * Process taps 8 at a time (4 complex values), accumulate horizontally.
  */
-void avx2_fir_ccf_dec(const float *taps, int ntaps,
-                       const float complex *in, float complex *out,
-                       int n_out, int decimation) {
+static void avx2_fir_ccf_dec_simple(const float *taps, int ntaps,
+                                    const float complex *in, float complex *out,
+                                    int n_out, int decimation) {
     const float *inp = (const float *)in;
     float *outp = (float *)out;
 
@@ -109,6 +126,126 @@ void avx2_fir_ccf_dec(const float *taps, int ntaps,
     }
 }
 
+/* The loop above keeps one accumulator, so each FMA waits out the previous
+ * one's latency (~4 cycles where the core can issue two a cycle), and it
+ * re-duplicates the taps on every iteration. This version duplicates the
+ * taps once per call into [t0,t0,t1,t1,...] and runs four accumulators, so
+ * the inner loop is two loads and an FMA. Filters longer than the stack
+ * buffer (none in this program) take the simple loop. */
+#define FIR_DEC_MAX_DUP_TAPS 4096
+
+void avx2_fir_ccf_dec(const float *taps, int ntaps,
+                       const float complex *in, float complex *out,
+                       int n_out, int decimation) {
+    if (ntaps > FIR_DEC_MAX_DUP_TAPS) {
+        avx2_fir_ccf_dec_simple(taps, ntaps, in, out, n_out, decimation);
+        return;
+    }
+    float dup[2 * FIR_DEC_MAX_DUP_TAPS] __attribute__((aligned(32)));
+    for (int k = 0; k < ntaps; k++)
+        dup[2 * k] = dup[2 * k + 1] = taps[k];
+
+    const float *inp = (const float *)in;
+    float *outp = (float *)out;
+
+    for (int i = 0; i < n_out; i++) {
+        const float *p = &inp[(size_t)i * decimation * 2];
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        int k = 0;
+        for (; k + 15 < ntaps; k += 16) {
+            a0 = _mm256_fmadd_ps(_mm256_load_ps(&dup[2 * k]),
+                                 _mm256_loadu_ps(&p[2 * k]), a0);
+            a1 = _mm256_fmadd_ps(_mm256_load_ps(&dup[2 * k + 8]),
+                                 _mm256_loadu_ps(&p[2 * k + 8]), a1);
+            a2 = _mm256_fmadd_ps(_mm256_load_ps(&dup[2 * k + 16]),
+                                 _mm256_loadu_ps(&p[2 * k + 16]), a2);
+            a3 = _mm256_fmadd_ps(_mm256_load_ps(&dup[2 * k + 24]),
+                                 _mm256_loadu_ps(&p[2 * k + 24]), a3);
+        }
+        for (; k + 3 < ntaps; k += 4)
+            a0 = _mm256_fmadd_ps(_mm256_load_ps(&dup[2 * k]),
+                                 _mm256_loadu_ps(&p[2 * k]), a0);
+        __m256 acc = _mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3));
+
+        /* acc = [re0,im0,re1,im1 | re2,im2,re3,im3] -> one complex */
+        __m128 sum = _mm_add_ps(_mm256_castps256_ps128(acc),
+                                _mm256_extractf128_ps(acc, 1));
+        __m128 result = _mm_add_ps(sum, _mm_shuffle_ps(sum, sum, _MM_SHUFFLE(3, 2, 3, 2)));
+        float acc_re = _mm_cvtss_f32(result);
+        float acc_im = _mm_cvtss_f32(_mm_shuffle_ps(result, result, 1));
+
+        for (; k < ntaps; k++) {
+            acc_re += taps[k] * p[k * 2];
+            acc_im += taps[k] * p[k * 2 + 1];
+        }
+
+        outp[i * 2] = acc_re;
+        outp[i * 2 + 1] = acc_im;
+    }
+}
+
+/* ---- Frequency rotation ----
+ *
+ * Interleaved complex multiply: x * p = fmaddsub(x, re(p), swap(x) * im(p)).
+ * Two vectors of four phasors (eight lanes, phase * incr^l), each advanced by
+ * incr^8 per block, so no multiply waits on the one before it. Renormalised
+ * every 512 blocks, as generic_rotate. */
+static inline __m256 cmul_ps(__m256 a, __m256 b) {
+    __m256 bre = _mm256_moveldup_ps(b);
+    __m256 bim = _mm256_movehdup_ps(b);
+    __m256 asw = _mm256_permute_ps(a, 0xB1);
+    return _mm256_fmaddsub_ps(a, bre, _mm256_mul_ps(asw, bim));
+}
+
+static inline __m256 renorm_ps(__m256 p) {
+    __m256 m = _mm256_mul_ps(p, p);
+    m = _mm256_add_ps(m, _mm256_permute_ps(m, 0xB1));   /* |p|^2 in both */
+    return _mm256_div_ps(p, _mm256_sqrt_ps(m));
+}
+
+void avx2_rotate(const float complex *in, float complex *out, int n,
+                 float complex *phase, float complex incr) {
+    float complex ph = *phase;
+    int i = 0;
+    if (n >= 16) {
+        float complex lanes[8] __attribute__((aligned(32)));
+        double complex pd = ph, st = 1.0;
+        for (int l = 0; l < 8; l++) {
+            lanes[l] = (float complex)pd;
+            pd *= incr;
+            st *= incr;
+        }
+        __m256 p0 = _mm256_load_ps((const float *)&lanes[0]);
+        __m256 p1 = _mm256_load_ps((const float *)&lanes[4]);
+        float complex s = (float complex)st;
+        __m256 sv = _mm256_setr_ps(crealf(s), cimagf(s), crealf(s), cimagf(s),
+                                   crealf(s), cimagf(s), crealf(s), cimagf(s));
+        const float *x = (const float *)in;
+        float *y = (float *)out;
+        int nblk = n / 8;
+        for (int b = 0; b < nblk; b++, i += 8) {
+            __m256 x0 = _mm256_loadu_ps(&x[2 * i]);
+            __m256 x1 = _mm256_loadu_ps(&x[2 * i + 8]);
+            _mm256_storeu_ps(&y[2 * i],     cmul_ps(x0, p0));
+            _mm256_storeu_ps(&y[2 * i + 8], cmul_ps(x1, p1));
+            p0 = cmul_ps(p0, sv);
+            p1 = cmul_ps(p1, sv);
+            if (b % 512 == 511) {
+                p0 = renorm_ps(p0);
+                p1 = renorm_ps(p1);
+            }
+        }
+        _mm256_store_ps((float *)&lanes[0], p0);
+        ph = lanes[0];
+    }
+    for (; i < n; i++) {
+        out[i] = in[i] * ph;
+        ph *= incr;
+    }
+    *phase = ph;
+}
+
 /* ---- Real FIR filter ----
  *
  * Process 8 outputs at a time. For each tap, broadcast coefficient,
@@ -117,7 +254,25 @@ void avx2_fir_ccf_dec(const float *taps, int ntaps,
 void avx2_fir_fff(const float *taps, int ntaps,
                    const float *in, float *out, int n) {
     int i = 0;
-    /* Process 8 outputs per iteration */
+    /* 32 outputs per iteration as four independent vectors of 8: one vector
+     * alone makes every FMA wait for the last (latency ~4 cycles against
+     * two issued per cycle). Each output's sum runs in the same order as
+     * before, so results are unchanged. */
+    for (; i + 31 < n; i += 32) {
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        for (int k = 0; k < ntaps; k++) {
+            __m256 coeff = _mm256_set1_ps(taps[k]);
+            a0 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(&in[i + k]),      a0);
+            a1 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(&in[i + k + 8]),  a1);
+            a2 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(&in[i + k + 16]), a2);
+            a3 = _mm256_fmadd_ps(coeff, _mm256_loadu_ps(&in[i + k + 24]), a3);
+        }
+        _mm256_storeu_ps(&out[i],      a0);
+        _mm256_storeu_ps(&out[i + 8],  a1);
+        _mm256_storeu_ps(&out[i + 16], a2);
+        _mm256_storeu_ps(&out[i + 24], a3);
+    }
     for (; i + 7 < n; i += 8) {
         __m256 acc = _mm256_setzero_ps();
         for (int k = 0; k < ntaps; k++) {

@@ -50,6 +50,13 @@ float *rc_taps(int *ntaps_out, float sample_rate, float symbol_rate,
 float *lpf_taps(int *ntaps_out, float gain, float sample_rate,
                 float cutoff_freq, float transition_width);
 
+/* Generate low-pass filter taps (windowed sinc, Kaiser window) for a
+ * passband up to pass_edge and at least atten_db rejection from stop_edge.
+ * Unlike lpf_taps the length follows from the edges and attenuation, so a
+ * wide transition gets a short filter. Unity DC gain. */
+float *kaiser_lpf_taps(int *ntaps_out, float sample_rate, float pass_edge,
+                       float stop_edge, float atten_db);
+
 /* Generate a simple box/averaging filter */
 float *box_taps(int *ntaps_out, int length);
 
