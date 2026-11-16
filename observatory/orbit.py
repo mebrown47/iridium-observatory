@@ -421,6 +421,44 @@ def identify_frame(c, t, freq, st, rx_offset, candidates=None,
             "el": best[4]["el"], "az": best[4]["az"]}
 
 
+class ViewCache:
+    """Constellation.view from one station, propagated at whole multiples of
+    `step` seconds and interpolated linearly in between: what identify_frame
+    needs (range rate, elevation, azimuth) for hundreds of bursts a second
+    without an SGP4 run per burst per candidate. The error goes as step
+    squared: at 1 s the Doppler is off by a third of a Hz and the azimuth by
+    0.06 deg, at the default 0.25 s by about 0.02 Hz and 0.004 deg - against
+    an ambiguity margin of 200 Hz at its tightest and 10 x 5 deg sky cells.
+    Coarser saves no CPU: at 0.25 s the SGP4 runs are already lost in the
+    per-burst work of identify_frame. Stands in for the Constellation in
+    identify_frame; the station argument there is ignored, the cache's own
+    is used."""
+
+    def __init__(self, c, st, step=0.25):
+        self.c, self.st, self.step = c, st, step
+        self.sats = c.sats
+        self.memo = {}
+
+    def _at(self, i, k):
+        key = (i, k)
+        if key not in self.memo:
+            self.memo[key] = self.c.view(i, k * self.step, self.st)
+        return self.memo[key]
+
+    def view(self, i, t, st=None):
+        x = t / self.step
+        k = math.floor(x)
+        a, b = self._at(i, k), self._at(i, k + 1)
+        if a is None or b is None:
+            return self.c.view(i, t, self.st)
+        f = x - k
+        daz = (b["az"] - a["az"] + 180.0) % 360.0 - 180.0   # shortest way round
+        return {"index": i,
+                "range_rate_kms": a["range_rate_kms"] + f * (b["range_rate_kms"] - a["range_rate_kms"]),
+                "el": a["el"] + f * (b["el"] - a["el"]),
+                "az": (a["az"] + f * daz) % 360.0}
+
+
 class AdaptiveMargin:
     """The ambiguity margin for one station, from its own precision. A clean
     outdoor Airspy matches bursts to a few tens of Hz, an indoor HackRF to

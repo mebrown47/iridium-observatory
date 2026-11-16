@@ -95,6 +95,10 @@ class CoverageCollector:
         types = d["types"]
         fail_type = types.index("FAIL") if "FAIL" in types else -1
         cand = {}
+        # Per batch, not per burst: the margins are medians of the last
+        # 4,000 residuals (a sort each), and a 5 s batch barely moves them.
+        margins = {True: self.margin_fail.margin(), False: self.margin.margin()}
+        views = orbit.ViewCache(c, st)
         for _, tms, f, mag, ty, dr, _sid in d["f"]:
             t = tms / 1000.0 + clock
             h = int(t // 3600 * 3600)
@@ -106,9 +110,10 @@ class CoverageCollector:
             b = int(t // 10)
             if b not in cand:
                 cand[b] = [v["index"] for v in c.visible(b * 10 + 5, st, -4.0)]
-            am = self.margin_fail if ty == fail_type else self.margin
-            m = am.margin()
-            r = orbit.identify_frame(c, t, f, st, rx, cand[b], margin_hz=m, max_residual_hz=m)
+            failed = ty == fail_type
+            am = self.margin_fail if failed else self.margin
+            m = margins[failed]
+            r = orbit.identify_frame(views, t, f, st, rx, cand[b], margin_hz=m, max_residual_hz=m)
             am.add(r)
             if r is None:
                 stv[3] += 1

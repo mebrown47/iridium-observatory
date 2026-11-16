@@ -167,5 +167,39 @@ check(w_no <= max(1, n3 // 1000) and m_no > 1000,
       "a noisy receiver keeps a wide margin and stays right",
       "%d bursts, %d right, %d wrong, margin %.0f Hz" % (n3, r_no, w_no, m_no))
 
+# ViewCache: propagation every 0.25 s, interpolated. Doppler and direction
+# against an exact propagation over six hours of passes, and the same
+# attribution answers burst for burst.
+vc = orbit.ViewCache(c, rx)
+w_hz = w_el = w_az = 0.0
+n = same = 0
+random.seed(5)
+t = T0
+while t < T0 + 6 * 3600:
+    vs = c.visible(t, rx, -2.0)
+    cands = [v["index"] for v in vs]
+    for v in vs:
+        dt = random.random()
+        e, a = c.view(v["index"], t + dt, rx), vc.view(v["index"], t + dt, rx)
+        w_hz = max(w_hz, abs(e["range_rate_kms"] - a["range_rate_kms"]) / orbit.C_KMS * orbit.RA_CENTER_HZ)
+        w_el = max(w_el, abs(e["el"] - a["el"]))
+        if e["el"] < 85:    # azimuth swings fast near the zenith; the top cell holds it anyway
+            w_az = max(w_az, abs((e["az"] - a["az"] + 180) % 360 - 180))
+        k = random.randrange(orbit.IR_CHANNELS)
+        f = orbit.channel_center(k) * (1.0 - e["range_rate_kms"] / orbit.C_KMS) + K_OFF + random.gauss(0, 150)
+        r1 = orbit.identify_frame(c, t + dt, f, rx, K_OFF, cands)
+        r2 = orbit.identify_frame(vc, t + dt, f, rx, K_OFF, cands)
+        n += 1
+        same += (r1 is None and r2 is None) or (r1 is not None and r2 is not None and
+                                                (r1["sat"], r1["channel"], r1["ambiguous"]) ==
+                                                (r2["sat"], r2["channel"], r2["ambiguous"]))
+    t += 37.3
+    vc.memo.clear()
+check(w_hz < 0.1 and w_el < 0.002 and w_az < 0.02,
+      "view cache tracks exact propagation",
+      "worst %.4f Hz Doppler, %.5f deg el, %.4f deg az" % (w_hz, w_el, w_az))
+check(n > 1000 and same == n, "attribution through the view cache matches exact",
+      "%d of %d bursts identical" % (same, n))
+
 print("\n%d checks, %d failed" % (checks, fails))
 sys.exit(1 if fails else 0)
