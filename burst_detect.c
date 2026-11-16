@@ -30,6 +30,7 @@
 
 #include "config.h"
 
+#include "os_chan.h"
 #include "burst_detect.h"
 #include "fftw_lock.h"
 #include "iridium.h"
@@ -162,6 +163,11 @@ struct _burst_detector {
     size_t ringbuf_write;       /* write position (mod ringbuf_size) */
     uint64_t ringbuf_start;     /* absolute sample index of oldest sample */
 
+    /* Overlap-save front end: bursts leave already at the downmix rate */
+    os_chan_t *osc;
+    int osc_bins_per;           /* block FFT bins per detector bin */
+    int osc_rate;
+
     /* int8 -> float complex conversion buffer */
     float complex *convert_buf;
     size_t convert_buf_size;
@@ -282,6 +288,9 @@ static int gpu_plugin_load(burst_detector_t *d)
 }
 
 /* ---- Create burst detector ---- */
+
+static int ringbuf_read_cb(void *ctx, uint64_t start, size_t n,
+                           float complex *dst);
 
 burst_detector_t *burst_detector_create(burst_config_t *config) {
     burst_detector_t *d = calloc(1, sizeof(*d));
@@ -462,6 +471,28 @@ burst_detector_t *burst_detector_create(burst_config_t *config) {
     /* Timestamp: set when first samples arrive */
     d->start_time_ns = 0;
 
+    d->osc = NULL;
+    if (config->output_rate > 0) {
+        d->osc = os_chan_create(d->sample_rate, config->output_rate,
+                                ringbuf_read_cb, d);
+        d->osc_bins_per = d->osc ? os_chan_bins_per(d->osc, d->fft_size) : 0;
+        if (d->osc && d->osc_bins_per == 0) {
+            os_chan_destroy(d->osc);
+            d->osc = NULL;
+        }
+        if (d->osc) {
+            d->osc_rate = config->output_rate;
+            /* Blocks reach up to one FFT before a burst's start. */
+            d->ringbuf_size += (size_t)os_chan_fft_size(d->osc);
+            free(d->ringbuf);
+            d->ringbuf = malloc(sizeof(float complex) * d->ringbuf_size);
+        } else {
+            fprintf(stderr, "burst_detect: %d S/s is not a multiple of %d, "
+                    "using the time-domain downmix front end\n",
+                    d->sample_rate, config->output_rate);
+        }
+    }
+
     return d;
 }
 
@@ -488,6 +519,14 @@ void burst_detector_destroy(burst_detector_t *d) {
     free(d->bursts);
     free(d->new_bursts);
     free(d->gone_bursts);
+    if (d->osc) {
+        uint64_t ffts, hits;
+        os_chan_stats(d->osc, &ffts, &hits);
+        fprintf(stderr, "burst_detect: overlap-save front end: %lu block FFTs, "
+                "%lu reused (%.1f bursts per block)\n", (unsigned long)ffts,
+                (unsigned long)hits, ffts ? (double)(ffts + hits) / ffts : 0.0);
+        os_chan_destroy(d->osc);
+    }
     free(d->ringbuf);
     free(d->convert_buf);
     fprintf(stderr, "burst_detect: tagged %lu bursts total\n",
@@ -573,6 +612,35 @@ static float complex *ringbuf_extract(burst_detector_t *d, uint64_t start,
 
     *out_len = len;
     return buf;
+}
+
+/* os_chan's read callback: copy [start, start + n), zero-filling what the
+ * ring doesn't hold (aged out, or not received yet). The oldest sample held
+ * is worked out from sample_count here rather than taken from ringbuf_start,
+ * which ringbuf_write sets before sample_count moves on. */
+static int ringbuf_read_cb(void *ctx, uint64_t start, size_t n,
+                           float complex *dst) {
+    burst_detector_t *d = ctx;
+    uint64_t have_lo = d->sample_count > d->ringbuf_size
+                       ? d->sample_count - d->ringbuf_size : 0;
+    uint64_t have_hi = d->sample_count;
+    uint64_t lo = start > have_lo ? start : have_lo;
+    uint64_t hi = start + n < have_hi ? start + n : have_hi;
+    int complete = lo == start && hi == start + n;
+    if (!complete)
+        memset(dst, 0, n * sizeof(float complex));
+    if (hi <= lo)
+        return 0;
+    size_t len = (size_t)(hi - lo), off = (size_t)(lo - start);
+    size_t rb_pos = (size_t)(lo % d->ringbuf_size);
+    if (rb_pos + len <= d->ringbuf_size) {
+        memcpy(dst + off, &d->ringbuf[rb_pos], len * sizeof(float complex));
+    } else {
+        size_t first = d->ringbuf_size - rb_pos;
+        memcpy(dst + off, &d->ringbuf[rb_pos], first * sizeof(float complex));
+        memcpy(dst + off + first, d->ringbuf, (len - first) * sizeof(float complex));
+    }
+    return complete;
 }
 
 /* ---- Internal: update noise floor (pre) ---- */
@@ -915,8 +983,24 @@ static void emit_gone_bursts(burst_detector_t *d, burst_callback_t cb, void *use
                 extract_stop = end;
         }
         size_t num_samples;
-        float complex *samples = ringbuf_extract(d, extract_start, extract_stop,
-                                                  &num_samples);
+        float complex *samples;
+        uint64_t delay_ns = 0;
+        if (d->osc) {
+            /* Same clamp as ringbuf_extract */
+            if (extract_start < d->ringbuf_start)
+                extract_start = d->ringbuf_start;
+            int max_out = extract_stop > extract_start
+                ? (int)((extract_stop - extract_start) / (d->sample_rate / d->osc_rate)) + 1
+                : 0;
+            samples = max_out > 0 ? malloc(sizeof(float complex) * max_out) : NULL;
+            int shift = (ab->center_bin - d->fft_size / 2) * d->osc_bins_per;
+            int n = samples ? os_chan_extract(d->osc, extract_start, extract_stop,
+                                              shift, samples, max_out, &delay_ns)
+                            : 0;
+            num_samples = n > 0 ? (size_t)n : 0;
+        } else {
+            samples = ringbuf_extract(d, extract_start, extract_stop, &num_samples);
+        }
 
         if (num_samples == 0) {
             free(samples);
@@ -940,6 +1024,8 @@ static void emit_gone_bursts(burst_detector_t *d, burst_callback_t cb, void *use
         bd->start_time_ns = d->start_time_ns;
         bd->num_samples = num_samples;
         bd->samples = samples;
+        bd->decimated_rate = d->osc ? d->osc_rate : 0;
+        bd->decim_delay_ns = delay_ns;
 
         cb(bd, user);
         d->n_tagged_bursts++;

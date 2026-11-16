@@ -802,6 +802,19 @@ int burst_downmix_process(burst_downmix_t *dm, burst_data_t *burst,
     /* Step 1: Coarse CFO correction */
     float relative_freq = (burst->info.center_bin - burst->fft_size / 2)
                           / (float)burst->fft_size;
+    int dec_len;
+    if (burst->decimated_rate) {
+        /* The overlap-save front end has done steps 1 and 2 already. */
+        if (burst->decimated_rate != dm->output_sample_rate) {
+            *frames_out = NULL;
+            return 0;
+        }
+        center_frequency += relative_freq * in_sample_rate;
+        dec_len = n;
+        memcpy(dm->work_b, burst->samples, n * sizeof(float complex));
+        timestamp += burst->decim_delay_ns;
+        goto decimated;
+    }
     {
         rotator_t r;
         rotator_init(&r);
@@ -813,8 +826,9 @@ int burst_downmix_process(burst_downmix_t *dm, burst_data_t *burst,
     }
 
     /* Step 2: Decimate to output sample rate */
-    int dec_len = decimate_burst(dm, dm->work_a, n, dm->work_b,
-                                  in_sample_rate, &timestamp);
+    dec_len = decimate_burst(dm, dm->work_a, n, dm->work_b,
+                             in_sample_rate, &timestamp);
+decimated:
     if (dec_len < 100) {
         *frames_out = NULL;
         return 0;

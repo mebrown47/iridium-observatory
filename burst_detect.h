@@ -45,6 +45,12 @@ typedef struct {
     uint64_t start_time_ns;   /* wall clock ns at sample 0 (base offset) */
     size_t num_samples;       /* number of complex float samples */
     float complex *samples;   /* IQ data covering burst lifetime */
+    /* 0: samples are at sample_rate, as captured. Otherwise the overlap-save
+     * front end (os_chan.c) has already shifted them down by the detector
+     * bin and decimated them to this rate, as the downmix's own coarse CFO
+     * and decimation would, and decim_delay_ns is that filter's delay. */
+    int decimated_rate;
+    uint64_t decim_delay_ns;
 } burst_data_t;
 
 /* Configuration */
@@ -62,6 +68,8 @@ typedef struct {
     int use_gpu;            /* 1 = use OpenCL GPU FFT, 0 = FFTW CPU */
     int full_window;        /* 1 = hand on the whole post_len tail (gr-iridium),
                                0 = cut each burst to its frame (default) */
+    int output_rate;        /* downmix rate for the overlap-save front end;
+                               0 = hand on full-rate samples (legacy) */
 } burst_config_t;
 
 /* Create a burst detector with the given configuration.
