@@ -41,6 +41,11 @@
 
 #include "blocking_queue.h"
 
+/* --sync-gate (main.c): bursts whose normalised sync correlation is below
+ * this never reach the demodulator. 0 disables. */
+extern float sync_gate_threshold;
+extern atomic_ulong stat_n_sync_gated;
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -110,6 +115,8 @@ struct _burst_downmix {
     float complex *ul_sync_fft;
     int dl_sync_len;  /* in samples */
     int ul_sync_len;
+    float dl_sync_energy;       /* sum |template|^2, for the sync score */
+    float ul_sync_energy;
 
     /* Working buffers (sized for max burst) */
     float complex *work_a;
@@ -375,6 +382,16 @@ burst_downmix_t *burst_downmix_create(downmix_config_t *config) {
     generate_sync_word(dm, IR_UW_UL, IR_UW_LENGTH,
                        IR_PREAMBLE_LENGTH_SHORT, 1,
                        &dm->ul_sync_fft, &dm->ul_sync_len);
+    /* Template energies from their spectra (Parseval; FFTW is unnormalised) */
+    {
+        double edl = 0, eul = 0;
+        for (int i = 0; i < dm->corr_fft_size; i++) {
+            edl += crealf(dm->dl_sync_fft[i] * conjf(dm->dl_sync_fft[i]));
+            eul += crealf(dm->ul_sync_fft[i] * conjf(dm->ul_sync_fft[i]));
+        }
+        dm->dl_sync_energy = (float)(edl / dm->corr_fft_size);
+        dm->ul_sync_energy = (float)(eul / dm->corr_fft_size);
+    }
 
     /* ---- Working buffers (generous size, aligned for SIMD) ---- */
     dm->work_size = 2 * 1024 * 1024;  /* 2M samples max */
@@ -678,7 +695,8 @@ static float estimate_fine_cfo(burst_downmix_t *dm, const float complex *frame,
 static int correlate_sync(burst_downmix_t *dm, const float complex *frame,
                            int frame_len, ir_direction_t *direction,
                            float *uw_start_correction,
-                           float complex *corr_result_out) {
+                           float complex *corr_result_out,
+                           float *score_out) {
     int search_len = dm->sync_search_len;
     if (search_len > frame_len) search_len = frame_len;
 
@@ -744,6 +762,23 @@ static int correlate_sync(burst_downmix_t *dm, const float complex *frame,
     }
 
     *corr_result_out = ifft_out[corr_offset];
+
+    /* Sync score: the correlation peak normalised by the template's energy
+     * and the signal's over the same span, so 0..1 whatever the level
+     * (Cauchy-Schwarz). The inverse FFT is unnormalised: divide by N^2.
+     * A real burst scores ~0.9; the detector's false positives, which the
+     * demodulator would reject anyway, mostly score below 0.3. */
+    {
+        float et = *direction == DIR_DOWNLINK ? dm->dl_sync_energy : dm->ul_sync_energy;
+        int lo = corr_offset - sync_len + 1;
+        if (lo < 0) lo = 0;
+        double es = 0;
+        for (int i = lo; i <= corr_offset && i < frame_len; i++)
+            es += crealf(frame[i] * conjf(frame[i]));
+        float c2 = crealf(*corr_result_out * conjf(*corr_result_out));
+        double n2 = (double)dm->corr_fft_size * dm->corr_fft_size;
+        *score_out = (et > 0 && es > 0) ? (float)(c2 / (n2 * et * es)) : 0.0f;
+    }
 
     /* Quadratic interpolation on correlation peak */
     float correction = 0;
@@ -877,6 +912,7 @@ decimated:
     float uw_start_correction;
     float complex corr_result;
     int uw_start;
+    float sync_score = 0.0f;
     for (int attempt = 0; ; attempt++) {
         if (attempt > 0) {
             memcpy(dm->work_a, dm->dec_save, dec_len * sizeof(float complex));
@@ -914,7 +950,7 @@ decimated:
         /* Step 7: Sync word correlation */
         uw_start = correlate_sync(dm, dm->work_b, frame_len,
                                   &direction, &uw_start_correction,
-                                  &corr_result);
+                                  &corr_result, &sync_score);
 
         if (attempt == 2)
             break;
@@ -934,6 +970,20 @@ decimated:
     }
 
     if (uw_start < 0 || uw_start >= frame_len) {
+        *frames_out = NULL;
+        return 0;
+    }
+
+    /* Early reject (--sync-gate): skip demodulating bursts whose sync
+     * correlation says there is no unique word, which the demodulator would
+     * only reject anyway. Downlink only: uplink bursts (ground terminals)
+     * are weaker and score lower, and gating them cost 5-10% of decodable
+     * uplink frames on a 30 min recording for almost no saving. Downlink at
+     * 0.20 there: 43% of detections gated, -4.3% CPU, 0.02% of decodable
+     * frames lost (marginal ones), ACARS and pager messages identical. */
+    if (sync_gate_threshold > 0.0f && sync_score < sync_gate_threshold &&
+        direction == DIR_DOWNLINK) {
+        atomic_fetch_add(&stat_n_sync_gated, 1);
         *frames_out = NULL;
         return 0;
     }
