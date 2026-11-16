@@ -343,6 +343,9 @@ atomic_ulong stat_n_output_drops = 0;
 atomic_ulong stat_n_uw_reject = 0;   /* weak-sync false positives filtered out */
 atomic_ulong stat_n_sync_gated = 0;  /* stopped by --sync-gate before demod */
 atomic_ulong stat_sample_count = 0;
+atomic_ulong stat_sample_drops = 0;  /* samples a live source dropped: queue full */
+atomic_ulong stat_n_gap_bursts = 0;  /* bursts discarded: spliced across a drop */
+double file_realtime = 0;            /* --file-realtime: pace a file like a radio */
 
 /* Global detector pointer for diagnostic stats (set by detector thread) */
 burst_detector_t *global_detector = NULL;
@@ -354,13 +357,32 @@ void parse_options(int argc, char **argv);
 
 /* ---- Sample buffer management ---- */
 
+/*
+ * A live source cannot wait, so when the queue is full its samples are
+ * thrown away. Frame times are counted in samples from the first one, so
+ * every sample dropped used to put every later frame that much early, for
+ * the rest of the run -- unseen, as these drops were counted nowhere. Each
+ * buffer now carries how many samples were dropped just before it
+ * (gap_before); the detector moves its clock on by that much and discards
+ * any burst spliced across the gap.
+ *
+ * Shedding in long runs instead (drop until the queue is half empty) was
+ * tried: on a replayed capture 25-60% short of CPU it decoded the same
+ * frames within run-to-run noise, so the simpler rule stays.
+ */
 void push_samples(sample_buf_t *buf) {
+    static uint64_t gap = 0;    /* dropped since the last buffer queued */
     atomic_fetch_add(&stat_sample_count, buf->num);
-    if (blocking_queue_add(&samples_queue, buf) == BQ_FULL) {
-        if (verbose)
-            fprintf(stderr, "WARNING: dropped samples\n");
-        free(buf);
+    buf->gap_before = gap;
+    if (blocking_queue_add(&samples_queue, buf) != BQ_FULL) {
+        gap = 0;
+        return;
     }
+    if (atomic_fetch_add(&stat_sample_drops, buf->num) == 0)
+        fprintf(stderr, "WARNING: processing is not keeping up with the radio; "
+                "dropping samples (sdrop: in the stats line counts them)\n");
+    gap += buf->num;
+    free(buf);
 }
 
 /* ---- Utility ---- */
@@ -449,7 +471,26 @@ static void *spewer_thread(void *arg) {
         }
         s->num = r;
         s->hw_timestamp_ns = first_block ? file_start_ns : 0;
+        s->gap_before = 0;
         first_block = 0;
+        if (file_realtime > 0) {
+            /* As a radio would: each block when its last sample would have
+             * been captured, and dropped, not waited for, if the queue is
+             * full. Tests how the receiver copes with a machine too slow. */
+            static struct timespec t0;
+            static uint64_t sent = 0;
+            if (sent == 0)
+                clock_gettime(CLOCK_MONOTONIC, &t0);
+            sent += r;
+            double due = t0.tv_sec + t0.tv_nsec * 1e-9 + sent / (samp_rate * file_realtime);
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double wait = due - (now.tv_sec + now.tv_nsec * 1e-9);
+            if (wait > 0)
+                usleep((useconds_t)(wait * 1e6));
+            push_samples(s);
+            continue;
+        }
         if (blocking_queue_put(&samples_queue, s) != 0) {
             free(s);
             break;
@@ -1161,6 +1202,14 @@ static void *stats_thread_fn(void *arg) {
             fprintf(stderr, " | ok: %10lu", sub);
             fprintf(stderr, " | ok_avg: %3.0f/s", ok_rate_avg);
             fprintf(stderr, " | d: %lu", dropped);
+            {
+                /* signal a live source had to throw away, and the bursts
+                 * spliced across it that the detector discarded */
+                unsigned long sd = atomic_load(&stat_sample_drops);
+                if (sd > 0)
+                    fprintf(stderr, " | sdrop: %.1fs/%lu", sd / samp_rate,
+                            atomic_load(&stat_n_gap_bursts));
+            }
             {
                 unsigned long fd = atomic_load(&stat_n_frame_drops);
                 unsigned long od = atomic_load(&stat_n_output_drops);

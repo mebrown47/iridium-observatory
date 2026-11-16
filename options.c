@@ -57,6 +57,7 @@ extern int verbose;
 extern int live;
 extern char *file_info;
 extern uint64_t file_start_ns;
+extern double file_realtime;
 extern double threshold_db;
 extern iq_format_t iq_format;
 extern FILE *in_file;
@@ -241,6 +242,9 @@ static void usage(int exitcode) {
 "                             Frame times then follow the recording's clock instead\n"
 "                             of the wall clock at start (default). With --zmq-sub:\n"
 "                             the time of the first sample received.\n"
+"    --file-realtime[=X]     read the file at X times its sample rate (default 1),\n"
+"                             dropping samples when behind as a live radio does:\n"
+"                             to see how a machine copes before it goes live\n"
 "    --save-bursts=DIR       save IQ samples of decoded bursts to directory\n"
 "    --diagnostic            setup verification mode (suppresses RAW output)\n"
 "    --no-gardner           disable Gardner timing recovery (enabled by default)\n"
@@ -350,6 +354,7 @@ void parse_options(int argc, char **argv) {
         OPT_SOAPY_GAIN,
         OPT_FILE_INFO,
         OPT_FILE_START,
+        OPT_FILE_REALTIME,
         OPT_FORMAT,
         OPT_LIST,
         OPT_NO_GPU,
@@ -412,6 +417,7 @@ void parse_options(int argc, char **argv) {
         { "threshold",      required_argument, NULL, 'd' },
         { "file-info",      required_argument, NULL, OPT_FILE_INFO },
         { "file-start",     required_argument, NULL, OPT_FILE_START },
+        { "file-realtime",  optional_argument, NULL, OPT_FILE_REALTIME },
         { "format",         required_argument, NULL, OPT_FORMAT },
         { "verbose",        no_argument,       NULL, 'v' },
         { "help",           no_argument,       NULL, 'h' },
@@ -601,6 +607,12 @@ void parse_options(int argc, char **argv) {
                         errx(1, "--file-start: expected Unix seconds, ISO 8601 or 'sigmf', got '%s'", optarg);
                     file_start_ns = (uint64_t)sec * 1000000000ULL + ns;
                 }
+                break;
+
+            case OPT_FILE_REALTIME:
+                file_realtime = optarg ? strtod(optarg, NULL) : 1.0;
+                if (!(file_realtime > 0))
+                    errx(1, "--file-realtime: expected a speed above 0, got '%s'", optarg);
                 break;
 
             case OPT_FORMAT:
