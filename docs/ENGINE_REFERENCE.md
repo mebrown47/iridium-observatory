@@ -862,7 +862,9 @@ Outputs iridium-toolkit compatible RAW format to stdout.
 Input (one required):
     -f, --file=FILE         read IQ samples from file
     -l, --live              capture live from SDR (implied by -i)
-    --format=FMT            IQ file format: ci8 (default), ci16, cf32
+    --format=FMT            IQ file format: ci8 (default), ci16, cf32, or u16r
+                             (raw Airspy real samples, airspy_rx -t 4, at twice
+                             the -r rate; converted to IQ as live)
 
 SDR options:
     -i, --interface=IFACE   SDR to use (see --list for available devices):
@@ -886,6 +888,8 @@ Gain options:
     --airspy-sensitivity=N  Airspy R2/Mini sensitivity preset 0-21 (default: 12)
     --airspy-linearity=N    Airspy linearity preset 0-21, for strong nearby signals
                              (overrides sensitivity)
+    --airspy-libiq          let libairspy convert to IQ (default: our own
+                             SIMD converter, which is several times faster)
     --airspy-lna=N --airspy-mixer=N --airspy-vga=N
                              Airspy manual stage gains 0-15 (override both presets)
     --soapy-gain-element=NAME:VAL  set SoapySDR per-element gain (repeatable)
@@ -898,9 +902,15 @@ Gain options:
 Detection options:
     -d, --threshold=DB      burst detection threshold in dB (default: 16.0)
     --no-gpu                disable GPU acceleration (use CPU FFTW)
+    --full-burst-window     demodulate each burst's whole 16 ms hold-open tail,
+                             as gr-iridium does (default: cut it to the frame)
+    --legacy-frontend       shift and decimate each burst on its own in the
+                             downmix (default: one shared overlap-save FFT)
     --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar
     --no-simd               alias for --simd=scalar
     --workers=N             downmix worker threads (1-32, default: auto from CPU cores)
+    --stall-exit=SECONDS    live radio silent this long: exit (code 3) so the
+                             service restarts it (default 300, 0 = never)
     --chase[=N]             enable Chase soft-decision BCH decoder (experimental)
                              N = flip-bits count, 0-7 (default 5 = 31 combos).
                              0 or omitting --chase disables (default).
@@ -998,6 +1008,11 @@ Everything else above is inherited from iridium-sniffer.
 | Option | What it does |
 |---|---|
 | `--airspy-sensitivity`, `--airspy-linearity`, `--airspy-lna`, `--airspy-mixer`, `--airspy-vga`, `--airspy-no-packing` | Native Airspy R2 / Mini gain and transfer settings; `-i airspy-SERIAL` selects the radio |
+| `--airspy-libiq` | Let libairspy convert the R2 / Mini's raw samples to IQ instead of the built-in SIMD converter (the default, several times faster, with a flatter band edge); for comparison |
+| `--format=u16r` | Replay a raw Airspy recording (`airspy_rx -t 4`, real samples at twice the `-r` rate) through the same converter as live |
+| `--legacy-frontend` | Shift and decimate each burst on its own, as before the shared overlap-save front end (the default, about 4x less CPU); for A/B comparison. Rates that aren't a multiple of 250 kS/s use this path automatically |
+| `--full-burst-window` | Demodulate each burst's whole 16 ms hold-open tail, as gr-iridium does, instead of cutting it to the frame |
+| `--stall-exit=SECONDS` | Exit with code 3 when the live radio has been silent this long, so the service restarts it (default 300, 0 = never) |
 | `--archive[=DIR]` | Append-only daily JSONL archive of frame-type counts and decoded messages, read by the Observatory |
 | `--uw-reject=T` | Drop burst-detector false positives by unique-word sync score (default 0.70) |
 | `--sync-gate=T` | Off by default. Skip demodulating downlink bursts whose sync correlation is below T; saves CPU on false positives at a small cost in marginal frames (see Low-Power Hardware) |
