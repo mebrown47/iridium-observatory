@@ -913,6 +913,8 @@ Detection options:
     --workers=N             downmix worker threads (1-32, default: auto from CPU cores)
     --stall-exit=SECONDS    live radio silent this long: exit (code 3) so the
                              service restarts it (default 300, 0 = never)
+    --stats-interval=SECONDS  print the status line this often (default 1,
+                             0 = never); 60 keeps a service's journal small
     --chase[=N]             enable Chase soft-decision BCH decoder (experimental)
                              N = flip-bits count, 0-7 (default 5 = 31 combos).
                              0 or omitting --chase disables (default).
@@ -1017,6 +1019,7 @@ Everything else above is inherited from iridium-sniffer.
 | `--legacy-frontend` | Shift and decimate each burst on its own, as before the shared overlap-save front end (the default, about 4x less CPU); for A/B comparison. Rates that aren't a multiple of 250 kS/s use this path automatically |
 | `--full-burst-window` | Demodulate each burst's whole 16 ms hold-open tail, as gr-iridium does, instead of cutting it to the frame |
 | `--stall-exit=SECONDS` | Exit with code 3 when the live radio has been silent this long, so the service restarts it (default 300, 0 = never) |
+| `--stats-interval=SECONDS` | Print the status line this often, its rates covering the whole interval, and `POSITION:` lines at most this often (default 1, 0 = neither). Only the printing changes: the stall watchdog and Doppler positioning still run every second. The installer sets 60, so a service writes about one journal line a minute instead of one a second; useful on an SD card |
 | `--archive[=DIR]` | Append-only daily JSONL archive of frame-type counts and decoded messages, read by the Observatory |
 | `--uw-reject=T` | Drop burst-detector false positives by unique-word sync score (default 0.70) |
 | `--sync-gate=T` | Off by default. Skip demodulating downlink bursts whose sync correlation is below T; saves CPU on false positives at a small cost in marginal frames (see Low-Power Hardware) |

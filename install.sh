@@ -387,7 +387,7 @@ else
         SDR+=" --airspy-sensitivity=$g"
       fi
     fi
-    SNIFFER_ARGS="$SDR --acars"
+    SNIFFER_ARGS="$SDR --acars --stats-interval=60"
     yes_no "Power an LNA through the SDR's bias tee" n && SNIFFER_ARGS+=" -B"
     yes_no "Estimate this receiver's position from Doppler" y && SNIFFER_ARGS+=" --position"
     nfeed=0

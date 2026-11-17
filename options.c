@@ -102,6 +102,7 @@ extern int sdrplay_gain_val;
 extern int bias_tee;
 extern int use_gpu;
 extern int stall_exit_s;
+extern int stats_interval;
 extern int full_burst_window;
 extern int legacy_frontend;
 extern int simd_mode;
@@ -214,6 +215,8 @@ static void usage(int exitcode) {
 "    --workers=N             downmix worker threads (1-32, default: auto from CPU cores)\n"
 "    --stall-exit=SECONDS    live radio silent this long: exit (code 3) so the\n"
 "                             service restarts it (default 300, 0 = never)\n"
+"    --stats-interval=SECONDS  print the status line this often (default 1,\n"
+"                             0 = never); 60 keeps a service's journal small\n"
 "    --chase[=N]             enable Chase soft-decision BCH decoder (experimental)\n"
 "                             N = flip-bits count, 0-7 (default 5 = 31 combos).\n"
 "                             0 or omitting --chase disables (default).\n"
@@ -403,6 +406,7 @@ void parse_options(int argc, char **argv) {
         OPT_UPDATE_DB,
         OPT_WORKERS,
         OPT_STALL_EXIT,
+        OPT_STATS_INTERVAL,
     };
 
     static const struct option longopts[] = {
@@ -475,6 +479,7 @@ void parse_options(int argc, char **argv) {
         { "update-db",      no_argument,       NULL, OPT_UPDATE_DB },
         { "workers",        required_argument, NULL, OPT_WORKERS },
         { "stall-exit",     required_argument, NULL, OPT_STALL_EXIT },
+        { "stats-interval", required_argument, NULL, OPT_STATS_INTERVAL },
         { NULL,             0,                 NULL, 0 }
     };
 
@@ -921,6 +926,15 @@ void parse_options(int argc, char **argv) {
                 stall_exit_s = atoi(optarg);
                 if (stall_exit_s < 0 || stall_exit_s > 86400)
                     errx(1, "--stall-exit must be 0-86400 seconds (0 = never)");
+                break;
+
+            case OPT_STATS_INTERVAL: {
+                char *end;
+                long v = strtol(optarg, &end, 10);
+                if (end == optarg || *end || v < 0 || v > 86400)
+                    errx(1, "--stats-interval must be 0-86400 seconds (0 = no status lines)");
+                stats_interval = (int)v;
+            }
                 break;
 
             case OPT_WORKERS: {

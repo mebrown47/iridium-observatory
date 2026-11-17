@@ -261,6 +261,11 @@ volatile sig_atomic_t running = 1;
  * and stayed silent for 30 hours with the process alive and no error. Exit
  * non-zero so systemd's restart reopens the radio. 0 disables. */
 int stall_exit_s = 300;
+/* --stats-interval: seconds between status lines (and at most this often a
+ * POSITION line); 0 prints none. Only the printing: the watchdog above and
+ * Doppler positioning still run every second. A service logging a line a
+ * second wears an SD card for nothing (#11). */
+int stats_interval = 1;
 static volatile sig_atomic_t stalled = 0;
 pid_t self_pid;
 
@@ -1019,6 +1024,9 @@ static void *stats_thread_fn(void *arg) {
     unsigned q_max = 0;
     double quiet = 0;       /* seconds without a detected burst */
     unsigned long quiet_samples = 0;    /* samples that arrived meanwhile */
+    /* Counters at the last status line: a line covers its whole interval */
+    unsigned long pw_t = t0, pw_det = 0, pw_ok = 0, pw_sub = 0;
+    unsigned long pw_handled = 0, pw_samples = 0;
 
     while (running) {
         usleep(1000000);
@@ -1080,6 +1088,18 @@ static void *stats_thread_fn(void *arg) {
             }
         }
 
+        /* Status line due? Its rates cover everything since the last one */
+        int print_due = stats_interval > 0 &&
+                        (now - pw_t) / 1000.0 + 0.5 >= stats_interval;
+        if (print_due) {
+            dd    = det     - pw_det;
+            dk    = ok      - pw_ok;
+            ds    = sub     - pw_sub;
+            dh    = handled - pw_handled;
+            dsamp = samp    - pw_samples;
+            dt    = (now - pw_t) / 1000.0;
+        }
+
         /* Rates */
         double in_rate     = dd / dt;
         double in_rate_avg = det / elapsed;
@@ -1092,7 +1112,9 @@ static void *stats_thread_fn(void *arg) {
         double out_ok_pct = dd > 0  ? 100.0 * ds  / dd  : 0;
         double ok_avg_pct = det > 0 ? 100.0 * sub / det : 0;
 
-        if (diagnostic_mode) {
+        if (!print_due) {
+            /* nothing to print this second */
+        } else if (diagnostic_mode) {
             /* Diagnostic mode display */
             int runtime_sec = (int)elapsed;
             int hours = runtime_sec / 3600;
@@ -1176,23 +1198,31 @@ static void *stats_thread_fn(void *arg) {
         /* Suppress unused variable warning */
         (void)dsamp;
 
-        /* Doppler positioning: attempt solve every 10 seconds */
+        /* Doppler positioning: attempt solve every 10 seconds; say so
+         * every 10 s, or every stats interval if that is longer */
         if (position_enabled && (int)elapsed % 10 == 0 && elapsed > 5) {
+            int every = stats_interval > 10 ? stats_interval : 10;
+            int say = stats_interval > 0 && (int)elapsed % every < 10;
             doppler_solution_t sol;
             if (doppler_pos_solve(&sol)) {
-                fprintf(stderr, "POSITION: %.6f, %.6f (HDOP=%.1f, %d sats, %d meas)\n",
-                        sol.lat, sol.lon, sol.hdop, sol.n_satellites,
-                        sol.n_measurements);
+                if (say)
+                    fprintf(stderr, "POSITION: %.6f, %.6f (HDOP=%.1f, %d sats, %d meas)\n",
+                            sol.lat, sol.lon, sol.hdop, sol.n_satellites,
+                            sol.n_measurements);
                 if (web_enabled)
                     web_map_set_position(sol.lat, sol.lon, sol.hdop);
-            } else if ((int)elapsed % 60 == 0) {
+            } else if (say && (int)elapsed % (every > 60 ? every : 60) < 10) {
                 fprintf(stderr, "POSITION: waiting (%d sats, %d meas)\n",
                         sol.n_satellites, sol.n_measurements);
             }
         }
 
         /* Reset per-interval tracking */
-        q_max = 0;
+        if (print_due) {
+            q_max = 0;
+            pw_t = now; pw_det = det; pw_ok = ok; pw_sub = sub;
+            pw_handled = handled; pw_samples = samp;
+        }
         prev_det     = det;
         prev_ok      = ok;
         prev_sub     = sub;
