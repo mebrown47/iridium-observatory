@@ -411,7 +411,6 @@ else
     if yes_no "Feed aircraft positions (SBS/BaseStation) to an aggregator" n; then
       bs="$(ask "Aggregator HOST:PORT" "thebaldgeek.net:2226")"
       SNIFFER_ARGS+=" --basestation=$bs"
-      yes_no "Include beam-estimated positions in that feed" y && SNIFFER_ARGS+=" --basestation-beam"
     fi
   fi
   SNIFFER_ARGS="$(echo "$SNIFFER_ARGS" | sed 's/^ *//; s/  */ /g')"

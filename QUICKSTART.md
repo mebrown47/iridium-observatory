@@ -82,7 +82,6 @@ Partway through, the installer asks a few questions. Each one shows a suggested 
 | **Station ID** | A name for your station on those sites, such as `XYZ-IRIDIUM` | Your choice, or Enter for none |
 | **Feed aircraft positions (SBS/BaseStation) to an aggregator** | Share aircraft positions with a tracking site | `y` to share, Enter to skip |
 | **Aggregator HOST:PORT** | Where to send them | Press Enter (thebaldgeek.net:2226) |
-| **Include beam-estimated positions** | Also send rough positions (about 200 km) | Press Enter (yes) |
 
 You can change any answer later (see "Change your answers" below).
 

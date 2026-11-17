@@ -237,7 +237,6 @@ char *vita49_endpoint = NULL;
 
 /* BaseStation (SBS) output */
 int basestation_enabled = 0;
-int basestation_beam = 0;
 char *basestation_endpoint = NULL;
 char *aircraft_db_path = NULL;
 
@@ -250,46 +249,6 @@ int iq_format_explicit = 0;
 pthread_mutex_t vita49_ctx_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t vita49_ctx_cond = PTHREAD_COND_INITIALIZER;
 int vita49_ctx_ready = 0;
-
-/* ---- Beam cache for ACARS aircraft position correlation ---- */
-/* Stores recent IRA ground beam positions (alt < 100) so the ACARS
- * callback can correlate a received message with the beam it arrived on. */
-
-#define BEAM_CACHE_SIZE 64
-
-typedef struct {
-    double lat, lon;
-    int sat_id, beam_id;
-    uint64_t timestamp_ns;  /* 0 = empty slot */
-} beam_cache_t;
-
-static beam_cache_t beam_cache[BEAM_CACHE_SIZE];
-static int beam_cache_head = 0;
-static pthread_mutex_t beam_cache_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* Look up the most recent ground beam position within 10 s before ts_ns.
- * Returns 1 and fills out-params on success, 0 if no match found. */
-int beam_cache_lookup(uint64_t ts_ns, double *lat, double *lon,
-                      int *sat_id, int *beam_id)
-{
-    int found = 0;
-    pthread_mutex_lock(&beam_cache_lock);
-    for (int i = 0; i < BEAM_CACHE_SIZE; i++) {
-        int idx = (beam_cache_head - 1 - i + BEAM_CACHE_SIZE) % BEAM_CACHE_SIZE;
-        beam_cache_t *e = &beam_cache[idx];
-        if (e->timestamp_ns == 0) break;           /* empty -- stop */
-        if (e->timestamp_ns > ts_ns) continue;    /* future entry */
-        if (ts_ns - e->timestamp_ns > 10000000000ULL) break; /* > 10 s */
-        *lat    = e->lat;
-        *lon    = e->lon;
-        *sat_id = e->sat_id;
-        *beam_id = e->beam_id;
-        found = 1;
-        break;
-    }
-    pthread_mutex_unlock(&beam_cache_lock);
-    return found;
-}
 
 /* Clock/time source (CLOCK_SRC_INTERNAL/EXTERNAL/GPSDO from sdr.h) */
 int clock_source = CLOCK_SRC_INTERNAL;
@@ -922,19 +881,6 @@ static void *output_thread_fn(void *arg) {
                     if (web_enabled) {
                         web_map_add_ra(&decoded.ira, decoded.timestamp,
                                         decoded.frequency);
-                        if (decoded.ira.alt >= 0 && decoded.ira.alt < 100) {
-                            pthread_mutex_lock(&beam_cache_lock);
-                            beam_cache[beam_cache_head % BEAM_CACHE_SIZE] =
-                                (beam_cache_t){
-                                    .lat = decoded.ira.lat,
-                                    .lon = decoded.ira.lon,
-                                    .sat_id = decoded.ira.sat_id,
-                                    .beam_id = decoded.ira.beam_id,
-                                    .timestamp_ns = decoded.timestamp
-                                };
-                            beam_cache_head++;
-                            pthread_mutex_unlock(&beam_cache_lock);
-                        }
                     }
                     if (position_enabled)
                         doppler_pos_add_measurement(&decoded.ira,

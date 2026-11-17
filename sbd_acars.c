@@ -54,14 +54,7 @@ extern int acars_enabled;
 extern int web_enabled;
 extern int archive_enabled;
 extern int basestation_enabled;
-extern int basestation_beam;
 static const char *station = NULL;
-
-/* Beam cache lookup from main.c -- provides approximate aircraft position
- * by correlating the ACARS message timestamp with the most recent IRA ground
- * beam position.  Returns 1 on success, 0 if no match within 10 seconds. */
-extern int beam_cache_lookup(uint64_t ts_ns, double *lat, double *lon,
-                              int *sat_id, int *beam_id);
 
 /* ---- UDP JSON streaming (up to 4 endpoints) ---- */
 
@@ -359,7 +352,6 @@ static int stat_acars_errors = 0;   /* ACARS with CRC/parity errors */
 static int stat_pos_adsc = 0;       /* positions from ADS-C */
 static int stat_pos_text = 0;       /* positions from free text coords */
 static int stat_pos_waypoint = 0;   /* positions from waypoint lookup */
-static int stat_pos_beam = 0;       /* positions from beam estimate */
 static int stat_bs_sent = 0;        /* positions sent via basestation */
 
 /* ---- Timestamp handling ---- */
@@ -756,10 +748,13 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
                        ir_hdr, ir_hdr_len);
     }
 
-    /* Aircraft position (ADS-C GPS if available, else beam estimate) */
+    /* Aircraft position: only one the aircraft reported (ADS-C, or its
+     * own message text). Nothing else places it: an IDA frame names no
+     * satellite or beam, and the beam of the last ring alert heard -- what
+     * this used to fall back to -- was often 1,000-3,000 km from the
+     * aircraft (issue #8). */
     if (web_enabled && !msg->err && msg->reg[0]) {
         double pos_lat = 0.0, pos_lon = 0.0;
-        int pos_sat = 0, pos_beam = 0;
         int adsc_alt = -99999;
         int adsc_pos = 0;
         char adsc_flt[10] = {0};
@@ -930,45 +925,31 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
         }
 
         /* Position source priority:
-         *   1. ADS-C GPS (structured, highest confidence)
+         *   1. ADS-C report (structured, highest confidence)
          *   2. Free text coordinates (aircraft-reported, label-gated)
-         *   3. Waypoint name lookup (first/current fix from message)
-         *   4. Beam cache estimate (~200 km accuracy) */
-        int have_pos;
+         *   3. Waypoint name lookup (first/current fix from message) */
+        int src = 0;
         if (adsc_pos) {
-            have_pos = 1;
+            src = AC_POS_ADSC;
             stat_pos_adsc++;
-            double bx, by;
-            beam_cache_lookup(timestamp, &bx, &by, &pos_sat, &pos_beam);
         } else if (text_pos) {
-            have_pos = 1;
+            src = AC_POS_TEXT;
             stat_pos_text++;
-            adsc_pos = 1;
-            double bx, by;
-            beam_cache_lookup(timestamp, &bx, &by, &pos_sat, &pos_beam);
         } else if (wp_pos) {
-            have_pos = 1;
+            src = AC_POS_FIX;
             stat_pos_waypoint++;
-            adsc_pos = 1;
-            double bx, by;
-            beam_cache_lookup(timestamp, &bx, &by, &pos_sat, &pos_beam);
-        } else {
-            have_pos = beam_cache_lookup(timestamp, &pos_lat, &pos_lon,
-                                         &pos_sat, &pos_beam);
-            if (have_pos) stat_pos_beam++;
         }
 
-        if (have_pos) {
+        if (src) {
             const char *tail = msg->reg;
             while (*tail == '.') tail++;
             const char *flt = adsc_flt[0] ? adsc_flt :
                               (msg->flight_id[0] ? msg->flight_id : "");
             if (*tail) {
                 web_map_add_aircraft(tail, flt, pos_lat, pos_lon,
-                                     pos_sat, pos_beam, timestamp, frequency,
-                                     adsc_alt, adsc_pos,
+                                     timestamp, frequency, adsc_alt, src,
                                      oooi_str[0] ? oooi_str : NULL);
-                if (basestation_enabled && (adsc_pos || basestation_beam)) {
+                if (basestation_enabled) {
                     basestation_send_position(tail, flt, pos_lat, pos_lon,
                                               adsc_alt, timestamp);
                     stat_bs_sent++;
@@ -1604,34 +1585,21 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                 memcpy(txt_z, txt_f, zlen);
                 txt_z[zlen] = '\0';
                 have_text_pos = acars_aircraft_position(label_f, txt_z, ul,
-                                                        &pos_lat, &pos_lon) != 0;
+                                                        &pos_lat, &pos_lon);
             }
 
-            int bc_sat = 0, bc_beam = 0;
+            /* Only a position the aircraft reported: see the libacars path */
             if (have_text_pos) {
-                stat_pos_text++;
-                double bx, by;
-                beam_cache_lookup(timestamp, &bx, &by, &bc_sat, &bc_beam);
+                if (have_text_pos == ACARS_POS_TEXT) stat_pos_text++;
+                else stat_pos_waypoint++;
                 web_map_add_aircraft(reg_f, "", pos_lat, pos_lon,
-                                     bc_sat, bc_beam, timestamp, frequency,
-                                     -99999, 1, NULL);
+                                     timestamp, frequency, -99999,
+                                     have_text_pos == ACARS_POS_TEXT ?
+                                     AC_POS_TEXT : AC_POS_FIX, NULL);
                 if (basestation_enabled) {
                     basestation_send_position(reg_f, "", pos_lat, pos_lon,
                                               -99999, timestamp);
                     stat_bs_sent++;
-                }
-            } else {
-                double bc_lat, bc_lon;
-                if (beam_cache_lookup(timestamp, &bc_lat, &bc_lon,
-                                      &bc_sat, &bc_beam)) {
-                    stat_pos_beam++;
-                    web_map_add_aircraft(reg_f, "", bc_lat, bc_lon,
-                                         bc_sat, bc_beam, timestamp, frequency,
-                                         -99999, 0, NULL);
-                    /* Beam estimates only sent if --basestation-beam */
-                    if (basestation_enabled && basestation_beam)
-                        basestation_send_position(reg_f, "", bc_lat, bc_lon,
-                                                  -99999, timestamp);
                 }
             }
         }
@@ -1997,9 +1965,9 @@ void acars_print_stats(void)
     if (stat_acars_errors > 0)
         fprintf(stderr, " (%d with errors)", stat_acars_errors);
     fprintf(stderr, "\n");
-    if (stat_pos_adsc || stat_pos_text || stat_pos_waypoint || stat_pos_beam)
-        fprintf(stderr, "Positions: %d ADS-C, %d text, %d waypoint, %d beam\n",
-                stat_pos_adsc, stat_pos_text, stat_pos_waypoint, stat_pos_beam);
+    if (stat_pos_adsc || stat_pos_text || stat_pos_waypoint)
+        fprintf(stderr, "Positions: %d ADS-C, %d text, %d waypoint\n",
+                stat_pos_adsc, stat_pos_text, stat_pos_waypoint);
     if (stat_bs_sent > 0)
         fprintf(stderr, "BaseStation: %d positions sent\n", stat_bs_sent);
 }

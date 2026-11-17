@@ -274,15 +274,15 @@ Data updates once per second via Server-Sent Events. The map uses Leaflet.js wit
 
 ### Aircraft Position Layer
 
-When `--web` and `--acars` are used together, decoded ACARS messages are correlated with the most recent IRA ground beam position to estimate the transmitting aircraft's location:
+When `--web` and `--acars` are used together, aircraft that report their own position are drawn on the map:
 
 ```bash
 ./iridium-sniffer -i soapy-0 --web --acars
 ```
 
-Each aircraft (identified by tail number) gets a colored dot at its latest beam-center fix and a dashed track line connecting successive fixes. Clicking a marker shows the registration, flight number (if present in the message), satellite/beam that carried the message, and the time of the last decoded message.
+Each aircraft (identified by tail number) gets a colored dot at its latest reported position and a dashed track line connecting successive fixes. Clicking a marker shows the registration, flight number (if present in the message), where the position came from (an ADS-C report, coordinates in the message text, or a named fix in a position report), and the time of the last decoded message. The sources are the same as for the BaseStation output below.
 
-**Accuracy note:** Position accuracy is approximately 150-200 km -- the radius of an Iridium beam footprint. This is sufficient to identify which region or ocean an aircraft is crossing, but not precise tracking. The track line connects beam-center positions and may show jumps when consecutive messages arrive via different satellites.
+Most messages carry no position, and a station that hears only the satellite downlink mostly hears messages sent to the aircraft, so expect few aircraft on the map. They are all still in the ACARS tab. Earlier versions also placed every aircraft at the centre of the beam of the last ring alert heard. An IDA frame names no satellite or beam, though, and those positions were often 1,000-3,000 km from the aircraft, so they are no longer made.
 
 **API endpoints:**
 
@@ -587,17 +587,19 @@ Output format (one line per position):
 MSG,3,1,1,A98539,1,2026/04/06,00:15:54.000,2026/04/06,00:15:54.000,UAL928,37000,,,52.000,-40.000,,,,0
 ```
 
-Four position sources feed the output, in priority order:
+Three position sources feed the output, in priority order:
 1. **ADS-C GPS** -- structured position from ARINC-622 ADS-C reports (requires libacars)
 2. **ACARS free text** -- coordinates extracted from known message labels (H1/POS, label 20, 44, 4J, 15, SA)
 3. **Waypoint lookup** -- in a POS report that names a fix instead of coordinates, that fix, resolved via the bundled aviation waypoint database
-4. **Beam estimate** -- approximate position from IRA ground beam correlation (~200 km accuracy)
 
 Sources 2 and 3 use only messages the aircraft sent. A message to the aircraft carries other places
 (predicted winds at fixes along its route, weather), and a fix lookup outside POS reports matches
 ordinary words: over 95 days of one feeder's messages it found 924 "fixes" (ENTER, WINDS, wind
 forecast fixes) and no real position. A receiver that hears only the satellite downlink, as most
-do, gets ADS-C and beam positions only.
+do, gets few positions, nearly all from ADS-C. Nothing else is guessed: an IDA frame names no
+satellite or beam, and the last ring alert's beam, which earlier versions used, was often
+1,000-3,000 km from the aircraft. `--basestation-beam` is still accepted so old settings start, but
+does nothing.
 
 The aircraft database is stored at `~/.iridium-sniffer/aircraft.csv` and can be updated at any time with `--update-db`. Use `--aircraft-db=PATH` to specify a custom path.
 
@@ -987,8 +989,7 @@ Output options:
   BaseStation output:
     --basestation[=PORT]     SBS server on PORT (default 30003, tools connect in)
     --basestation=HOST:PORT  SBS push to remote host (auto-reconnect)
-    --basestation-beam       include beam-estimated positions in SBS feed
-                             (default: only GPS-quality positions are sent)
+                             (only positions the aircraft reported are sent)
     --aircraft-db=PATH       aircraft database CSV (default: ~/.iridium-sniffer/aircraft.csv)
     --update-db              download/update aircraft database and exit
 

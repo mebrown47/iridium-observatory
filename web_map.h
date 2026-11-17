@@ -48,19 +48,24 @@ void mtpos_ida_cb(const uint8_t *data, int len, uint64_t timestamp,
                    double frequency, ir_direction_t direction,
                    float magnitude, void *user);
 
-/* Add a beam-based or ADS-C aircraft position fix from an ACARS message.
+/* Add an aircraft position fix from an ACARS message: only a position the
+ * aircraft reported itself. The beam a message arrived on is no position:
+ * an IDA frame names no satellite or beam, and any beam the station can hear
+ * spans a region over a thousand km across.
  * reg: aircraft registration (tail number, no leading dots).
  * flight: flight number or empty string if unknown.
- * lat/lon: position (ADS-C GPS if adsc_pos=1, else beam center estimate).
+ * lat/lon: the reported position.
  * alt_ft: altitude in feet (-99999 if unknown).
- * adsc_pos: 1 = GPS-quality ADS-C position, 0 = beam estimate (~200 km).
+ * src: AC_POS_ADSC, AC_POS_TEXT or AC_POS_FIX (where the position came from).
  * oooi: OOOI event string ("OUT","OFF","ON","IN") or NULL if not an event.
  * Thread-safe. */
+#define AC_POS_ADSC 1   /* ADS-C report */
+#define AC_POS_TEXT 2   /* coordinates in the message text */
+#define AC_POS_FIX  3   /* a named fix in a position report */
 void web_map_add_aircraft(const char *reg, const char *flight,
                            double lat, double lon,
-                           int sat_id, int beam_id,
                            uint64_t timestamp_ns, double frequency,
-                           int alt_ft, int adsc_pos,
+                           int alt_ft, int src,
                            const char *oooi);
 
 /* Append a decoded pager (MSG/IMS) message to the messaging feed. Thread-safe. */

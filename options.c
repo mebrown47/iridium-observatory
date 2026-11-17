@@ -145,7 +145,6 @@ extern char *zmq_sub_endpoint;
 extern int vita49_enabled;
 extern char *vita49_endpoint;
 extern int basestation_enabled;
-extern int basestation_beam;
 extern char *basestation_endpoint;
 extern int num_downmix_workers;
 extern char *aircraft_db_path;
@@ -292,8 +291,7 @@ static void usage(int exitcode) {
 "  BaseStation output:\n"
 "    --basestation[=PORT]     SBS server on PORT (default 30003, tools connect in)\n"
 "    --basestation=HOST:PORT  SBS push to remote host (auto-reconnect)\n"
-"    --basestation-beam       include beam-estimated positions in SBS feed\n"
-"                             (default: only GPS-quality positions are sent)\n"
+"                             (only positions the aircraft reported are sent)\n"
 "    --aircraft-db=PATH       aircraft database CSV (default: ~/.iridium-sniffer/aircraft.csv)\n"
 "    --update-db              download/update aircraft database and exit\n"
 "\n"
@@ -892,7 +890,10 @@ void parse_options(int argc, char **argv) {
                 break;
 
             case OPT_BASESTATION_BEAM:
-                basestation_beam = 1;
+                /* Accepted so saved settings still start; beam positions
+                 * were 1,000-3,000 km out and are no longer made (#8). */
+                fprintf(stderr, "--basestation-beam: no longer has any effect; "
+                        "only positions the aircraft reported are sent\n");
                 break;
 
             case OPT_AIRCRAFT_DB:
