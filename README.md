@@ -7,10 +7,11 @@ worked out from the satellites alone, typically to within a few km. It keeps a d
 long-run dashboards, and it can feed aircraft messages and positions to aggregators
 such as airframes.io.
 
-> **Latest release: [v1.2](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.2)** (15 November 2026).
-> Already installed? Run `./install.sh --update`: v1.2 does the same decoding for about a
-> quarter of the CPU, and installs from before v1.1 decode far fewer uplink (aircraft and
-> handset to satellite) messages.
+> **Latest release: [v1.2.1](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.2.1)** (16 November 2026).
+> Already installed? Run `./install.sh --update`: v1.2.1 stops placing aircraft at the beam
+> of the last ring alert heard, which was often 1,000 km or more from the aircraft, on the
+> map and in the SBS feed. Since v1.2 the receiver does the same decoding for about a
+> quarter of the CPU.
 
 It is a fork of [iridium-sniffer](https://github.com/alphafox02/iridium-sniffer) and keeps
 that project's receiver engine at its core. [How it differs](#how-it-differs-from-iridium-sniffer)
