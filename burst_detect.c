@@ -77,6 +77,12 @@ typedef struct gpu_burst_fft gpu_burst_fft_t;
  * 88,709 at >=80% confidence against 88,733, and the same 58 ACARS messages. */
 #define BURST_TAIL_FRAMES 8
 
+/* Source gaps remembered at once: each is kept until it leaves the
+ * ringbuffer. Gaps are at least one source buffer apart and the ringbuffer
+ * holds about 0.12 s (0.5 s with a GPU batch), so this never fills short
+ * of buffers under 5,000 samples. */
+#define MAX_GAPS 1024
+
 /* ---- Internal types ---- */
 
 typedef struct {
@@ -176,6 +182,17 @@ struct _burst_detector {
     uint64_t start_time_ns;     /* nanosecond timestamp at sample 0 */
     uint64_t pending_hw_ts;     /* hardware timestamp for next feed (0=none) */
 
+    /* Samples the source dropped (burst_detector_gap). Sample indices count
+     * only what arrived, so a burst's time is start_time_ns plus its index
+     * plus every gap before it. Gaps still inside the ringbuffer are kept
+     * to time and to check bursts against; older ones fold into gap_ns_old. */
+    struct { uint64_t at, ns; } gaps[MAX_GAPS];  /* at: first index after the
+                                                   * gap; ns: total gap time
+                                                   * up to and including it */
+    int num_gaps;
+    uint64_t gap_ns_old;        /* total of the gaps dropped from gaps[] */
+    uint64_t gap_ns;            /* total of all gaps */
+
     /* GPU plugin (loaded via dlopen) */
     void *gpu_handle;           /* dlopen handle */
     gpu_burst_fft_t *gpu;
@@ -201,6 +218,7 @@ extern volatile sig_atomic_t running;
 extern int verbose;
 extern atomic_ulong stat_n_detected;
 extern atomic_ulong stat_n_dropped;
+extern atomic_ulong stat_n_gap_bursts;
 
 /* ---- Helper: dynamic array push ---- */
 
@@ -982,6 +1000,20 @@ static void emit_gone_bursts(burst_detector_t *d, burst_callback_t cb, void *use
             if (extract_stop > end)
                 extract_stop = end;
         }
+        /* Samples spliced across a gap make no burst: drop it, counted */
+        int spliced = 0;
+        uint64_t gap_ns = d->gap_ns_old;
+        for (int g = 0; g < d->num_gaps; g++) {
+            if (d->gaps[g].at <= ab->start)
+                gap_ns = d->gaps[g].ns;
+            else if (d->gaps[g].at < extract_stop)
+                spliced = 1;
+        }
+        if (spliced) {
+            atomic_fetch_add(&stat_n_gap_bursts, 1);
+            continue;
+        }
+
         size_t num_samples;
         float complex *samples;
         uint64_t delay_ns = 0;
@@ -1021,7 +1053,7 @@ static void emit_gone_bursts(burst_detector_t *d, burst_callback_t cb, void *use
         bd->center_frequency = d->center_frequency;
         bd->sample_rate = d->sample_rate;
         bd->fft_size = d->fft_size;
-        bd->start_time_ns = d->start_time_ns;
+        bd->start_time_ns = d->start_time_ns + gap_ns;
         bd->num_samples = num_samples;
         bd->samples = samples;
         bd->decimated_rate = d->osc ? d->osc_rate : 0;
@@ -1032,6 +1064,28 @@ static void emit_gone_bursts(burst_detector_t *d, burst_callback_t cb, void *use
         atomic_fetch_add(&stat_n_detected, 1);
     }
     d->num_gone_bursts = 0;
+}
+
+/* ---- Public: a gap in the input ---- */
+
+void burst_detector_gap(burst_detector_t *d, uint64_t num_samples) {
+    if (num_samples == 0)
+        return;
+    /* forget gaps the ringbuffer has moved past: no burst can start there */
+    int keep = 0;
+    while (keep < d->num_gaps && d->gaps[keep].at < d->ringbuf_start)
+        keep++;
+    if (d->num_gaps - keep == MAX_GAPS)
+        keep++;                 /* full: the oldest goes (bursts beside it are long gone) */
+    if (keep > 0) {
+        d->gap_ns_old = d->gaps[keep - 1].ns;
+        memmove(d->gaps, d->gaps + keep, (d->num_gaps - keep) * sizeof(d->gaps[0]));
+        d->num_gaps -= keep;
+    }
+    d->gap_ns += (uint64_t)((double)num_samples * 1e9 / d->sample_rate + 0.5);
+    d->gaps[d->num_gaps].at = d->sample_count;
+    d->gaps[d->num_gaps].ns = d->gap_ns;
+    d->num_gaps++;
 }
 
 /* ---- Public: feed samples ---- */
@@ -1258,6 +1312,7 @@ void *burst_detector_thread(void *arg) {
         /* Pass hardware timestamp to detector (used on first buffer only) */
         if (samples->hw_timestamp_ns != 0)
             det->pending_hw_ts = samples->hw_timestamp_ns;
+        burst_detector_gap(det, samples->gap_before);
 
         if (samples->format == SAMPLE_FMT_FLOAT)
             burst_detector_feed_cf32(det, (const float *)samples->samples,

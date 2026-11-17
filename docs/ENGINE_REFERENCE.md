@@ -940,6 +940,9 @@ Output options:
                              Frame times then follow the recording's clock instead
                              of the wall clock at start (default). With --zmq-sub:
                              the time of the first sample received.
+    --file-realtime[=X]     read the file at X times its sample rate (default 1),
+                             dropping samples when behind as a live radio does:
+                             to see how a machine copes before it goes live
     --save-bursts=DIR       save IQ samples of decoded bursts to directory
     --diagnostic            setup verification mode (suppresses RAW output)
     --no-gardner           disable Gardner timing recovery (enabled by default)
@@ -1124,3 +1127,10 @@ The `signal level` field (e.g. `0.11738`) is the raw burst amplitude in linear s
 This output is consumed directly by [iridium-toolkit](https://github.com/muccc/iridium-toolkit) for higher-layer protocol decoding including ACARS, SBD messaging, pager data, voice, and satellite telemetry.
 
 stderr shows a status line once per second in the same format as gr-iridium, so existing monitoring scripts work without changes.
+
+If the machine cannot keep up with a live radio, the sample queue fills (`q_max` reaches 512) and incoming samples are dropped; a warning says so once, and the status line gains `sdrop: 18.5s/937`: seconds of signal dropped so far, and the bursts discarded because they were spliced across a drop. Frame times stay true through drops: each gap moves the receiver's clock on by the signal it lost. `d:` is a different count, bursts dropped later when the demodulators fall behind. `--file-realtime` replays a recording as a radio would deliver it, so a machine can be tried on a known capture before it goes live:
+
+```bash
+# Replay at real speed; any sdrop: means this machine would lose signal live
+./iridium-sniffer -f recording.ci16 -r 10000000 -c 1622000000 --file-realtime
+```
