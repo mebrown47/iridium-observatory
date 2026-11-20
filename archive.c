@@ -265,6 +265,26 @@ void archive_log_acars(uint64_t timestamp_ns, int uplink, double freq_hz,
     pthread_mutex_unlock(&A.lock);
 }
 
+void archive_log_position(uint64_t timestamp_ns, const char *reg,
+                          double lat, double lon, int alt_ft, const char *src)
+{
+    if (!archive_on || !reg || !reg[0])
+        return;
+    pthread_mutex_lock(&A.lock);
+    tick(time(NULL));
+    if (A.fp) {
+        fprintf(A.fp, "{\"e\":\"acpos\",\"t\":%llu,\"reg\":\"",
+                (unsigned long long)(timestamp_ns / 1000000ULL));
+        put_escaped(A.fp, reg);
+        fprintf(A.fp, "\",\"lat\":%.5f,\"lon\":%.5f", lat, lon);
+        if (alt_ft > -99999)
+            fprintf(A.fp, ",\"alt\":%d", alt_ft);
+        fprintf(A.fp, ",\"src\":\"%s\"}\n", src ? src : "");
+        fflush(A.fp);
+    }
+    pthread_mutex_unlock(&A.lock);
+}
+
 void archive_log_pager(uint64_t timestamp_ns, int ric, int fmt,
                        int csum_ok, const char *text)
 {

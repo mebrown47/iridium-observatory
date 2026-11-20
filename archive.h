@@ -53,6 +53,11 @@ void archive_log_acars(uint64_t timestamp_ns, int uplink, double freq_hz,
                        const char *decoded_json);
 
 /* Log a decoded pager (MSG/IMS) message. fmt: 5 = ASCII, 3 = BCD. */
+/* A position the aircraft reported (ADS-C, or its own message text), as the
+ * map placed it: src is "adsc", "text" or "fix". */
+void archive_log_position(uint64_t timestamp_ns, const char *reg,
+                          double lat, double lon, int alt_ft, const char *src);
+
 void archive_log_pager(uint64_t timestamp_ns, int ric, int fmt,
                        int csum_ok, const char *text);
 

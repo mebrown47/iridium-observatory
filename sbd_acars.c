@@ -954,6 +954,10 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
                 web_map_add_aircraft(tail, flt, pos_lat, pos_lon,
                                      timestamp, frequency, adsc_alt, src,
                                      oooi_str[0] ? oooi_str : NULL);
+                if (archive_enabled)
+                    archive_log_position(timestamp, tail, pos_lat, pos_lon, adsc_alt,
+                                         src == AC_POS_ADSC ? "adsc" :
+                                         src == AC_POS_TEXT ? "text" : "fix");
                 if (basestation_enabled) {
                     basestation_send_position(tail, flt, pos_lat, pos_lon,
                                               adsc_alt, timestamp);
@@ -1601,6 +1605,9 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                                      timestamp, frequency, -99999,
                                      have_text_pos == ACARS_POS_TEXT ?
                                      AC_POS_TEXT : AC_POS_FIX, NULL);
+                if (archive_enabled)
+                    archive_log_position(timestamp, reg_f, pos_lat, pos_lon, -99999,
+                                         have_text_pos == ACARS_POS_TEXT ? "text" : "fix");
                 if (basestation_enabled) {
                     basestation_send_position(reg_f, "", pos_lat, pos_lon,
                                               -99999, timestamp);

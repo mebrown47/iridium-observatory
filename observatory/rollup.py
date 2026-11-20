@@ -141,6 +141,17 @@ def init_db(con):
         );
         CREATE INDEX IF NOT EXISTS ix_adsc_t   ON adsc_log(t);
         CREATE INDEX IF NOT EXISTS ix_adsc_pos ON adsc_log(has_pos);
+
+        -- Positions aircraft reported, as the receiver's map placed them
+        -- ("acpos" events): ADS-C, coordinates in the aircraft's own text,
+        -- or a named fix in its own position report. Never a guess.
+        CREATE TABLE IF NOT EXISTS ac_pos (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            t    INTEGER, reg TEXT,
+            lat  REAL, lon REAL, alt INTEGER,
+            src  TEXT                   -- adsc | text | fix
+        );
+        CREATE INDEX IF NOT EXISTS ix_acpos_t ON ac_pos(t);
         """
     )
     con.execute(
@@ -363,6 +374,7 @@ class Agg:
         self.messages = []  # per-message rows (M4)
         self.cpdlcs = []    # per-CPDLC rows (M4)
         self.adscs = []     # per-ADS-C rows (M4)
+        self.acpos = []     # aircraft-reported positions
         self.lines = 0
         self.bad = 0
 
@@ -385,6 +397,10 @@ class Agg:
                 self.add(self.sat, (h, int(sid)), n)
             for sid, n in ev.get("ira_sats", {}).items():
                 self.add(self.sat_ira, (h, int(sid)), n)
+        elif e == "acpos":
+            self.acpos.append((sec_of(ev["t"]), (ev.get("reg") or "").lstrip("."),
+                               ev.get("lat"), ev.get("lon"), ev.get("alt"),
+                               ev.get("src") or ""))
         elif e == "acars":
             h = hour_of(ev["t"])
             ts = sec_of(ev["t"])
@@ -455,6 +471,9 @@ class Agg:
         con.executemany(
             "INSERT INTO adsc_log(t,reg,flt,dir,txt,kinds,summary,has_pos,"
             "lat,lon,alt,dec) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", self.adscs)
+        con.executemany(
+            "INSERT INTO ac_pos(t,reg,lat,lon,alt,src) VALUES(?,?,?,?,?,?)",
+            self.acpos)
 
 
 def ingest_file(con, path, agg, verbose):
