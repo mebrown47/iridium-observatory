@@ -259,6 +259,12 @@ static void add_beam_locked(const ira_data_t *ra, uint64_t timestamp,
 void web_map_add_ra(const ira_data_t *ra, uint64_t timestamp,
                      double frequency)
 {
+    /* A ring alert off the ring-alert channel is a burst that decoded as one
+     * by chance: its "satellite" landed 5,000-15,000 km from the station on
+     * the home feeder (issue #8). The Doppler fit already drops these. */
+    if (!ira_on_ring_alert_channel(frequency))
+        return;
+
     /* Sanity check coordinates */
     if (ra->lat < -90 || ra->lat > 90 || ra->lon < -180 || ra->lon > 180)
         return;
@@ -274,8 +280,9 @@ void web_map_add_ra(const ira_data_t *ra, uint64_t timestamp,
         return;
     }
 
-    /* Satellite orbital position: 700-900 km */
-    if (ra->alt < 700 || ra->alt > 900)
+    /* Satellite orbital position: real ring alerts report 793-803 km (home
+     * feeder); a false one can still land on the channel, so keep it tight */
+    if (ra->alt < 760 || ra->alt > 840)
         return;
 
     pthread_mutex_lock(&state.lock);

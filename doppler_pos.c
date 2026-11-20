@@ -210,6 +210,11 @@ static sat_meas_t *sat_buf_get(sat_buffer_t *s, int idx)
  * fails for passes spent mostly past +-20.8 kHz of Doppler. */
 #define IR_RING_ALERT_FREQ (IR_BASE_FREQ + (246 + 0.5) * IR_CHANNEL_WIDTH)
 
+int ira_on_ring_alert_channel(double frequency_hz)
+{
+    return fabs(frequency_hz - IR_RING_ALERT_FREQ) <= IRA_FREQ_WINDOW;
+}
+
 static double estimate_channel_freq(sat_buffer_t *s, uint64_t now)
 {
     (void)s;
@@ -446,7 +451,7 @@ void doppler_pos_add_measurement(const ira_data_t *ira, double frequency,
     dbg_total++;
 
     if (ira->sat_id == 0) { dbg_sat0++; goto dbg_print; }
-    if (fabs(frequency - IR_RING_ALERT_FREQ) > IRA_FREQ_WINDOW) {
+    if (!ira_on_ring_alert_channel(frequency)) {
         dbg_coord++;
         goto dbg_print;
     }

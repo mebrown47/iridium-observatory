@@ -33,6 +33,11 @@ typedef struct {
 void doppler_pos_init(void);
 
 /* Feed a decoded IRA frame into the measurement buffer. Thread-safe. */
+/* A ring alert is only real on the ring-alert channel (1626.270833 MHz,
+ * +-100 kHz for Doppler and receiver offset). A burst elsewhere that happens
+ * to decode as an IRA carries a garbage position. */
+int ira_on_ring_alert_channel(double frequency_hz);
+
 void doppler_pos_add_measurement(const ira_data_t *ira, double frequency,
                                   uint64_t timestamp);
 
