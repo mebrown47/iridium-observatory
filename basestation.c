@@ -471,7 +471,8 @@ void basestation_send_position(const char *reg, const char *flight,
  * An aircraft heard on Iridium ACARS without a position it reported: an
  * identification-only MSG,1, so tools such as tar1090 list it as active
  * without placing it on the map. Callsign: the flight number if the message
- * carried one, otherwise the registration. At most once a minute per
+ * carried one, otherwise empty -- readsb fills in the registration from the
+ * hex itself, and drops callsigns with a dash (XA-IMH). At most once a minute per
  * aircraft; positions still go out as MSG,3. Returns 1 if a line went out.
  */
 #define BS_IDENT_SLOTS 256
@@ -506,7 +507,7 @@ int basestation_send_ident(const char *reg, const char *flight)
     int len = snprintf(msg, sizeof(msg),
         "MSG,1,1,1,%s,1,%s,%s,%s,%s,%s,,,,,,,,,,,0\r\n",
         hex, datestamp, timestamp, datestamp, timestamp,
-        (flight && flight[0]) ? flight : reg);
+        (flight && flight[0]) ? flight : "");
     if (len <= 0 || len >= (int)sizeof(msg))
         return 0;
     bs_write(msg, len);

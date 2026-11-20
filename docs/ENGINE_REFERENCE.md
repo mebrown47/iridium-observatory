@@ -587,7 +587,7 @@ Output format (one line per position):
 MSG,3,1,1,A98539,1,2026/04/06,00:15:54.000,2026/04/06,00:15:54.000,UAL928,37000,,,52.000,-40.000,,,,0
 ```
 
-An aircraft heard on ACARS without a position it reported is sent as an identification-only line instead, at most once a minute, so tools such as tar1090 list it as active without placing it on the map. Its callsign is the flight number if the message carried one, otherwise the registration:
+An aircraft heard on ACARS without a position it reported is sent as an identification-only line instead, at most once a minute, so tools such as tar1090 list it as active without placing it on the map. Its callsign is the flight number if the message carried one, otherwise empty (readsb and tar1090 show the registration from the hex):
 ```
 MSG,1,1,1,A98539,1,2026/04/06,00:15:54.000,2026/04/06,00:15:54.000,UAL928,,,,,,,,,,,0
 ```
