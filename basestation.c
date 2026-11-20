@@ -370,6 +370,44 @@ static int bs_derive_track(const char *hex, double lat, double lon,
     return have_track;
 }
 
+/* Write one line to all connected clients / the remote host */
+static void bs_write(const char *msg, int len)
+{
+    pthread_mutex_lock(&clients_lock);
+    for (int i = 0; i < n_clients; ) {
+        ssize_t written = write(clients[i], msg, len);
+        if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            close(clients[i]);
+            if (bs_mode == 1) {
+                /* Client mode: mark for reconnection */
+                bs_client_fd = -1;
+                n_clients = 0;
+                fprintf(stderr, "basestation: connection to %s:%d lost "
+                        "(will reconnect)\n",
+                        bs_remote_host, bs_remote_port);
+            } else {
+                clients[i] = clients[--n_clients];
+                fprintf(stderr, "basestation: client disconnected "
+                        "(%d active)\n", n_clients);
+            }
+            break;
+        } else {
+            i++;
+        }
+    }
+    pthread_mutex_unlock(&clients_lock);
+}
+
+/* SBS timestamps: the time the line is written (UTC) */
+static void bs_stamp(char *date, size_t dn, char *tod, size_t tn)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    strftime(date, dn, "%Y/%m/%d", &tm);
+    strftime(tod, tn, "%H:%M:%S.000", &tm);
+}
+
 void basestation_send_position(const char *reg, const char *flight,
                                 double lat, double lon,
                                 int alt_ft, uint64_t timestamp_ns)
@@ -386,13 +424,8 @@ void basestation_send_position(const char *reg, const char *flight,
     int have_track = bs_derive_track(hex, lat, lon, timestamp_ns,
                                       &gs_knots, &track_deg);
 
-    /* Format timestamp */
-    time_t now = time(NULL);
-    struct tm tm;
-    gmtime_r(&now, &tm);
     char datestamp[32], timestamp[32];
-    strftime(datestamp, sizeof(datestamp), "%Y/%m/%d", &tm);
-    strftime(timestamp, sizeof(timestamp), "%H:%M:%S.000", &tm);
+    bs_stamp(datestamp, sizeof(datestamp), timestamp, sizeof(timestamp));
 
     /* Build MSG,3 line */
     char msg[512];
@@ -431,30 +464,53 @@ void basestation_send_position(const char *reg, const char *flight,
     if (len <= 0 || len >= (int)sizeof(msg))
         return;
 
-    /* Write to all connected clients / remote host */
-    pthread_mutex_lock(&clients_lock);
-    for (int i = 0; i < n_clients; ) {
-        ssize_t written = write(clients[i], msg, len);
-        if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            close(clients[i]);
-            if (bs_mode == 1) {
-                /* Client mode: mark for reconnection */
-                bs_client_fd = -1;
-                n_clients = 0;
-                fprintf(stderr, "basestation: connection to %s:%d lost "
-                        "(will reconnect)\n",
-                        bs_remote_host, bs_remote_port);
-            } else {
-                clients[i] = clients[--n_clients];
-                fprintf(stderr, "basestation: client disconnected "
-                        "(%d active)\n", n_clients);
-            }
-            break;
-        } else {
-            i++;
-        }
+    bs_write(msg, len);
+}
+
+/*
+ * An aircraft heard on Iridium ACARS without a position it reported: an
+ * identification-only MSG,1, so tools such as tar1090 list it as active
+ * without placing it on the map. Callsign: the flight number if the message
+ * carried one, otherwise the registration. At most once a minute per
+ * aircraft; positions still go out as MSG,3. Returns 1 if a line went out.
+ */
+#define BS_IDENT_SLOTS 256
+static struct { char hex[7]; time_t sent; } bs_ident[BS_IDENT_SLOTS];
+
+int basestation_send_ident(const char *reg, const char *flight)
+{
+    if (!bs_active || !reg || !reg[0])
+        return 0;
+    const char *hex = aircraft_db_lookup(reg);
+    if (!hex) return 0;  /* unknown aircraft, skip */
+
+    time_t now = time(NULL);
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < BS_IDENT_SLOTS; i++) {
+        if (strcmp(bs_ident[i].hex, hex) == 0) { slot = i; break; }
+        if (bs_ident[i].sent < bs_ident[oldest].sent) oldest = i;
     }
-    pthread_mutex_unlock(&clients_lock);
+    if (slot >= 0 && now - bs_ident[slot].sent < 60)
+        return 0;
+    if (slot < 0) {
+        slot = oldest;
+        strncpy(bs_ident[slot].hex, hex, 6);
+        bs_ident[slot].hex[6] = '\0';
+    }
+    bs_ident[slot].sent = now;
+
+    char datestamp[32], timestamp[32];
+    bs_stamp(datestamp, sizeof(datestamp), timestamp, sizeof(timestamp));
+    char msg[256];
+    /* MSG,1 (identification): fields after the callsign are empty */
+    int len = snprintf(msg, sizeof(msg),
+        "MSG,1,1,1,%s,1,%s,%s,%s,%s,%s,,,,,,,,,,,0\r\n",
+        hex, datestamp, timestamp, datestamp, timestamp,
+        (flight && flight[0]) ? flight : reg);
+    if (len <= 0 || len >= (int)sizeof(msg))
+        return 0;
+    bs_write(msg, len);
+    return 1;
 }
 
 void basestation_destroy(void)

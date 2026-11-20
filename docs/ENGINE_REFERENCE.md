@@ -587,7 +587,12 @@ Output format (one line per position):
 MSG,3,1,1,A98539,1,2026/04/06,00:15:54.000,2026/04/06,00:15:54.000,UAL928,37000,,,52.000,-40.000,,,,0
 ```
 
-Three position sources feed the output, in priority order:
+An aircraft heard on ACARS without a position it reported is sent as an identification-only line instead, at most once a minute, so tools such as tar1090 list it as active without placing it on the map. Its callsign is the flight number if the message carried one, otherwise the registration:
+```
+MSG,1,1,1,A98539,1,2026/04/06,00:15:54.000,2026/04/06,00:15:54.000,UAL928,,,,,,,,,,,0
+```
+
+Three position sources feed the `MSG,3` position lines, in priority order:
 1. **ADS-C GPS** -- structured position from ARINC-622 ADS-C reports (requires libacars)
 2. **ACARS free text** -- coordinates extracted from known message labels (H1/POS, label 20, 44, 4J, 15, SA)
 3. **Waypoint lookup** -- in a POS report that names a fix instead of coordinates, that fix, resolved via the bundled aviation waypoint database

@@ -37,6 +37,10 @@ void basestation_send_position(const char *reg, const char *flight,
 /*
  * Shut down basestation output (close sockets, stop thread).
  */
+/* Aircraft active on ACARS with no reported position: MSG,1 only, so it is
+ * listed but not placed. */
+int basestation_send_ident(const char *reg, const char *flight);
+
 void basestation_destroy(void);
 
 #endif

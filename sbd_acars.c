@@ -353,6 +353,7 @@ static int stat_pos_adsc = 0;       /* positions from ADS-C */
 static int stat_pos_text = 0;       /* positions from free text coords */
 static int stat_pos_waypoint = 0;   /* positions from waypoint lookup */
 static int stat_bs_sent = 0;        /* positions sent via basestation */
+static int stat_bs_ident = 0;       /* identification-only (MSG,1) lines */
 
 /* ---- Timestamp handling ---- */
 
@@ -940,11 +941,15 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
             stat_pos_waypoint++;
         }
 
+        const char *tail = msg->reg;
+        while (*tail == '.') tail++;
+        const char *flt = adsc_flt[0] ? adsc_flt :
+                          (msg->flight_id[0] ? msg->flight_id : "");
+        if (!src && *tail && basestation_enabled) {
+            /* active, position unknown: listed, not placed */
+            stat_bs_ident += basestation_send_ident(tail, flt);
+        }
         if (src) {
-            const char *tail = msg->reg;
-            while (*tail == '.') tail++;
-            const char *flt = adsc_flt[0] ? adsc_flt :
-                              (msg->flight_id[0] ? msg->flight_id : "");
             if (*tail) {
                 web_map_add_aircraft(tail, flt, pos_lat, pos_lon,
                                      timestamp, frequency, adsc_alt, src,
@@ -1601,6 +1606,9 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                                               -99999, timestamp);
                     stat_bs_sent++;
                 }
+            } else if (basestation_enabled) {
+                /* active, position unknown: listed, not placed */
+                stat_bs_ident += basestation_send_ident(reg_f, "");
             }
         }
     }
@@ -1968,6 +1976,7 @@ void acars_print_stats(void)
     if (stat_pos_adsc || stat_pos_text || stat_pos_waypoint)
         fprintf(stderr, "Positions: %d ADS-C, %d text, %d waypoint\n",
                 stat_pos_adsc, stat_pos_text, stat_pos_waypoint);
-    if (stat_bs_sent > 0)
-        fprintf(stderr, "BaseStation: %d positions sent\n", stat_bs_sent);
+    if (stat_bs_sent > 0 || stat_bs_ident > 0)
+        fprintf(stderr, "BaseStation: %d positions sent, %d aircraft listed "
+                "without a position\n", stat_bs_sent, stat_bs_ident);
 }
