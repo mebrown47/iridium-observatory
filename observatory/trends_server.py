@@ -624,10 +624,29 @@ def build_doppler(sniffer_url, timeout=4):
             "sniffer": sniffer_url}
 
 
+def build_flights_api(handler, hours):
+    """GET /api/flights: aircraft context (observatory/context.py), with the
+    station position from the sky tracker's ring-alert fit or --station."""
+    import context
+    cls = type(handler)
+    if cls.context_ref is None:
+        # aircraft types only matter for estimates, which are off: skip the
+        # 600k-line aircraft.csv and its memory unless they are enabled
+        cls.context_ref = context.Reference(
+            aircraft_csv=None if context.ESTIMATES_ENABLED else False)
+    st = None
+    if handler.sky is not None:
+        s = handler.sky.shared.get("station")
+        if s:
+            st = [round(s[0], 4), round(s[1], 4)]
+    return context.build_flights(handler.db_path, cls.context_ref, hours=hours, station=st)
+
+
 class Handler(BaseHTTPRequestHandler):
     db_path = DB_PATH
     sniffer_url = SNIFFER_URL
     sky = None
+    context_ref = None          # observatory/context.py Reference, loaded on first use
     coverage = None
 
     def log_message(self, *a):
@@ -700,6 +719,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 if self.command != "HEAD":
                     self.wfile.write(b)
+        elif u.path == "/flights":
+            self._send(200, FLIGHTS_PAGE, "text/html; charset=utf-8")
+        elif u.path == "/api/flights":
+            q = parse_qs(u.query)
+            try:
+                hours = max(1, min(48, int(q.get("hours", ["6"])[0])))
+                self._send(200, json.dumps(build_flights_api(self, hours)), "application/json")
+            except Exception as e:  # noqa: keep the server alive
+                self._send(500, json.dumps({"error": str(e)}), "application/json")
         elif u.path == "/doppler":
             self._send(200, DOPPLER_PAGE, "text/html; charset=utf-8")
         elif u.path == "/api/doppler":
@@ -823,7 +851,7 @@ PAGE = r"""<!doctype html>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/" class="on">Trends</a><a href="/aviation">Aviation</a>
     <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a>
-    <a href="/search">Search</a></nav>
+    <a href="/search">Search</a><a href="/flights">Flights</a></nav>
   <span class="sub">constellation activity over time</span>
   <span class="spacer"></span>
   <div class="controls" id="win">
@@ -1179,7 +1207,7 @@ AVIATION_PAGE = r"""<!doctype html>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation" class="on">Aviation</a>
     <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a>
-    <a href="/search">Search</a></nav>
+    <a href="/search">Search</a><a href="/flights">Flights</a></nav>
   <span class="sub">decoded aircraft traffic — per-tail history &amp; CPDLC log</span>
   <span class="spacer"></span>
   <span class="status" id="status"><span class="dot"></span>loading…</span>
@@ -1495,7 +1523,7 @@ DOPPLER_PAGE = r"""<!doctype html>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
     <a href="/doppler" class="on">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a>
-    <a href="/search">Search</a></nav>
+    <a href="/search">Search</a><a href="/flights">Flights</a></nav>
   <span class="sub">live satellite passes, drawn in radio frequency</span>
   <span class="spacer"></span>
   <span class="status" id="status"><span class="dot"></span>loading…</span>
@@ -1874,7 +1902,7 @@ COVERAGE_PAGE = r"""<!doctype html>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
     <a href="/doppler">Doppler</a><a href="/coverage" class="on">Coverage</a><a href="/graph">Graph</a>
-    <a href="/search">Search</a></nav>
+    <a href="/search">Search</a><a href="/flights">Flights</a></nav>
   <span class="sub">where in the sky this station hears Iridium</span>
   <span class="spacer"></span>
   <span class="status" id="status">loading…</span>
@@ -2053,7 +2081,7 @@ GRAPH_PAGE = r"""<!doctype html>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
     <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph" class="on">Graph</a>
-    <a href="/search">Search</a></nav>
+    <a href="/search">Search</a><a href="/flights">Flights</a></nav>
   <span class="sub">who hands aircraft to whom, from CPDLC</span>
   <span class="spacer"></span>
   <span class="status" id="status">loading…</span>
@@ -2328,7 +2356,7 @@ SEARCH_PAGE = r"""<!doctype html>
   <h1>Iridium Observatory</h1>
   <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
     <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a>
-    <a href="/search" class="on">Search</a></nav>
+    <a href="/search" class="on">Search</a><a href="/flights">Flights</a></nav>
   <span class="sub">every stored ACARS message, by aircraft, text, label and date</span>
   <span class="spacer"></span>
   <span class="status" id="status">loading…</span>
@@ -2506,6 +2534,199 @@ document.querySelectorAll(".quick button").forEach(b=>b.onclick=()=>{
 });
 fill(new URLSearchParams(location.search));
 run();
+</script>
+</body></html>
+"""
+
+
+
+FLIGHTS_PAGE = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iridium Observatory — Flights</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232c; --line:#2b333d;
+    --fg:#e6edf3; --dim:#8b98a5; --accent:#4aa8ff; --good:#3fb950;
+    --warn:#d29922; --hot:#f778ba; --plan:#a78bfa; --heard:#22d3ee;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+    padding:16px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:18px;margin:0;font-weight:650;letter-spacing:.2px}
+  header .sub{color:var(--dim);font-size:12.5px}
+  header .spacer{flex:1}
+  header .status{color:var(--dim);font-size:12px}
+  .nav{display:flex;gap:4px;flex-wrap:wrap}
+  .nav a{color:var(--dim);text-decoration:none;font-size:13px;padding:4px 11px;
+    border-radius:6px;border:1px solid transparent}
+  .nav a:hover{color:var(--fg)}
+  .nav a.on{color:var(--fg);background:var(--panel2);border-color:var(--line)}
+  main{padding:14px 22px;max-width:1500px;margin:0 auto}
+  @media(max-width:620px){main{padding:12px 16px}header{padding:14px 16px}}
+  .bar{display:flex;gap:10px 16px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:12.5px;color:var(--dim)}
+  .bar label{display:flex;align-items:center;gap:6px;cursor:pointer}
+  .bar select{background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:5px 8px;font:inherit}
+  .grid{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:14px;align-items:start}
+  @media(max-width:1000px){.grid{grid-template-columns:1fr}}
+  #map{height:calc(100vh - 190px);min-height:420px;border-radius:10px;border:1px solid var(--line);background:#1b1f24}
+  @media(max-width:1000px){#map{height:60vh;min-height:320px}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .panel h2{font-size:13px;margin:0 0 8px;font-weight:600;display:flex;justify-content:space-between;gap:8px}
+  .panel h2 .hint{color:var(--dim);font-weight:400;font-size:11.5px}
+  #list{max-height:calc(100vh - 330px);overflow-y:auto}
+  @media(max-width:1000px){#list{max-height:none}}
+  .ac{padding:8px 6px;border-top:1px solid var(--line);cursor:pointer}
+  .ac:first-child{border-top:0}
+  .ac:hover,.ac.sel{background:var(--panel2)}
+  .ac .top{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+  .ac .reg{font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .ac .reg a{color:var(--fg);text-decoration:none}
+  .ac .reg a:hover{color:var(--accent)}
+  .ac .ago{color:var(--dim);font-size:11.5px;white-space:nowrap}
+  .ac .ctx{font-size:12.5px;margin-top:3px;color:var(--dim)}
+  .ac .ctx b{color:var(--fg);font-weight:500}
+  .tag{display:inline-block;font-size:10.5px;padding:0 6px;border-radius:9px;border:1px solid var(--line);margin-right:5px;vertical-align:1px}
+  .t-rep{color:var(--good);border-color:var(--good)}
+  .t-plan{color:var(--plan);border-color:var(--plan)}
+  .t-heard{color:var(--heard);border-color:var(--heard)}
+  .t-est{color:var(--warn);border-color:var(--warn)}
+  .legend{font-size:12px;color:var(--dim);margin-top:12px;line-height:1.7}
+  .legend .k{display:inline-block;width:26px;text-align:center;margin-right:6px}
+  .empty{color:var(--dim);font-size:12.5px;padding:10px 4px}
+  .leaflet-popup-content{font-size:12.5px}
+  .note{font-size:11.5px;color:var(--dim);margin-top:8px}
+</style></head>
+<body>
+<header>
+  <h1>Iridium Observatory</h1>
+  <nav class="nav"><a href="/">Trends</a><a href="/aviation">Aviation</a>
+    <a href="/doppler">Doppler</a><a href="/coverage">Coverage</a><a href="/graph">Graph</a>
+    <a href="/search">Search</a><a href="/flights" class="on">Flights</a></nav>
+  <span class="sub">aircraft heard on Iridium ACARS, and what their messages say about where they are or are going</span>
+  <span class="spacer"></span>
+  <span class="status" id="status">loading…</span>
+</header>
+<main>
+  <div class="bar">
+    <label>Window <select id="hours"><option value="2">2 h</option><option value="6" selected>6 h</option><option value="12">12 h</option><option value="24">24 h</option></select></label>
+    <label><input type="checkbox" id="l-rep" checked> Reported positions</label>
+    <label><input type="checkbox" id="l-heard" checked> Heard directly</label>
+    <label><input type="checkbox" id="l-plan" checked> Flight plans</label>
+    <label id="lab-est"><input type="checkbox" id="l-est" checked> Estimates</label>
+    <label><input type="checkbox" id="only" checked> List only aircraft with context</label>
+  </div>
+  <div class="grid">
+    <div id="map"></div>
+    <div class="panel">
+      <h2><span id="count">Aircraft</span><span class="hint">newest first · click to show</span></h2>
+      <div id="list"><div class="empty">loading…</div></div>
+      <div class="legend">
+        <div><span class="k" style="color:var(--good)">●</span>a position the aircraft reported (ADS-C or its own message)</div>
+        <div><span class="k" style="color:var(--heard)">◯</span>heard directly: the station received the aircraft itself, so it was within about <span id="hk">300</span> km</div>
+        <div><span class="k" style="color:var(--plan)">┄</span>its flight plan, origin to destination: where it is going, not where it is</div>
+        <div id="leg-est"><span class="k" style="color:var(--warn)">◌</span>estimated from its flight plan: somewhere inside the circle</div>
+      </div>
+      <div class="note" id="estnote"></div>
+    </div>
+  </div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const map=L.map("map",{zoomControl:true,worldCopyJump:true}).setView([30,-60],3);
+const esri="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_";
+const topt={maxZoom:18,maxNativeZoom:16};
+L.tileLayer(esri+"Base/MapServer/tile/{z}/{y}/{x}",Object.assign({attribution:"Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors"},topt)).addTo(map);
+L.tileLayer(esri+"Reference/MapServer/tile/{z}/{y}/{x}",topt).addTo(map);
+const layers={rep:L.layerGroup().addTo(map),heard:L.layerGroup().addTo(map),plan:L.layerGroup().addTo(map),est:L.layerGroup().addTo(map)};
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let DATA=null, SEL=null, fitted=false;
+function ago(t){const s=Math.max(0,DATA.now-t);if(s<90)return Math.round(s)+" s ago";if(s<5400)return Math.round(s/60)+" min ago";return (s/3600).toFixed(1)+" h ago";}
+function hhmm(t){const d=new Date(t*1000);return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+"Z";}
+function apName(code,name){return name?'<b title="'+esc(name)+'">'+esc(code)+'</b>':'<b>'+esc(code)+'</b>';}
+function lines(a){
+  const c=a.context, out=[];
+  if(c.reported) out.push('<span class="tag t-rep">reported</span>'+c.reported.lat.toFixed(2)+", "+c.reported.lon.toFixed(2)+" · "+ago(c.reported.t)+(c.reported.src?" ("+esc(c.reported.src)+")":""));
+  if(c.plan) out.push('<span class="tag t-plan">plan</span>'+apName(c.plan.origin,c.plan.origin_name)+" → "+apName(c.plan.dest,c.plan.dest_name)+(c.plan.dep_hhmm?" · planned off "+esc(c.plan.dep_hhmm)+"Z":"")+(c.plan.cruise_fl?" · FL"+c.plan.cruise_fl:""));
+  else if(c.plan_notice) out.push('<span class="tag t-plan">plan</span>'+apName(c.plan_notice.origin,c.plan_notice.origin_name)+" → "+apName(c.plan_notice.dest,c.plan_notice.dest_name)+' <span title="a flight-plan notice: may be for its next flight">(notice)</span>');
+  if(c.atis) out.push('<span class="tag t-plan">'+(c.atis.role==="dest"?"inbound":"departing")+'</span>'+apName(c.atis.airport,c.atis.airport_name)+" (ATIS, "+ago(c.atis.t)+")");
+  if(c.takeoff) out.push('<span class="tag t-plan">departing</span>'+apName(c.takeoff.airport,c.takeoff.airport_name)+" (takeoff data, "+ago(c.takeoff.t)+")");
+  if(c.heard) out.push('<span class="tag t-heard">heard directly</span>'+ago(c.heard.t));
+  if(a.estimate&&a.estimate.status==="en_route") out.push('<span class="tag t-est">estimate</span>±'+a.estimate.radius_km+" km, from its plan");
+  if(!out.length) out.push("no position or plan in its messages");
+  return out.map(x=>'<div class="ctx">'+x+'</div>').join("");
+}
+function draw(){
+  Object.values(layers).forEach(l=>l.clearLayers());
+  if(!DATA)return;
+  const st=DATA.station, bounds=[], heard=[];
+  for(const a of DATA.aircraft){
+    const c=a.context, dim=SEL&&SEL!==a.reg, op=dim?0.25:1;
+    const label=esc(a.reg)+(a.flight?" / "+esc(a.flight):"");
+    const pop='<b>'+label+'</b>'+lines(a)+'<div class="ctx"><a href="/aviation?tail='+encodeURIComponent(a.reg)+'">history</a> · <a href="/search?ac='+encodeURIComponent(a.reg)+'">messages</a></div>';
+    if(c.reported){const p=[c.reported.lat,c.reported.lon];bounds.push(p);
+      L.circleMarker(p,{radius:7,color:css("--good"),fillColor:css("--good"),fillOpacity:.9*op,opacity:op,weight:2}).bindTooltip(label).bindPopup(pop).addTo(layers.rep);}
+    const pl=c.plan||c.plan_notice;
+    if(pl&&pl.route&&pl.route.length>1){
+      L.polyline(pl.route,{color:css("--plan"),weight:2,opacity:.75*op,dashArray:"6,6"}).bindTooltip(label+": "+esc(pl.origin)+" → "+esc(pl.dest)).bindPopup(pop).addTo(layers.plan);
+      for(const k of ["origin","dest"]){const pos=pl[k+"_pos"];if(pos){bounds.push(pos);
+        L.circleMarker(pos,{radius:3,color:css("--plan"),fillOpacity:.6*op,opacity:op,weight:1}).bindTooltip(esc(pl[k])+(pl[k+"_name"]?" — "+esc(pl[k+"_name"]):"")).addTo(layers.plan);}}}
+    if(c.heard)heard.push(a);
+    const e=a.estimate;
+    if(e&&e.status==="en_route"){const p=[e.lat,e.lon];
+      L.circle(p,{radius:e.radius_km*1000,color:css("--warn"),weight:1.5,opacity:.8*op,fillOpacity:.08*op}).bindTooltip(label+": estimated, ±"+e.radius_km+" km").bindPopup(pop).addTo(layers.est);
+      L.circleMarker(p,{radius:5,color:css("--warn"),fill:false,weight:2,opacity:op}).addTo(layers.est);}
+  }
+  if(st&&heard.length){
+    /* one ring for all of them: each was somewhere inside it when heard */
+    const sel=SEL&&heard.some(a=>a.reg===SEL), op=SEL&&!sel?0.25:1;
+    const names=heard.slice(0,12).map(a=>esc(a.reg)+" ("+ago(a.context.heard.t)+")").join("<br>")+(heard.length>12?"<br>…":"");
+    L.circle(st,{radius:DATA.heard_km*1000,color:css("--heard"),weight:1.5,opacity:.7*op,fillOpacity:.05*op,dashArray:"2,4"})
+      .bindTooltip(heard.length+" aircraft heard directly: each was inside this ring").bindPopup("<b>Heard directly</b><br>"+names).addTo(layers.heard);}
+  if(st){L.circleMarker(st,{radius:5,color:"#fff",fillColor:"#fff",fillOpacity:1,weight:1}).bindTooltip("this station").addTo(layers.heard);bounds.push(st);}
+  if(!fitted&&bounds.length){map.fitBounds(bounds,{padding:[30,30],maxZoom:6});fitted=true;}
+  for(const [k,id] of [["rep","l-rep"],["heard","l-heard"],["plan","l-plan"],["est","l-est"]]){if($(id).checked)map.addLayer(layers[k]);else map.removeLayer(layers[k]);}
+}
+function list(){
+  const L2=$("list");
+  const shown=$("only").checked?DATA.aircraft.filter(a=>Object.keys(a.context).length):DATA.aircraft;
+  if(!shown.length){L2.innerHTML='<div class="empty">'+(DATA.aircraft.length?'None of the '+DATA.aircraft.length+' aircraft heard in this window said where they are or are going.':'No aircraft heard in this window.')+'</div>';return;}
+  L2.innerHTML=shown.slice(0,400).map(a=>'<div class="ac'+(SEL===a.reg?' sel':'')+'" data-reg="'+esc(a.reg)+'"><div class="top"><span class="reg"><a href="/aviation?tail='+encodeURIComponent(a.reg)+'">'+esc(a.reg)+'</a>'+(a.flight?' <span style="color:var(--dim);font-weight:400">'+esc(a.flight)+'</span>':'')+(a.type?' <span style="color:var(--dim);font-weight:400">'+esc(a.type)+'</span>':'')+'</span><span class="ago">'+a.msgs+' msg · '+ago(a.last)+'</span></div>'+lines(a)+'</div>').join("");
+}
+function focus(reg){
+  SEL=(SEL===reg)?null:reg; draw(); list();
+  const a=DATA.aircraft.find(x=>x.reg===reg); if(!a||SEL===null)return;
+  const c=a.context, pts=[];
+  if(c.reported)pts.push([c.reported.lat,c.reported.lon]);
+  const pl=c.plan||c.plan_notice; if(pl&&pl.route)pts.push(...pl.route);
+  if(a.estimate&&a.estimate.status==="en_route")pts.push([a.estimate.lat,a.estimate.lon]);
+  if(!pts.length&&c.heard&&DATA.station)pts.push(DATA.station);
+  if(pts.length)map.fitBounds(pts,{padding:[40,40],maxZoom:7});
+}
+$("list").addEventListener("click",e=>{if(e.target.closest("a"))return;const d=e.target.closest(".ac");if(d)focus(d.dataset.reg);});
+for(const id of ["l-rep","l-heard","l-plan","l-est"])$(id).addEventListener("change",draw);
+$("only").addEventListener("change",list);
+$("hours").addEventListener("change",()=>{fitted=false;load();});
+async function load(){
+  try{
+    const r=await fetch("/api/flights?hours="+$("hours").value); const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    DATA=d; $("hk").textContent=Math.round(d.heard_km);
+    const n=d.aircraft.length, withSomething=d.aircraft.filter(a=>Object.keys(a.context).length).length;
+    $("count").textContent=n+" aircraft · "+withSomething+" with context";
+    $("lab-est").style.display=d.estimates_enabled?"":"none"; $("leg-est").style.display=d.estimates_enabled?"":"none";
+    $("estnote").textContent=d.estimates_enabled?"":"Estimated positions are off: checked against real VDL2 positions, they were not reliable enough to draw.";
+    $("status").textContent="updated "+hhmm(d.now)+(d.station?"":" · station position not fitted yet");
+    draw(); list();
+  }catch(e){$("status").textContent="error: "+e.message;}
+}
+load(); setInterval(load,60000);
 </script>
 </body></html>
 """

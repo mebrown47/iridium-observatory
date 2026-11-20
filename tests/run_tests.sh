@@ -121,6 +121,13 @@ else
     bad "observatory/tests/test_search.py:"; echo "$out" | grep -E "FAIL|Error" | sed 's/^/    /'
 fi
 
+echo "== Observatory flights =="
+if out="$("$PY" "$ROOT/observatory/tests/test_context.py" 2>&1)"; then
+    ok "Flights page context rules, estimate maths and API"
+else
+    bad "observatory/tests/test_context.py:"; echo "$out" | grep -E "FAIL|Error" | sed 's/^/    /'
+fi
+
 # ---- Tier 2: oracle cross-check vs iridium-parser.py ----
 if [ "${SKIP_ORACLE:-0}" != 1 ]; then
     echo "== oracle cross-check (vs iridium-parser.py) =="
