@@ -37,8 +37,17 @@ int main(int argc, char **argv)
 {
     if (argc < 2 || waypoint_db_load(argv[1]) < 0)
         return 2;
+    /* degrees, minutes and tenths: 46d24.7'N 101d47.8'W */
     check("H1 POS coordinates", "H1",
-          "POSN46247W101478,KSEA,190504,350,HASTE,203912", 't', 46.247, -101.478);
+          "POSN46247W101478,KSEA,190504,350,HASTE,203912", 't', 46.411667, -101.796667);
+    /* AS0217 over DIK (Dickinson VOR, 46.86N 102.77W) at 14:51:00 */
+    check("H1 POS report over its reporting point", "H1",
+          "POSN46518W102505,DIK,145100,360,KU12S,152112,HLN,M56,210069", 't', 46.863333, -102.841667);
+    check("POS report under another label", "3P",
+          "POSN45216W096178,VIVID,022727,350,DLH,024641,OVORA,M55,232108,1076FAKE",
+          't', 45.36, -96.296667);
+    check("POS report, minutes of 60 or more", "H1",
+          "POSN46647W101478,KSEA", '-', 0, 0);
     check("label 20 degrees and minutes", "20",
           "RPT N33521W084123 FL350", 't', 33.868333, -84.205);
     check("tagged LAT/LON", "H1",
@@ -91,8 +100,8 @@ int main(int argc, char **argv)
           "EHAM,KLAX,261903, 46.79,-101.63,37999,272,-142.4, 18200", 't', 46.79, -101.63);
     check("label 83 without a position", "83",
           "EHAM,KLAX,261903,FL380", '-', 0, 0);
-    check("other labels ignored", "5Z",
-          "POSN46247W101478,HASTE", '-', 0, 0);
+    check("other labels: coordinates inside the text ignored", "5Z",
+          "RTE KSEA N46247W101478 HASTE", '-', 0, 0);
 
     /* the rules both engines apply: aircraft-sent only, fix only in POS */
     double lat, lon;

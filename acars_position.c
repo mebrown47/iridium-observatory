@@ -220,6 +220,46 @@ static int label83_position(const char *text, double *lat, double *lon)
     return 1;
 }
 
+/*
+ * The ARINC 620 position report's coordinates, after "POS":
+ * [NS]DDMMm[EW]DDDMMm, degrees, minutes and tenths of a minute, the same
+ * layout as Format 2 below. Example: POSN46518W102505,DIK,145100,360
+ * = 46d51.8'N 102d50.5'W, over DIK (Dickinson VOR, 46.86N 102.77W) at
+ * 14:51:00 at FL360. Reading the digits as thousandths of a degree
+ * (46.518N 102.505W, 40 km from DIK) was wrong: over a run of five-minute
+ * reports at steady cruise it gave 435, 434, 443 and then 250 kt, where
+ * degrees and minutes give 396 to 414 kt.
+ */
+static int pos_report(const char *p, double *lat, double *lon)
+{
+    const char lat_dir = p[0];
+    if (lat_dir != 'N' && lat_dir != 'S')
+        return 0;
+    for (int i = 1; i <= 5; i++)
+        if (p[i] < '0' || p[i] > '9')
+            return 0;
+    const char lon_dir = p[6];
+    if (lon_dir != 'E' && lon_dir != 'W')
+        return 0;
+    for (int i = 7; i <= 12; i++)
+        if (p[i] < '0' || p[i] > '9')
+            return 0;
+    if (p[13] >= '0' && p[13] <= '9')
+        return 0;
+    const int lat_deg = (p[1] - '0') * 10 + (p[2] - '0');
+    const int lat_min10 = (p[3] - '0') * 100 + (p[4] - '0') * 10 + (p[5] - '0');
+    const int lon_deg = (p[7] - '0') * 100 + (p[8] - '0') * 10 + (p[9] - '0');
+    const int lon_min10 = (p[10] - '0') * 100 + (p[11] - '0') * 10 + (p[12] - '0');
+    if (lat_deg > 90 || lat_min10 >= 600 || lon_deg > 180 || lon_min10 >= 600)
+        return 0;
+    const double la = lat_deg + lat_min10 / 600.0, lo = lon_deg + lon_min10 / 600.0;
+    if (la > 90 || lo > 180)
+        return 0;
+    *lat = lat_dir == 'S' ? -la : la;
+    *lon = lon_dir == 'W' ? -lo : lo;
+    return 1;
+}
+
 int acars_extract_text_position(const char *label, const char *text,
                                         double *lat, double *lon)
 {
@@ -231,6 +271,18 @@ int acars_extract_text_position(const char *label, const char *text,
         return label32_position(text, lat, lon);
     if (label[0] == '8' && label[1] == '3')
         return label83_position(text, lat, lon);
+
+    /* A message that is a position report, whatever its label: text
+     * starting with POS and the coordinates (UA0177 sends them as label
+     * 3P). The label list below is for coordinates found elsewhere in a
+     * message, where they may be a route or a destination. */
+    {
+        const char *t = text;
+        while (*t == ' ' || *t == '\r' || *t == '\n' || *t == '\t')
+            t++;
+        if (strncmp(t, "POS", 3) == 0 && pos_report(t + 3, lat, lon))
+            return 1;
+    }
 
     /* Labels known to carry current aircraft position in text:
      *   H1  - position/met report (POS preamble)
@@ -263,49 +315,14 @@ int acars_extract_text_position(const char *label, const char *text,
     }
 
     /*
-     * Format 1: POS[NS]ddddd[EW]dddddd  (degrees * 1000)
-     *   Example: POSN43312W123174 = 43.312N, 123.174W
-     *   Used in H1/POS and label 20/POS messages.
+     * Format 1: POS[NS]DDMMm[EW]DDDMMm  (degrees, minutes and tenths)
+     *   Example: POSN43312W123174 = 43d31.2'N, 123d17.4'W
+     *   Used in H1/POS and label 20/POS messages (see pos_report).
      */
-    const char *p = strstr(text, "POS");
-    if (p) {
-        p += 3;
-        char lat_dir = *p;
-        if (lat_dir == 'N' || lat_dir == 'S') {
-            p++;
-            /* Parse 5-digit latitude (degrees * 1000) */
-            int lat_digits = 0;
-            const char *lp = p;
-            while (*p >= '0' && *p <= '9' && lat_digits < 5) {
-                lat_digits++;
-                p++;
-            }
-            if (lat_digits == 5) {
-                char lon_dir = *p;
-                if (lon_dir == 'E' || lon_dir == 'W') {
-                    p++;
-                    int lon_digits = 0;
-                    const char *lop = p;
-                    while (*p >= '0' && *p <= '9' && lon_digits < 6) {
-                        lon_digits++;
-                        p++;
-                    }
-                    if (lon_digits == 6) {
-                        char lat_buf[6], lon_buf[7];
-                        memcpy(lat_buf, lp, 5); lat_buf[5] = '\0';
-                        memcpy(lon_buf, lop, 6); lon_buf[6] = '\0';
-                        double la = atof(lat_buf) / 1000.0;
-                        double lo = atof(lon_buf) / 1000.0;
-                        if (la >= 0 && la <= 90 && lo >= 0 && lo <= 180) {
-                            *lat = (lat_dir == 'S') ? -la : la;
-                            *lon = (lon_dir == 'W') ? -lo : lo;
-                            return 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    const char *p;
+    for (p = strstr(text, "POS"); p; p = strstr(p + 3, "POS"))
+        if (pos_report(p + 3, lat, lon))
+            return 1;
 
     /*
      * Format 2: [NS]dddmm[EW]dddmm  (degrees + minutes, no decimal)
