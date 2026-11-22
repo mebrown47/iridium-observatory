@@ -230,8 +230,63 @@ static int label83_position(const char *text, double *lat, double *lon)
  * reports at steady cruise it gave 435, 434, 443 and then 250 kt, where
  * degrees and minutes give 396 to 414 kt.
  */
+/* The same report in decimal degrees, as Frontier sends it under label 21:
+ * POSN 32.650W 85.875, 105,025348,... = 32.650N 85.875W. Spaces are
+ * optional; both numbers must have a decimal point, so the packed degrees
+ * and minutes above can't be read this way. */
+/* Digits with one decimal point and at least one digit after it; *end past
+ * them. Not strtod: "33.912E151" would read as 33.912 x 10^151. */
+static int plain_decimal(const char *p, double *v, const char **end)
+{
+    double x = 0, scale = 1;
+    int digits = 0, frac = 0, point = 0;
+    for (; (*p >= '0' && *p <= '9') || (*p == '.' && !point); p++) {
+        if (*p == '.') { point = 1; continue; }
+        if (point) { scale /= 10; x += (*p - '0') * scale; frac++; }
+        else x = x * 10 + (*p - '0');
+        digits++;
+    }
+    if (!point || !frac || digits > 9)
+        return 0;
+    *v = x;
+    *end = p;
+    return 1;
+}
+
+static int pos_report_decimal(const char *p, double *lat, double *lon)
+{
+    const char lat_dir = p[0];
+    if (lat_dir != 'N' && lat_dir != 'S')
+        return 0;
+    p++;
+    while (*p == ' ')
+        p++;
+    const char *end;
+    double la, lo;
+    if (*p < '0' || *p > '9' || !plain_decimal(p, &la, &end))
+        return 0;
+    p = end;
+    while (*p == ' ')
+        p++;
+    const char lon_dir = *p;
+    if (lon_dir != 'E' && lon_dir != 'W')
+        return 0;
+    p++;
+    while (*p == ' ')
+        p++;
+    if (*p < '0' || *p > '9' || !plain_decimal(p, &lo, &end))
+        return 0;
+    if (la > 90 || lo > 180)
+        return 0;
+    *lat = lat_dir == 'S' ? -la : la;
+    *lon = lon_dir == 'W' ? -lo : lo;
+    return 1;
+}
+
 static int pos_report(const char *p, double *lat, double *lon)
 {
+    if (pos_report_decimal(p, lat, lon))
+        return 1;
     const char lat_dir = p[0];
     if (lat_dir != 'N' && lat_dir != 'S')
         return 0;
@@ -282,6 +337,11 @@ int acars_extract_text_position(const char *label, const char *text,
             t++;
         if (strncmp(t, "POS", 3) == 0 && pos_report(t + 3, lat, lon))
             return 1;
+        /* An intent list (H1 IDL0,,,N33208W086076.0,,,N32027W085167,3300,
+         * 025729.0,...): points ahead of the aircraft with the times it
+         * expects to reach them, not where it is. */
+        if (strncmp(t, "IDL", 3) == 0)
+            return 0;
     }
 
     /* Labels known to carry current aircraft position in text:

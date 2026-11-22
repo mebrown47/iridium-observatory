@@ -915,10 +915,16 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
 
         /* Extract position from ACARS text when ADS-C is absent: only
          * from messages the aircraft sent, on labels known to carry its
-         * current position (acars_aircraft_position has the rules). */
+         * current position (acars_aircraft_position has the rules). One
+         * position per message: the blocks still in progress (emitted
+         * above for the feeds) are skipped, and the reassembled message
+         * is read whole. Read block by block, each gave the last entry it
+         * holds (an older one, of a position history) at the newest time. */
         int text_pos = 0;
         int wp_pos = 0;
-        if (!adsc_pos && msg->txt && msg->txt[0]) {
+        if (!adsc_pos && msg->txt && msg->txt[0] &&
+            msg->reasm_status != LA_REASM_IN_PROGRESS &&
+            msg->reasm_status != LA_REASM_DUPLICATE) {
             int src = acars_aircraft_position(msg->label, msg->txt, ul,
                                               &pos_lat, &pos_lon);
             text_pos = src == ACARS_POS_TEXT;

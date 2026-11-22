@@ -48,6 +48,17 @@ int main(int argc, char **argv)
           't', 45.36, -96.296667);
     check("POS report, minutes of 60 or more", "H1",
           "POSN46647W101478,KSEA", '-', 0, 0);
+    /* Frontier's label 21 report, in decimal degrees */
+    check("POS report in decimal degrees", "21",
+          "POSN 32.650W 85.875, 105,025348,25536,28955,   23,-27,031342,KATL", 't', 32.65, -85.875);
+    check("POS report in decimal degrees, no spaces", "H1",
+          "POSS33.912E151.177,123", 't', -33.912, 151.177);
+    check("decimal degrees need a decimal point", "21",
+          "POSN 32650W 85875, 105", '-', 0, 0);
+    /* WN2235's intent list: points ahead, not a position */
+    check("intent list ignored", "H1",
+          "IDL0,,,N33208W086076.0,,,N32027W085167,3300,025729.0,,,N30543W084336,3300,030754.0",
+          '-', 0, 0);
     check("label 20 degrees and minutes", "20",
           "RPT N33521W084123 FL350", 't', 33.868333, -84.205);
     check("tagged LAT/LON", "H1",
