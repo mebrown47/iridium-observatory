@@ -56,6 +56,17 @@ int main(int argc, char **argv)
     check("decimal degrees need a decimal point", "21",
           "POSN 32650W 85875, 105", '-', 0, 0);
     /* WN2235's intent list: points ahead, not a position */
+    /* Southwest intent-list blocks after the first, without IDL0 */
+    check("intent list block without IDL ignored", "H1",
+          "3,1182,051636.0,,,N34558W089487,868,051818.0,R,249,N34572W089515,832,051852.0,,,N35001W089",
+          '-', 0, 0);
+    check("intent list block, times without tenths", "H1",
+          "39.0,,,N28528W081399,908,164232.0,L,724,N28475W081321,700,164421.A,,,N28470W081312,700,164",
+          '-', 0, 0);
+    check("one coordinate with altitude and time is still a position", "H1",
+          "RPT N33521W084123,350,120000 OK", 't', 33.868333, -84.205);
+    check("predicted-winds request ignored", "H1",
+          "REQPWI/WQ390.340.300.240:N30506W084400.THRTL.HEVVN/DQ370/WRKTPA.KMCO1BBC", '-', 0, 0);
     check("intent list ignored", "H1",
           "IDL0,,,N33208W086076.0,,,N32027W085167,3300,025729.0,,,N30543W084336,3300,030754.0",
           '-', 0, 0);

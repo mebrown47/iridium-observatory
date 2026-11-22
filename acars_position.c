@@ -283,6 +283,40 @@ static int pos_report_decimal(const char *p, double *lat, double *lon)
     return 1;
 }
 
+/* A list of points ahead with the altitude and time expected at each:
+ * two or more [NS]DDMMm[EW]DDDMMm entries each followed by ",ALT,HHMMSS".
+ * Southwest sends these over several blocks that libacars does not join,
+ * so only the first carries the IDL0 start; a later one reads
+ * "3,1182,051636.0,,,N34558W089487,868,051818.0,R,249,N34572W089515,832,..."
+ * and its points lie up to 500 km ahead of the aircraft. One such entry
+ * alone is not taken for a list. */
+static int trajectory_list(const char *t)
+{
+    int entries = 0;
+    for (const char *p = t; *p; p++) {
+        if (*p != 'N' && *p != 'S')
+            continue;
+        int i = 1;
+        while (i <= 5 && p[i] >= '0' && p[i] <= '9') i++;
+        if (i != 6 || (p[6] != 'E' && p[6] != 'W'))
+            continue;
+        for (i = 7; i <= 12 && p[i] >= '0' && p[i] <= '9'; i++) ;
+        if (i != 13 || p[13] != ',')
+            continue;
+        const char *q = p + 14;
+        int alt = 0;
+        while (*q >= '0' && *q <= '9' && alt < 7) { q++; alt++; }
+        if (!alt || *q != ',')
+            continue;
+        q++;
+        int hms = 0;
+        while (q[hms] >= '0' && q[hms] <= '9') hms++;
+        if (hms == 6 && ++entries >= 2)
+            return 1;
+    }
+    return 0;
+}
+
 static int pos_report(const char *p, double *lat, double *lon)
 {
     if (pos_report_decimal(p, lat, lon))
@@ -342,7 +376,14 @@ int acars_extract_text_position(const char *label, const char *text,
          * expects to reach them, not where it is. */
         if (strncmp(t, "IDL", 3) == 0)
             return 0;
+        /* A predicted-winds request names route points ahead
+         * (REQPWI/WQ390...:N30506W084400.THRTL...), not the aircraft's. */
+        if (strncmp(t, "REQPWI", 6) == 0)
+            return 0;
     }
+    /* The later blocks of an intent list, without its IDL start */
+    if (trajectory_list(text))
+        return 0;
 
     /* Labels known to carry current aircraft position in text:
      *   H1  - position/met report (POS preamble)
