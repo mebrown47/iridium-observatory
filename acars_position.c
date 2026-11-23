@@ -317,6 +317,62 @@ static int trajectory_list(const char *t)
     return 0;
 }
 
+/* A snapshot report: a line opening with a time written HH.MM.SS and a
+ * two-letter flight phase, as in Southwest's engine and performance
+ * reports ("74102,8319,B737-800,...\r\n02.51.19,CR,0538,37012,258.3,.796,
+ * -50.3,-21.7,N3347.2,W08527.2,145040"; also 7T217, 84101, 82740 and the
+ * phases DC, ER). The position is the aircraft's when the snapshot was
+ * taken, often long before it is sent: against OpenSky, 89% of them were
+ * more than 20 km from the aircraft at the time of the message (median
+ * 57 km). */
+static int snapshot_report(const char *t)
+{
+    for (const char *p = t; *p; p++) {
+        if (p != t && p[-1] != '\n' && p[-1] != '\r')
+            continue;
+        const char *q = p;
+        while (*q == ' ' || *q == '\t')
+            q++;
+        static const char shape[] = "99.99.99,AA,";
+        int i = 0;
+        for (; shape[i]; i++) {
+            const char c = q[i];
+            if (shape[i] == '9' ? !(c >= '0' && c <= '9')
+                : shape[i] == 'A' ? !(c >= 'A' && c <= 'Z') : c != shape[i])
+                break;
+        }
+        if (!shape[i])
+            return 1;
+    }
+    return 0;
+}
+
+/* A point of an intent or forecast list: a time with tenths, three commas,
+ * then packed coordinates ("051636.0,,,N34558W089487" or
+ * "024419.1,,,N27585W082320"). The later blocks of an IDL list carry these
+ * without the IDL start, sometimes one point to a block, which
+ * trajectory_list() needs two of; their points are the route ahead, often
+ * the destination's approach. */
+static int forecast_point(const char *t)
+{
+    for (const char *p = t; *p; p++) {
+        int i = 0;
+        while (i < 6 && p[i] >= '0' && p[i] <= '9') i++;
+        if (i != 6 || p[6] != '.' || !p[7] || p[8] != ',' || p[9] != ',' || p[10] != ',')
+            continue;
+        const char *q = p + 11;
+        if (*q != 'N' && *q != 'S')
+            continue;
+        for (i = 1; i <= 5 && q[i] >= '0' && q[i] <= '9'; i++) ;
+        if (i != 6 || (q[6] != 'E' && q[6] != 'W'))
+            continue;
+        for (i = 7; i <= 12 && q[i] >= '0' && q[i] <= '9'; i++) ;
+        if (i == 13)
+            return 1;
+    }
+    return 0;
+}
+
 /* "/?AAAAAAA.III." - a 7-character ground address and a 3-character
  * message type (AT1, CR1, ADS, DIS, ...) */
 static int fans_message(const char *t)
@@ -401,7 +457,10 @@ int acars_extract_text_position(const char *label, const char *text,
             return 0;
     }
     /* The later blocks of an intent list, without its IDL start */
-    if (trajectory_list(text))
+    if (trajectory_list(text) || forecast_point(text))
+        return 0;
+    /* A snapshot taken earlier in the flight, not the current position */
+    if (snapshot_report(text))
         return 0;
     /* A FANS-1/A message (CPDLC, ADS-C): a ground address and message type,
      * then the registration and the binary payload in hex, as in

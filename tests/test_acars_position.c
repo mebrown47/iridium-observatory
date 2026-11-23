@@ -125,6 +125,23 @@ int main(int argc, char **argv)
           "EHAM,KLAX,261903, 46.79,-101.63,37999,272,-142.4, 18200", 't', 46.79, -101.63);
     check("label 83 without a position", "83",
           "EHAM,KLAX,261903,FL380", '-', 0, 0);
+    check("snapshot report (engine/performance, cruise)", "H1",
+          "74102,8319,B737-800,261123,WN2235,KMDW,KTPA,0082,EN2605\r\n"
+          "02.51.19,CR,0538,37012,258.3,.796,-50.3,-21.7,N3347.2,W08527.2,145040\r\n5000,20.4",
+          '-', 0, 0);
+    check("snapshot report, descent phase", "H1",
+          "84101,1776,B737-8MAX,261021,WN0977,KTPA,KATL,0931,SM2502\r\n"
+          "20.45.27,DC,1051,33993,276.6,.793,-038.8,-08.8,N3134.6,W08439.0", '-', 0, 0);
+    check("forecast point in a later intent-list block", "H1",
+          "021546.1,,,N28249W081196,14,021733.1,,,N28258W081185:1100/PR1280,262,370,111,,57,65,260074,M51",
+          '-', 0, 0);
+    check("one forecast point, lettered tenths", "H1",
+          "715,024419.B,,,N27585W082320,3,025209:1100/PR1181,222,390,89,,44,78,322029,M50", '-', 0, 0);
+    check("position list with times kept (newest entry)", "H1",
+          "++76502,XXX,B737-800,261123,WN0645,KBNA,KMCO,2587,SW2501\r\n5\r\n"
+          "N3301.7,W08519.9,230115,36995,-51.0,264,068,CR,00000,0,\r\n"
+          "N3239.0,W08514.8,230118,36994,-51.0,264,068,CR,00000,0",
+          't', 32.65, -85.246667);
     check("other labels: coordinates inside the text ignored", "5Z",
           "RTE KSEA N46247W101478 HASTE", '-', 0, 0);
 
