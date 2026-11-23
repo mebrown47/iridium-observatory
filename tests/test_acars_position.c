@@ -67,6 +67,9 @@ int main(int argc, char **argv)
           "RPT N33521W084123,350,120000 OK", 't', 33.868333, -84.205);
     check("predicted-winds request ignored", "H1",
           "REQPWI/WQ390.340.300.240:N30506W084400.THRTL.HEVVN/DQ370/WRKTPA.KMCO1BBC", '-', 0, 0);
+    /* FANS-1/A: the hex payload after the registration reads as coordinates */
+    check("FANS-1/A message ignored", "H1", "USADCXA.AT1.N949WN64116E140066DB", '-', 0, 0);
+    check("FANS-1/A message with a leading slash ignored", "H1", "/ATLXXYA.ADS.N123AB0711N33521W084123", '-', 0, 0);
     check("intent list ignored", "H1",
           "IDL0,,,N33208W086076.0,,,N32027W085167,3300,025729.0,,,N30543W084336,3300,030754.0",
           '-', 0, 0);

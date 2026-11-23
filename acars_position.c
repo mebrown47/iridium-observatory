@@ -317,6 +317,25 @@ static int trajectory_list(const char *t)
     return 0;
 }
 
+/* "/?AAAAAAA.III." - a 7-character ground address and a 3-character
+ * message type (AT1, CR1, ADS, DIS, ...) */
+static int fans_message(const char *t)
+{
+    while (*t == ' ' || *t == '\r' || *t == '\n' || *t == '\t')
+        t++;
+    if (*t == '/')
+        t++;
+    for (int i = 0; i < 7; i++)
+        if (!((t[i] >= 'A' && t[i] <= 'Z') || (t[i] >= '0' && t[i] <= '9')))
+            return 0;
+    if (t[7] != '.')
+        return 0;
+    for (int i = 8; i < 11; i++)
+        if (!((t[i] >= 'A' && t[i] <= 'Z') || (t[i] >= '0' && t[i] <= '9')))
+            return 0;
+    return t[11] == '.';
+}
+
 static int pos_report(const char *p, double *lat, double *lon)
 {
     if (pos_report_decimal(p, lat, lon))
@@ -383,6 +402,12 @@ int acars_extract_text_position(const char *label, const char *text,
     }
     /* The later blocks of an intent list, without its IDL start */
     if (trajectory_list(text))
+        return 0;
+    /* A FANS-1/A message (CPDLC, ADS-C): a ground address and message type,
+     * then the registration and the binary payload in hex, as in
+     * "USADCXA.AT1.N949WN64116E140066DB". The hex can read as coordinates
+     * (N64116E140066 here, in Siberia); libacars decodes the real content. */
+    if (fans_message(text))
         return 0;
 
     /* Labels known to carry current aircraft position in text:
