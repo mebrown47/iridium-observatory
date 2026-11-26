@@ -878,11 +878,17 @@ static void *frame_consumer_thread(void *arg) {
  * `dec`/`dtype` come from the prior frame_decode() call (simplex IRA/IBC/MSG);
  * `ida_ok` from ida_decode(). Duplex/LCW types are recovered from the LCW
  * frame-type, IIP is confirmed by its CRC, and the simplex time-location
- * header is matched as a fallback. */
+ * header is matched as a fallback.
+ *
+ * A ring alert counts only on the ring-alert channel. Elsewhere in the band
+ * a burst can pass the IRA check by chance -- on the feeder ~450-550 "IRA" a
+ * minute against ~140 on the channel -- and is really another frame, so it
+ * goes on to be classified as one. */
 static const char *classify_frame_label(const demod_frame_t *demod,
                                         int dec, frame_type_t dtype, int ida_ok)
 {
-    if (dec && dtype == FRAME_IRA) return "IRA";
+    if (dec && dtype == FRAME_IRA && ira_on_ring_alert_channel(demod->center_frequency))
+        return "IRA";
     if (dec && dtype == FRAME_IBC) return "IBC";
     if (dec && dtype == FRAME_MSG) return "MSG";
     if (ida_ok)                    return "IDA";
@@ -955,7 +961,8 @@ static void *output_thread_fn(void *arg) {
                     web_map_count_type(ftype, demod->direction);
                     web_map_add_frame(demod->timestamp, demod->center_frequency,
                                       demod->magnitude, ftype, demod->direction,
-                                      (dec && decoded.type == FRAME_IRA) ?
+                                      (dec && decoded.type == FRAME_IRA &&
+                                       ira_on_ring_alert_channel(demod->center_frequency)) ?
                                           decoded.ira.sat_id : -1);
                 }
                 if (archive_enabled) {
@@ -968,9 +975,8 @@ static void *output_thread_fn(void *arg) {
                      * ~250 a minute, all day, and IBC sv_id isn't a
                      * satellite either. Both inflated "active satellites". */
                     int sat_id = -1;
-                    const double ra_hz = IR_BASE_FREQ + (246 + 0.5) * IR_CHANNEL_WIDTH;
                     if (dec && decoded.type == FRAME_IRA &&
-                        fabs(decoded.frequency - ra_hz) <= 100e3)
+                        ira_on_ring_alert_channel(decoded.frequency))
                         sat_id = decoded.ira.sat_id;
                     archive_count_frame(ftype,
                                         demod->direction == DIR_UPLINK,
