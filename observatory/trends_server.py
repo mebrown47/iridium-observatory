@@ -79,6 +79,20 @@ def running_version():
 
 
 VERSION = running_version()   # read once: the version of the code now running
+# Times (issue #12): aircraft data stays in UTC, as ACARS, flight plans and
+# ATIS are; every header clock shows UTC and the viewer's own local time,
+# and data times carry the local equivalent as a hover title. Defined once
+# here and added to every page's <head>, so the pages cannot drift apart.
+TIME_JS = """<script>
+function obsZ(d){return d.toISOString().substr(11,8)+"Z";}
+function obsLocal(d,o){try{return d.toLocaleString([],o);}catch(e){return d.toLocaleString();}}
+function obsClock(d){d=d||new Date();
+  return obsZ(d)+" \u00b7 "+obsLocal(d,{hour:"numeric",minute:"2-digit",timeZoneName:"short"});}
+function obsUTCDate(sec){return new Date(sec*1000).toISOString().slice(0,10);}
+function obsTitle(sec){return "your local time: "+obsLocal(new Date(sec*1000),
+  {year:"numeric",month:"short",day:"numeric",hour:"numeric",minute:"2-digit",second:"2-digit",timeZoneName:"short"});}
+</script>
+"""
 FOOTER = ('<footer style="color:var(--dim,#8b98a5);font-size:11.5px;text-align:center;'
           'margin:18px 0 22px"><a href="https://github.com/mebrown47/iridium-observatory/releases" '
           'target="_blank" rel="noopener" style="color:inherit;text-decoration:none">'
@@ -657,6 +671,9 @@ class Handler(BaseHTTPRequestHandler):
             head, sep, tail = body.rpartition("</body>")
             if sep:
                 body = head + FOOTER + sep + tail
+            head, sep, tail = body.partition("</head>")
+            if sep:
+                body = head + TIME_JS + sep + tail
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(code)
@@ -1010,8 +1027,7 @@ async function load(){
       st.innerHTML='<span class="dot" style="background:var(--warn)"></span>'
         +d.error;return;}
     render(d);
-    st.innerHTML='<span class="dot"></span>updated '+
-      new Date().toLocaleTimeString();
+    st.innerHTML='<span class="dot"></span>updated '+obsClock();
   }catch(e){st.innerHTML='<span class="dot" style="background:var(--warn)">'
     +'</span>fetch failed';}
 }
@@ -1289,8 +1305,7 @@ async function load(){
       st.innerHTML='<span class="dot" style="background:var(--warn)"></span>'
         +esc(DATA.error);return;}
     render();
-    st.innerHTML='<span class="dot"></span>updated '+
-      new Date().toLocaleTimeString();
+    st.innerHTML='<span class="dot"></span>updated '+obsClock();
   }catch(e){st.innerHTML='<span class="dot" style="background:var(--warn)">'
     +'</span>fetch failed';}
 }
@@ -1348,7 +1363,7 @@ function renderMsgs(){
     if(m.has_cpdlc)body='<span style="color:var(--hot)">◆ CPDLC</span> '+body;
     else if(m.has_adsc)body='<span style="color:var(--warn)">◆ ADS-C</span> '+body;
     else if(!m.txt)body='<span class="n">—</span>';
-    return '<tr><td class="mono n">'+ts(m.t)+'</td><td class="mono">'+
+    return '<tr><td class="mono n" title="'+obsTitle(m.t)+'">'+ts(m.t)+'</td><td class="mono">'+
       esc(m.reg)+'</td><td>'+esc(m.flt)+'</td><td><span class="dir '+
       esc(m.dir)+'">'+esc(m.dir)+'</span></td><td class="mono">'+esc(m.lbl)+
       '</td><td>'+body+'</td></tr>';}).join("");
@@ -1366,7 +1381,7 @@ function renderCpdlc(){
       '<span class="reg">'+esc(c.reg||"—")+'</span>'+
       (c.flt?'<span class="flt">'+esc(c.flt)+'</span>':'')+
       '<span class="dir '+esc(c.dir)+'">'+esc(c.dir)+'</span>'+
-      '<span class="ts">'+ts(c.t)+' UTC</span></div>'+
+      '<span class="ts" title="'+obsTitle(c.t)+'">'+ts(c.t)+' UTC</span></div>'+
       (c.summary?'<div class="sum">'+esc(c.summary)+'</div>':'')+
       (c.txt?'<div class="txt">'+esc(c.txt)+'</div>':'')+
       (dj?'<details><summary>full decode</summary><pre>'+esc(dj)+
@@ -1408,7 +1423,7 @@ function renderAdsc(){
       '<span class="reg">'+esc(a.reg||"—")+'</span>'+
       (a.flt?'<span class="flt">'+esc(a.flt)+'</span>':'')+
       '<span class="dir '+esc(a.dir)+'">'+esc(a.dir)+'</span>'+kinds+
-      '<span class="ts">'+ts(a.t)+' UTC</span></div>'+pos+
+      '<span class="ts" title="'+obsTitle(a.t)+'">'+ts(a.t)+' UTC</span></div>'+pos+
       (a.summary?'<div class="sum">'+esc(a.summary)+'</div>':'')+
       (a.txt?'<div class="txt">'+esc(a.txt)+'</div>':'')+
       (dj?'<details><summary>full decode</summary><pre>'+esc(dj)+
@@ -1658,8 +1673,7 @@ async function load(){
     facets.className="facets";
     LAST=d;
     render(d);
-    st.innerHTML='<span class="dot"></span>updated '+
-      new Date().toLocaleTimeString();
+    st.innerHTML='<span class="dot"></span>updated '+obsClock();
   }catch(e){
     st.innerHTML='<span class="dot" style="background:var(--warn)"></span>'+
       'fetch failed';
@@ -1998,14 +2012,14 @@ function side(d){
   h+=card("Ambiguous",dl?Math.round(100*s.ambiguous/dl)+"%":"—","left out: two satellites fit");
   h+=card("Sky cells",shown,"of 648 with enough bursts");
   h+=card("Receiver offset",d.rx_offset_hz!=null?(d.rx_offset_hz>=0?"+":"")+Math.round(d.rx_offset_hz)+" Hz":"—","from ring alerts");
-  if(d.first_data)h+=card("Data since",new Date(d.first_data*1000).toLocaleDateString(),"");
+  if(d.first_data)h+=card("Data since",obsUTCDate(d.first_data),"UTC");
   document.getElementById("side").innerHTML=h;
 }
 async function load(){
   try{
     const d=await (await fetch("/api/coverage?hours="+WIN)).json();
     LAST=d;draw(d);side(d);
-    document.getElementById("status").textContent="updated "+new Date().toLocaleTimeString();
+    document.getElementById("status").textContent="updated "+obsClock();
   }catch(e){document.getElementById("status").textContent="fetch failed";}
 }
 document.getElementById("win").onclick=e=>{const b=e.target.closest("button");if(!b)return;
@@ -2131,7 +2145,7 @@ function el(tag,attrs,txt){const e=document.createElementNS(NS,tag);
   for(const k in attrs)if(attrs[k]!=null)e.setAttribute(k,attrs[k]);if(txt!=null)e.textContent=txt;return e;}
 function esc(s){return (s==null?"":""+s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
 function card(k,v,sub){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+(sub?' <small>'+sub+'</small>':'')+'</div></div>';}
-function ago(t){return t?new Date(t*1000).toLocaleDateString():"";}
+function ago(t){return t?obsUTCDate(t)+" UTC":"";}
 function diagram(d){
   const host=document.getElementById("diagram");host.innerHTML="";
   if(!d.pairs.length){host.innerHTML='<div class="empty">No handoffs in this window yet.</div>';return;}
@@ -2184,7 +2198,7 @@ async function load(){
       card("Messages",g.messages,"content")+card("Handoffs",d.pairs.reduce((a,p)=>a+p.messages,0),"in window")+
       card("Authorities",g.facility+g.unit,"facilities and units");
     diagram(d);table(d);
-    document.getElementById("status").textContent="updated "+new Date().toLocaleTimeString();
+    document.getElementById("status").textContent="updated "+obsClock();
   }catch(e){document.getElementById("status").textContent="fetch failed";}
 }
 /* ---- one aircraft ---- */
@@ -2493,7 +2507,7 @@ function render(d){
   document.getElementById("rows").innerHTML=d.rows.length?d.rows.map(r=>{
     const reg=(r.reg||"").replace(/^\./,"");
     const badges=(r.cpdlc?'<span class="badge cp">CPDLC</span>':"")+(r.adsc?'<span class="badge ad">ADS-C</span>':"");
-    return '<tr><td class="ts">'+utc(r.t)+'</td><td class="reg">'+
+    return '<tr><td class="ts" title="'+obsTitle(r.t)+'">'+utc(r.t)+'</td><td class="reg">'+
       (reg?'<a href="/graph#aircraft='+encodeURIComponent(reg)+'" title="aircraft history">'+esc(reg)+'</a>':'–')+
       (r.flt?'<div class="flt">'+esc(r.flt)+'</div>':'')+'</td><td><span class="dir '+esc(r.dir)+'">'+esc(r.dir)+
       '</span></td><td class="lbl">'+esc(r.lbl)+badges+'</td><td class="txt">'+textCell(r,q)+'</td></tr>';
@@ -2697,7 +2711,7 @@ function list(){
   const L2=$("list");
   const shown=$("only").checked?DATA.aircraft.filter(a=>Object.keys(a.context).length):DATA.aircraft;
   if(!shown.length){L2.innerHTML='<div class="empty">'+(DATA.aircraft.length?'None of the '+DATA.aircraft.length+' aircraft heard in this window said where they are or are going.':'No aircraft heard in this window.')+'</div>';return;}
-  L2.innerHTML=shown.slice(0,400).map(a=>'<div class="ac'+(SEL===a.reg?' sel':'')+'" data-reg="'+esc(a.reg)+'"><div class="top"><span class="reg"><a href="/aviation?tail='+encodeURIComponent(a.reg)+'">'+esc(a.reg)+'</a>'+(a.flight?' <span style="color:var(--dim);font-weight:400">'+esc(a.flight)+'</span>':'')+(a.type?' <span style="color:var(--dim);font-weight:400">'+esc(a.type)+'</span>':'')+'</span><span class="ago">'+a.msgs+' msg · '+ago(a.last)+'</span></div>'+lines(a)+'</div>').join("");
+  L2.innerHTML=shown.slice(0,400).map(a=>'<div class="ac'+(SEL===a.reg?' sel':'')+'" data-reg="'+esc(a.reg)+'"><div class="top"><span class="reg"><a href="/aviation?tail='+encodeURIComponent(a.reg)+'">'+esc(a.reg)+'</a>'+(a.flight?' <span style="color:var(--dim);font-weight:400">'+esc(a.flight)+'</span>':'')+(a.type?' <span style="color:var(--dim);font-weight:400">'+esc(a.type)+'</span>':'')+'</span><span class="ago" title="last heard '+obsZ(new Date(a.last*1000))+', '+obsTitle(a.last)+'">'+a.msgs+' msg · '+ago(a.last)+'</span></div>'+lines(a)+'</div>').join("");
 }
 function focus(reg){
   SEL=(SEL===reg)?null:reg; draw(); list();
@@ -2722,7 +2736,7 @@ async function load(){
     $("count").textContent=n+" aircraft · "+withSomething+" with context";
     $("lab-est").style.display=d.estimates_enabled?"":"none"; $("leg-est").style.display=d.estimates_enabled?"":"none";
     $("estnote").textContent=d.estimates_enabled?"":"Estimated positions are off: checked against real VDL2 positions, they were not reliable enough to draw.";
-    $("status").textContent="updated "+hhmm(d.now)+(d.station?"":" · station position not fitted yet");
+    $("status").textContent="updated "+obsClock(new Date(d.now*1000))+(d.station?"":" · station position not fitted yet");
     draw(); list();
   }catch(e){$("status").textContent="error: "+e.message;}
 }
