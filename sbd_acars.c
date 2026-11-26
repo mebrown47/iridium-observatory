@@ -50,7 +50,7 @@
 /* ---- Configuration ---- */
 
 int acars_json = 0;
-extern int quiet;           /* --quiet: no message text on stdout */
+extern int quiet_mode;      /* --quiet: no message text on stdout */
 extern int acars_enabled;
 extern int web_enabled;
 extern int archive_enabled;
@@ -641,7 +641,7 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
         free(ir_node);
     }
 
-    if (!acars_json && !quiet) {
+    if (!acars_json && !quiet_mode) {
         /* Text mode: timestamp + direction header, then libacars text */
         char ts_buf[32];
         format_timestamp(timestamp, ts_buf, sizeof(ts_buf));
@@ -1320,7 +1320,7 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
     if (acars_json || udp_count > 0)
         acars_output_json(stripped, len, ul, timestamp, frequency, magnitude,
                           hdr, hdr_len);
-    if (!acars_json && !quiet)
+    if (!acars_json && !quiet_mode)
         acars_output_text(stripped, len, ul, timestamp, frequency, magnitude,
                           hdr, hdr_len, errors);
 
@@ -1635,7 +1635,7 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
 static void sbd_output_raw(const uint8_t *data, int len, int ul,
                             uint64_t timestamp, double frequency)
 {
-    if (acars_enabled || quiet)
+    if (acars_enabled || quiet_mode)
         return;
 
     char ts_buf[32];

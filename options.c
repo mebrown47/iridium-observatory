@@ -103,7 +103,7 @@ extern int bias_tee;
 extern int use_gpu;
 extern int stall_exit_s;
 extern int stats_interval;
-extern int quiet;
+extern int quiet_mode;
 extern int full_burst_window;
 extern int legacy_frontend;
 extern int simd_mode;
@@ -934,7 +934,7 @@ void parse_options(int argc, char **argv) {
                 break;
 
             case OPT_QUIET:
-                quiet = 1;
+                quiet_mode = 1;
                 break;
 
             case OPT_STATS_INTERVAL: {
