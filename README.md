@@ -7,11 +7,11 @@ worked out from the satellites alone, typically to within a few km. It keeps a d
 long-run dashboards, and it can feed aircraft messages and positions to aggregators
 such as airframes.io.
 
-> **Latest release: [v1.2.1](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.2.1)** (16 November 2026).
-> Already installed? Run `./install.sh --update`: v1.2.1 stops placing aircraft at the beam
-> of the last ring alert heard, which was often 1,000 km or more from the aircraft, on the
-> map and in the SBS feed. Since v1.2 the receiver does the same decoding for about a
-> quarter of the CPU.
+> **Latest release: [v1.3](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.3)** (26 November 2026).
+> Already installed? Run `./install.sh --update`: v1.3 adds a **Flights** page to the
+> Observatory (what aircraft messages say about where they are or are going, drawn only as
+> far as the messages support), reads aircraft position reports correctly, and shows UTC and
+> your local time together on every page.
 
 It is a fork of [iridium-sniffer](https://github.com/alphafox02/iridium-sniffer) and keeps
 that project's receiver engine at its core. [How it differs](#how-it-differs-from-iridium-sniffer)
@@ -195,7 +195,7 @@ and port status, the live pages' state, and recent logs, into one file. The repo
 includes your settings and estimated location, so check it before posting it publicly.
 
 **Which version am I running?** It's at the foot of every page, and
-`iridium-sniffer --version` prints it. A release shows as `v1.2`; a build from later
+`iridium-sniffer --version` prints it. A release shows as `v1.3`; a build from later
 commits on main shows as, for example, `v1.2-3-g1a2b3c4` (3 commits after v1.2).
 
 **No satellites on the Doppler page: "TLE download failed".** The Observatory needs orbit
