@@ -103,6 +103,7 @@ extern int bias_tee;
 extern int use_gpu;
 extern int stall_exit_s;
 extern int stats_interval;
+extern int quiet;
 extern int full_burst_window;
 extern int legacy_frontend;
 extern int simd_mode;
@@ -217,6 +218,8 @@ static void usage(int exitcode) {
 "                             service restarts it (default 300, 0 = never)\n"
 "    --stats-interval=SECONDS  print the status line this often (default 1,\n"
 "                             0 = never); 60 keeps a service's journal small\n"
+"    --quiet                 no ACARS/SBD message text or POSITION lines; data\n"
+"                             outputs, warnings and the status line unchanged\n"
 "    --chase[=N]             enable Chase soft-decision BCH decoder (experimental)\n"
 "                             N = flip-bits count, 0-7 (default 5 = 31 combos).\n"
 "                             0 or omitting --chase disables (default).\n"
@@ -407,6 +410,7 @@ void parse_options(int argc, char **argv) {
         OPT_WORKERS,
         OPT_STALL_EXIT,
         OPT_STATS_INTERVAL,
+        OPT_QUIET,
     };
 
     static const struct option longopts[] = {
@@ -480,6 +484,7 @@ void parse_options(int argc, char **argv) {
         { "workers",        required_argument, NULL, OPT_WORKERS },
         { "stall-exit",     required_argument, NULL, OPT_STALL_EXIT },
         { "stats-interval", required_argument, NULL, OPT_STATS_INTERVAL },
+        { "quiet",          no_argument,       NULL, OPT_QUIET },
         { NULL,             0,                 NULL, 0 }
     };
 
@@ -926,6 +931,10 @@ void parse_options(int argc, char **argv) {
                 stall_exit_s = atoi(optarg);
                 if (stall_exit_s < 0 || stall_exit_s > 86400)
                     errx(1, "--stall-exit must be 0-86400 seconds (0 = never)");
+                break;
+
+            case OPT_QUIET:
+                quiet = 1;
                 break;
 
             case OPT_STATS_INTERVAL: {

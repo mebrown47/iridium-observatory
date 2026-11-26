@@ -920,6 +920,8 @@ Detection options:
                              service restarts it (default 300, 0 = never)
     --stats-interval=SECONDS  print the status line this often (default 1,
                              0 = never); 60 keeps a service's journal small
+    --quiet                 no ACARS/SBD message text or POSITION lines; data
+                             outputs, warnings and the status line unchanged
     --chase[=N]             enable Chase soft-decision BCH decoder (experimental)
                              N = flip-bits count, 0-7 (default 5 = 31 combos).
                              0 or omitting --chase disables (default).
@@ -1025,6 +1027,7 @@ Everything else above is inherited from iridium-sniffer.
 | `--full-burst-window` | Demodulate each burst's whole 16 ms hold-open tail, as gr-iridium does, instead of cutting it to the frame |
 | `--stall-exit=SECONDS` | Exit with code 3 when the live radio has been silent this long, so the service restarts it (default 300, 0 = never) |
 | `--stats-interval=SECONDS` | Print the status line this often, its rates covering the whole interval, and `POSITION:` lines at most this often (default 1, 0 = neither). Only the printing changes: the stall watchdog and Doppler positioning still run every second. The installer sets 60, so a service writes about one journal line a minute instead of one a second; useful on an SD card |
+| `--quiet` | No routine message text: the ACARS and SBD text a station prints for each message, and the `POSITION:` lines. Data outputs (RAW, `--acars-json`, the feeds, the web pages, the archive) and warnings are unchanged, and the status line still follows `--stats-interval`. With `--stats-interval=60` a service writes about one journal line a minute; with `--stats-interval=0` as well, only warnings and errors |
 | `--archive[=DIR]` | Append-only daily JSONL archive of frame-type counts and decoded messages, read by the Observatory |
 | `--uw-reject=T` | Drop burst-detector false positives by unique-word sync score (default 0.70) |
 | `--sync-gate=T` | Off by default. Skip demodulating downlink bursts whose sync correlation is below T; saves CPU on false positives at a small cost in marginal frames (see Low-Power Hardware) |

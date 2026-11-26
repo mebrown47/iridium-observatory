@@ -266,6 +266,11 @@ int stall_exit_s = 300;
  * Doppler positioning still run every second. A service logging a line a
  * second wears an SD card for nothing (#11). */
 int stats_interval = 1;
+/* --quiet: none of the routine text a service would log -- ACARS and SBD
+ * message text, POSITION lines. Data outputs (RAW, --acars-json, feeds,
+ * the web pages, the archive) and warnings are unchanged; the status line
+ * follows --stats-interval. For a station on an SD card (#11). */
+int quiet = 0;
 static volatile sig_atomic_t stalled = 0;
 pid_t self_pid;
 
@@ -1208,7 +1213,7 @@ static void *stats_thread_fn(void *arg) {
          * every 10 s, or every stats interval if that is longer */
         if (position_enabled && (int)elapsed % 10 == 0 && elapsed > 5) {
             int every = stats_interval > 10 ? stats_interval : 10;
-            int say = stats_interval > 0 && (int)elapsed % every < 10;
+            int say = !quiet && stats_interval > 0 && (int)elapsed % every < 10;
             doppler_solution_t sol;
             if (doppler_pos_solve(&sol)) {
                 if (say)
