@@ -322,8 +322,16 @@ static void hub_emit_acars(const char *mode, const char *reg, char ack,
         hub_buf_append(",\"flight\":\"%s\"", esc_flt);
     }
     if (msg_num && msg_num[0]) {
-        char esc_mn[16];
-        hub_json_escape(msg_num, (int)strlen(msg_num), esc_mn, sizeof(esc_mn));
+        /* All four characters, as iridium-toolkit sends them: the message
+         * number and its block letter ("S07" + 'A' = "S07A"; issue #7) */
+        char mn[8], esc_mn[16];
+        snprintf(mn, sizeof(mn), "%.3s", msg_num);
+        if (msg_num_seq) {
+            size_t l = strlen(mn);
+            mn[l] = msg_num_seq;
+            mn[l + 1] = '\0';
+        }
+        hub_json_escape(mn, (int)strlen(mn), esc_mn, sizeof(esc_mn));
         hub_buf_append(",\"message_number\":\"%s\"", esc_mn);
     }
 
@@ -331,7 +339,8 @@ static void hub_emit_acars(const char *mode, const char *reg, char ack,
     hub_buf_append("}");
 
     /* top-level freq, level, header */
-    hub_buf_append(",\"freq\":%.1f", frequency);
+    /* whole hertz, as iridium-toolkit prints it */
+    hub_buf_append(",\"freq\":%.0f", frequency);
     hub_buf_append(",\"level\":%.2f", (double)magnitude);
     hub_buf_append(",\"header\":\"%s\"", hdr_hex);
 
