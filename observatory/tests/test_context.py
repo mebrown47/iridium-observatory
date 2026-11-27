@@ -109,11 +109,15 @@ check(row == (now - 300, "N918LB", 31.4, -86.4, "text"), "rollup stores acpos ev
 con.execute("INSERT INTO messages(t,reg,flt,dir,lbl,txt) VALUES(?,?,?,?,?,?)", (now - 600, "N745QS", "", "DL", "H1", fpn))
 con.execute("INSERT INTO messages(t,reg,flt,dir,lbl,txt) VALUES(?,?,?,?,?,?)", (now - 300, ".N918LB", "AB12", "UL", "20", "x"))
 con.execute("INSERT INTO messages(t,reg,flt,dir,lbl,txt) VALUES(?,?,?,?,?,?)", (now - 90000, "N1OLD", "", "DL", "H1", fpn))
+con.execute("INSERT INTO messages(t,reg,flt,dir,lbl,txt) VALUES(?,?,?,?,?,?)", (now - 200, "C-FPCA", "", "DL", "H1", "x"))
+con.execute("INSERT INTO messages(t,reg,flt,dir,lbl,txt) VALUES(?,?,?,?,?,?)", (now - 100, "CFPCA", "", "DL", "H1", "x"))
 con.commit()
 con.close()
 f = cx.build_flights(db, ref, hours=6, now=now, station=[31.4, -86.1])
 regs = {a["reg"]: a for a in f["aircraft"]}
-check(set(regs) == {"N745QS", "N918LB"}, "aircraft in the window only", sorted(regs))
+check(set(regs) == {"N745QS", "N918LB", "C-FPCA"}, "aircraft in the window only", sorted(regs))
+check(regs.get("C-FPCA", {}).get("msgs") == 2, "C-FPCA keeps its dash, and CFPCA is the same aircraft",
+      repr(regs.get("C-FPCA", {}).get("msgs")))
 check("plan" in regs.get("N745QS", {}).get("context", {}), "plan in the aircraft's context")
 nb = regs.get("N918LB", {}).get("context", {})
 check("reported" in nb and "heard" in nb, "reported position and heard-directly together", sorted(nb))

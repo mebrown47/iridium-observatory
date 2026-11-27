@@ -342,18 +342,24 @@ def build_flights(db_path, ref, hours=6, now=None, station=None,
 
     ac = {}
 
-    def entry(reg):
-        e = ac.get(reg)
+    def entry(key, raw):
+        """One aircraft per normalized registration (key, for matching); it
+        is shown as its messages spelled it -- C-FPCA, not CFPCA -- and the
+        page's history and message links need that stored form too."""
+        shown = (raw or "").strip().lstrip(".") or key
+        e = ac.get(key)
         if e is None:
-            e = ac[reg] = {"reg": reg, "flight": "", "last": 0, "msgs": 0,
-                           "items": [], "type": ref.types.get(reg, "")}
+            e = ac[key] = {"reg": shown, "flight": "", "last": 0, "msgs": 0,
+                           "items": [], "type": ref.types.get(key, "")}
+        elif "-" in shown and "-" not in e["reg"]:
+            e["reg"] = shown
         return e
 
     for mid, t, reg, flt, d, lbl, txt in rows:
         r = norm_reg(reg)
         if not r:
             continue
-        e = entry(r)
+        e = entry(r, reg)
         e["msgs"] += 1
         e["last"] = max(e["last"], t)
         if flt:
@@ -364,7 +370,7 @@ def build_flights(db_path, ref, hours=6, now=None, station=None,
     for t, reg, la, lo, alt, src in pos:
         r = norm_reg(reg)
         if r and la is not None and lo is not None:
-            e = entry(r)
+            e = entry(r, reg)
             e["last"] = max(e["last"], t)
             e["items"].append({"kind": "reported", "t": t, "lat": la, "lon": lo,
                                "alt": alt, "src": src})
